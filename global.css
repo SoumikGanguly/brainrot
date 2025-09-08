@@ -1,0 +1,21 @@
+@import 'tailwindcss/base';
+@import 'tailwindcss/components';
+@import 'tailwindcss/utilities';
+
+.brain-healthy {
+  filter: hue-rotate(120deg) saturate(1.2) brightness(1.1);
+}
+
+.brain-warning {
+  filter: hue-rotate(60deg) saturate(0.8) brightness(0.9);
+}
+
+.brain-critical {
+  filter: hue-rotate(0deg) saturate(0.6) brightness(0.7);
+  animation: decay 2s ease-in-out infinite alternate;
+}
+
+@keyframes decay {
+  0% { opacity: 1; transform: scale(1); }
+  100% { opacity: 0.8; transform: scale(0.98); }
+}
