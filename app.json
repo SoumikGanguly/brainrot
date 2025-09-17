@@ -41,7 +41,16 @@
           "backgroundColor": "#ffffff"
         }
       ],
-      "expo-sqlite"
+      "expo-sqlite",
+      [
+        "./plugins/withUsageStats",
+        "expo-build-properties",
+        {
+          "android": {
+            "extraMavenRepos": ["https://maven.google.com"]
+          }
+        }
+      ]
     ],
     "experiments": {
       "typedRoutes": true

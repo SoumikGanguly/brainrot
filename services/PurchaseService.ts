@@ -1,56 +1,83 @@
-import Purchases from 'react-native-purchases';
+import { database } from './database';
 
-export class PurchaseService {
-  private static readonly LIFETIME_PRODUCT_ID = 'brainrot_lifetime';
-
-  static async initialize(): Promise<void> {
-    try {
-      // Configure RevenueCat
-      Purchases.setDebugLogsEnabled(true);
-      await Purchases.configure({
-        apiKey: 'your_revenuecat_api_key_here',
-      });
-    } catch (error) {
-      console.error('Error initializing purchases:', error);
+class PurchaseServiceClass {
+  async isPremium(): Promise<boolean> {
+    if (__DEV__) {
+      // In dev mode, check local storage or return false by default
+      const devPremium = await database.getMeta('dev_premium_status');
+      return devPremium === 'true';
     }
-  }
-
-  static async isPremium(): Promise<boolean> {
+    
+    // Production RevenueCat implementation
     try {
-      const customerInfo = await Purchases.getCustomerInfo();
-      return customerInfo.entitlements.active['premium'] !== undefined;
+      // Your actual RevenueCat implementation here
+      // const purchaserInfo = await Purchases.getPurchaserInfo();
+      // return purchaserInfo.entitlements.active.premium !== undefined;
+      return false;
     } catch (error) {
-      console.error('Error checking premium status:', error);
+      console.error('Error making purchase:', error);
+      return false;
+    }}
+
+
+  async purchaseLifetime(): Promise<boolean> {
+    if (__DEV__) {
+      // Simulate purchase in dev mode
+      await new Promise(resolve => setTimeout(resolve, 2000)); // Simulate network delay
+      await database.setMeta('dev_premium_status', 'true');
+      return true;
+    }
+
+    // Production RevenueCat implementation
+    try {
+      // Your actual RevenueCat purchase implementation here
+      // const purchaserInfo = await Purchases.purchasePackage(package);
+      // return purchaserInfo.entitlements.active.premium !== undefined;
+      return false;
+    } catch (error) {
+      console.error('Error making purchase:', error);
       return false;
     }
   }
 
-  static async purchaseLifetime(): Promise<boolean> {
-    try {
-      const offerings = await Purchases.getOfferings();
-      const lifetimeProduct = offerings.current?.availablePackages.find(
-        pkg => pkg.product.identifier === this.LIFETIME_PRODUCT_ID
-      );
-
-      if (!lifetimeProduct) {
-        throw new Error('Lifetime product not found');
+  async restorePurchases(): Promise<boolean> {
+    if (__DEV__) {
+      // In dev mode, simulate restore (could check a flag or always return false)
+      const hasDevPurchase = await database.getMeta('dev_premium_status');
+      if (hasDevPurchase === 'true') {
+        return true;
       }
-
-      const { customerInfo } = await Purchases.purchasePackage(lifetimeProduct);
-      return customerInfo.entitlements.active['premium'] !== undefined;
-    } catch (error) {
-      console.error('Error purchasing lifetime:', error);
       return false;
     }
-  }
 
-  static async restorePurchases(): Promise<boolean> {
+    // Production RevenueCat implementation
     try {
-      const customerInfo = await Purchases.restorePurchases();
-      return customerInfo.entitlements.active['premium'] !== undefined;
+      // Your actual RevenueCat restore implementation here
+      // const purchaserInfo = await Purchases.restorePurchases();
+      // return purchaserInfo.entitlements.active.premium !== undefined;
+      return false;
     } catch (error) {
       console.error('Error restoring purchases:', error);
       return false;
     }
   }
+
+  async initializePurchases(): Promise<void> {
+    if (__DEV__) {
+      console.log('PurchaseService: Skipping RevenueCat initialization in dev mode');
+      return;
+    }
+
+    // Production RevenueCat initialization
+    try {
+      // Your actual RevenueCat initialization here
+      // await Purchases.configure({
+      //   apiKey: 'your-revenuecat-api-key',
+      // });
+    } catch (error) {
+      console.error('Error initializing purchases:', error);
+    }
+  }
 }
+
+export const PurchaseService = new PurchaseServiceClass();
