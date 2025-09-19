@@ -1,17 +1,23 @@
 import { Ionicons } from '@expo/vector-icons';
 import { useFocusEffect } from '@react-navigation/native';
 import LottieView from 'lottie-react-native';
-import React, { useState } from 'react';
-import { Alert, ScrollView, Text, TouchableOpacity, View } from 'react-native';
+import React, { useEffect, useState } from 'react';
+import { Alert, AppState, Modal, Pressable, ScrollView, Text, TouchableOpacity, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
 import { PrimaryButton } from '../../components/Buttons';
 import { Card } from '../../components/Card';
-import { Header } from '../../components/Header';
 import { database } from '../../services/database';
+
 import { TrialService } from '../../services/TrialService';
 import { UsageService } from '../../services/UsageService';
+
+import { DailyResetService } from '@/services/DailyResetService';
+import { UsageMonitoringService } from '@/services/UsageMonitoringService';
+import { computeBrainScoreForMonitored } from '@/utils/brainScoreRunner';
+import { calculateBrainScore, getBrainScoreStatus } from '../../utils/brainScore';
 import { formatTime } from '../../utils/time';
+
 
 interface AppUsage {
   packageName: string;
@@ -22,11 +28,58 @@ interface AppUsage {
 export default function HomeScreen() {
   const [brainScore, setBrainScore] = useState(100);
   const [topApps, setTopApps] = useState<AppUsage[]>([]);
+  const [allApps, setAllApps] = useState<AppUsage[]>([]);
   const [totalScreenTime, setTotalScreenTime] = useState(0);
   const [trialInfo, setTrialInfo] = useState({ isActive: false, daysRemaining: 0, expired: false });
   const [loading, setLoading] = useState(true);
   const [hasUsagePermission, setHasUsagePermission] = useState(false);
   const [debugMessages, setDebugMessages] = useState<string[]>([]);
+  const [showAllAppsModal, setShowAllAppsModal] = useState(false);
+
+  useEffect(() => {
+
+    const cleanupAndInitialize = async () => {
+      try {
+        await database.cleanupDuplicateEntries();
+        const monitoringService = UsageMonitoringService.getInstance();
+        await monitoringService.initialize();
+      } catch (error) {
+        console.error('Failed to initialize:', error);
+      }
+    };
+
+    cleanupAndInitialize();
+
+    // Initialize monitoring service when app starts
+    const initializeMonitoring = async () => {
+      try {
+        const monitoringService = UsageMonitoringService.getInstance();
+        await monitoringService.initialize();
+      } catch (error) {
+        console.error('Failed to initialize usage monitoring:', error);
+      }
+    };
+
+    initializeMonitoring();
+
+    // Handle app state changes for monitoring
+    const handleAppStateChange = (nextAppState: string) => {
+      const monitoringService = UsageMonitoringService.getInstance();
+      
+      if (nextAppState === 'active') {
+        // App came to foreground
+        monitoringService.startMonitoring();
+      }
+      // Background handling is done in the service itself
+    };
+
+    const subscription = AppState.addEventListener('change', handleAppStateChange);
+
+    // Cleanup
+    return () => {
+      subscription?.remove();
+    };
+  }, []);
 
   const addDebugMessage = (message: string) => {
     console.log(message);
@@ -60,7 +113,7 @@ export default function HomeScreen() {
             hasPermission = await UsageService.forceRefreshPermission();
             addDebugMessage(`Force refresh result: ${hasPermission}`);
           }
-        } catch (refreshError: unknown) {
+        } catch {
           addDebugMessage('Force refresh failed, continuing with normal flow...');
         }
       }
@@ -98,6 +151,19 @@ export default function HomeScreen() {
     }
   };
 
+  const deduplicateUsageData = (data: AppUsage[]): AppUsage[] => {
+    const seen = new Map<string, AppUsage>();
+    
+    data.forEach(app => {
+      const existing = seen.get(app.packageName);
+      if (!existing || app.totalTimeMs > existing.totalTimeMs) {
+        seen.set(app.packageName, app);
+      }
+    });
+    
+    return Array.from(seen.values());
+  };
+
   const loadUsageDataFromNative = async () => {
     addDebugMessage('Fetching today\'s usage from native module...');
     
@@ -106,33 +172,28 @@ export default function HomeScreen() {
       addDebugMessage(`Received ${todayUsage.length} apps with usage data`);
       
       if (todayUsage.length === 0) {
-        addDebugMessage('No usage data received - this is normal for first run or no app usage');
         return [];
       }
 
-      // Log the raw data for debugging
-      todayUsage.forEach((app, index) => {
-        if (index < 3) { // Log top 3 apps
-          addDebugMessage(`${app.appName}: ${formatTime(app.totalTimeMs)}`);
-        }
-      });
-
-      // Save to database for offline access
+      // Deduplicate native data first
+      const deduplicatedUsage = deduplicateUsageData(todayUsage);
+      
+      // Save to database (this will replace existing entries due to UNIQUE constraint)
+      const today = new Date().toISOString().split('T')[0];
+      const dbUsageData = deduplicatedUsage.map(app => ({
+        ...app,
+        date: today
+      }));
+      
       try {
-        const today = new Date().toISOString().split('T')[0];
-        // Convert UsageService format to database format by adding the date field
-        const dbUsageData = todayUsage.map(app => ({
-          ...app,
-          date: today
-        }));
         await database.saveDailyUsage(today, dbUsageData);
-        addDebugMessage('Data saved to local database');
+        addDebugMessage(`Saved ${deduplicatedUsage.length} deduplicated apps to database`);
       } catch (dbError: unknown) {
         const errorMessage = dbError instanceof Error ? dbError.message : 'Unknown database error';
         addDebugMessage(`Database save failed: ${errorMessage}`);
       }
 
-      return todayUsage;
+      return deduplicatedUsage;
     } catch (error: unknown) {
       const errorMessage = error instanceof Error ? error.message : 'Unknown native fetch error';
       addDebugMessage(`Native fetch failed: ${errorMessage}`);
@@ -140,6 +201,38 @@ export default function HomeScreen() {
     }
   };
 
+  // Add this as a new function in your HomeScreen
+  const saveCurrentUsageData = async () => {
+    try {
+      if (UsageService.isNativeModuleAvailable()) {
+        const hasPermission = await UsageService.isUsageAccessGranted();
+        if (hasPermission) {
+          const todayUsage = await UsageService.getTodayUsage();
+          if (todayUsage.length > 0) {
+            const today = new Date().toISOString().split('T')[0];
+            const dbUsageData = todayUsage.map(app => ({
+              ...app,
+              date: today
+            }));
+            await database.saveDailyUsage(today, dbUsageData);
+            addDebugMessage('Background save completed');
+          }
+        }
+      }
+    } catch (error) {
+      console.log('Background save failed:', error);
+    }
+  };
+
+  // Add this useEffect to periodically save data
+  useEffect(() => {
+    const interval = setInterval(saveCurrentUsageData, 5 * 60 * 1000); // Save every 5 minutes
+    return () => clearInterval(interval);
+  }, []);
+
+  const dailyResetService = DailyResetService.getInstance();
+  dailyResetService.initialize();
+  
   const loadUsageDataFromDatabase = async () => {
     addDebugMessage('Loading data from local database...');
     
@@ -156,6 +249,40 @@ export default function HomeScreen() {
     }
   };
 
+  // Add this debug method to HomeScreen.tsx
+  const debugDuplicateIssue = async () => {
+    const today = new Date().toISOString().split('T')[0];
+    
+    // Check raw database entries
+    const rawEntries = await database.getDailyUsage(today);
+    console.log('=== RAW DATABASE ENTRIES ===');
+    rawEntries.forEach((entry, index) => {
+      console.log(`${index}: ${entry.packageName} - ${entry.appName} - ${entry.totalTimeMs}ms`);
+    });
+    
+    // Check for Instagram specifically
+    const instagramEntries = rawEntries.filter(e => e.packageName === 'com.instagram.android');
+    console.log('=== INSTAGRAM ENTRIES ===');
+    console.log(`Found ${instagramEntries.length} Instagram entries:`);
+    instagramEntries.forEach((entry, index) => {
+      console.log(`${index}: ${entry.totalTimeMs}ms - ${entry.appName}`);
+    });
+    
+    // Check what's in topApps state
+    console.log('=== TOP APPS STATE ===');
+    topApps.forEach((app, index) => {
+      console.log(`${index}: ${app.packageName} - ${app.appName} - ${app.totalTimeMs}ms`);
+    });
+    
+    // Check allApps state
+    const instagramInAllApps = allApps.filter(a => a.packageName === 'com.instagram.android');
+    console.log('=== INSTAGRAM IN ALL APPS ===');
+    console.log(`Found ${instagramInAllApps.length} Instagram entries in allApps:`);
+    instagramInAllApps.forEach((app, index) => {
+      console.log(`${index}: ${app.totalTimeMs}ms`);
+    });
+  };
+
   const loadHomeData = async () => {
     try {
       setLoading(true);
@@ -169,32 +296,88 @@ export default function HomeScreen() {
       // Step 2: Try to load usage data
       if (hasModule && hasPermission) {
         try {
-          usageData = await loadUsageDataFromNative();
-        } catch (error: unknown) {
+          let rawUsageData = await loadUsageDataFromNative();
+          // DEDUPLICATE HERE
+          usageData = deduplicateUsageData(rawUsageData);
+        } catch {
           addDebugMessage('Native failed, trying database fallback...');
-          usageData = await loadUsageDataFromDatabase();
+          let rawDbData = await loadUsageDataFromDatabase();
+          // DEDUPLICATE HERE TOO
+          usageData = deduplicateUsageData(rawDbData);
         }
       } else {
         addDebugMessage('Using database fallback (no native access)...');
-        usageData = await loadUsageDataFromDatabase();
+        let rawDbData = await loadUsageDataFromDatabase();
+        // DEDUPLICATE HERE AS WELL
+        usageData = deduplicateUsageData(rawDbData);
       }
 
       // Step 3: Process the data
-      const totalMs = usageData.reduce((sum, app) => sum + app.totalTimeMs, 0);
-      const allowedMs = 8 * 60 * 60 * 1000; // 8 hours
-      const score = Math.max(0, Math.round(100 - (totalMs / allowedMs) * 100));
-      
-      const topThreeApps = usageData
-        .filter(app => app.totalTimeMs > 0)
-        .sort((a, b) => b.totalTimeMs - a.totalTimeMs)
-        .slice(0, 3);
+      let monitoredPackages: string[] = [];
+        try {
+          const monitoredMeta = await database.getMeta('monitored_apps');
+          monitoredPackages = monitoredMeta ? JSON.parse(monitoredMeta) : [];
+          addDebugMessage(`Monitored packages loaded: ${monitoredPackages.length}`);
+        } catch {
+          addDebugMessage('Failed to load monitored packages meta, defaulting to empty');
+          monitoredPackages = [];
+        }
 
-      addDebugMessage(`Calculated brain score: ${score}`);
-      addDebugMessage(`Total screen time: ${formatTime(totalMs)}`);
+        // 1) Save raw data to DB for calendar/backups (you already do this; keep it)
+        if (usageData.length > 0) {
+          try {
+            const today = new Date().toISOString().split('T')[0];
+            const dbUsageData = usageData.map(app => ({ ...app, date: today }));
+            await database.saveDailyUsage(today, dbUsageData);
+            addDebugMessage('Raw usage saved to DB');
+          } catch {
+            addDebugMessage('Failed saving raw usage to DB');
+          }
+        }
 
-      setBrainScore(score);
-      setTotalScreenTime(totalMs);
-      setTopApps(topThreeApps);
+        // 2) Compute brain score only for monitored apps (this also excludes the app itself)
+        const startOfDay = new Date();
+        startOfDay.setHours(0, 0, 0, 0);
+        let computed = { totalUsageMs: 0, score: 100, details: [] as any[] };
+        try {
+          computed = await computeBrainScoreForMonitored(monitoredPackages, startOfDay.getTime(), { debug: __DEV__ });
+          addDebugMessage(`Computed brain score from monitored apps: ${computed.score}`);
+        } catch {
+          addDebugMessage('computeBrainScoreForMonitored failed, falling back to raw sum');
+          // fallback: sum everything (but this should rarely happen)
+          const fallbackTotal = usageData.reduce((s, a) => s + (a.totalTimeMs || 0), 0);
+          computed = { totalUsageMs: fallbackTotal, score: calculateBrainScore(fallbackTotal), details: usageData };
+        }
+
+        // 3) Use computed values for UI (monitored-only lists)
+        const monitoredSorted = (computed.details || [])
+          .filter(a => a.totalTimeMs > 0)
+          .sort((a, b) => b.totalTimeMs - a.totalTimeMs);
+
+        const monitoredTopThree = monitoredSorted.slice(0, 3);
+
+        setBrainScore(computed.score);
+        setTotalScreenTime(computed.totalUsageMs);
+        setTopApps(monitoredTopThree);
+        setAllApps(monitoredSorted); // This ensures modal data consistency
+
+      // Ensure data is saved to database for calendar consistency
+      // if (monitoredTopThree.length > 0) {
+      //   const today = new Date().toISOString().split('T')[0];
+      //   const dbUsageData = monitoredTopThree.map(app => ({
+      //     ...app,
+      //     date: today
+      //   }));
+        
+      //   try {
+      //     await database.saveDailyUsage(today, dbUsageData);
+          
+      //     addDebugMessage('Data synced to database for calendar consistency');
+      //   } catch (dbError: unknown) {
+      //     const errorMessage = dbError instanceof Error ? dbError.message : 'Unknown database error';
+      //     addDebugMessage(`Database sync failed: ${errorMessage}`);
+      //   }
+      // }
 
       // Step 4: Load trial info
       try {
@@ -252,6 +435,8 @@ export default function HomeScreen() {
   useFocusEffect(
     React.useCallback(() => {
       loadHomeData();
+      // Also save current data when screen comes into focus
+      setTimeout(saveCurrentUsageData, 1000); // Delay to avoid conflicts
     }, [])
   );
 
@@ -262,11 +447,83 @@ export default function HomeScreen() {
   };
 
   const getBrainStatusText = () => {
-    if (brainScore >= 80) return "Your brain is healthy today!";
-    if (brainScore >= 50) return "Your brain is getting foggy...";
-    if (brainScore >= 25) return "Your brain needs attention!";
-    return "Your brain is in critical condition!";
+    return getBrainScoreStatus(brainScore).text;
   };
+
+  const renderAllAppsModal = () => (
+    <Modal
+      visible={showAllAppsModal}
+      transparent={true}
+      animationType="slide"
+      onRequestClose={() => setShowAllAppsModal(false)}
+    >
+      <View className="flex-1 justify-end bg-black/50">
+        <Pressable 
+          className="flex-1" 
+          onPress={() => setShowAllAppsModal(false)} 
+        />
+        <View className="bg-white rounded-t-3xl" style={{ height: '50%' }}>
+          {/* Header */}
+          <View className="flex-row items-center justify-between p-4 border-b border-gray-200">
+            <Text className="text-lg font-semibold text-gray-900">
+              All Apps Today ({allApps.length})
+            </Text>
+            <TouchableOpacity
+              onPress={() => setShowAllAppsModal(false)}
+              className="w-8 h-8 rounded-full bg-gray-100 items-center justify-center"
+            >
+              <Ionicons name="close" size={20} color="#374151" />
+            </TouchableOpacity>
+          </View>
+          
+          {/* Apps List */}
+          <ScrollView className="flex-1" showsVerticalScrollIndicator={false}>
+            {allApps.length === 0 ? (
+              <View className="py-12 items-center">
+                <Text className="text-base text-gray-500 text-center">
+                  {hasUsagePermission 
+                    ? "No usage data available for today" 
+                    : "Grant usage permission to see your app usage"
+                  }
+                </Text>
+              </View>
+            ) : (
+              <View className="p-4">
+                {allApps.map((app, index) => (
+                  <View 
+                    key={`${app.packageName}-${index}`} 
+                    className="flex-row items-center justify-between py-3 border-b border-gray-100 last:border-b-0"
+                  >
+                    <View className="flex-row items-center flex-1">
+                      <View className="w-10 h-10 bg-blue-100 rounded-full items-center justify-center mr-3">
+                        <Text className="text-sm font-bold text-blue-600">{index + 1}</Text>
+                      </View>
+                      <View className="flex-1">
+                        <Text className="text-base font-medium text-gray-900" numberOfLines={1}>
+                          {app.appName}
+                        </Text>
+                        <Text className="text-sm text-gray-500">
+                          {app.packageName}
+                        </Text>
+                      </View>
+                    </View>
+                    <View className="items-end">
+                      <Text className="text-base font-semibold text-gray-900">
+                        {formatTime(app.totalTimeMs)}
+                      </Text>
+                      <Text className="text-xs text-gray-500">
+                        {totalScreenTime > 0 ? ((app.totalTimeMs / totalScreenTime) * 100).toFixed(1) : '0.0'}%
+                      </Text>
+                    </View>
+                  </View>
+                ))}
+              </View>
+            )}
+          </ScrollView>
+        </View>
+      </View>
+    </Modal>
+  );
 
   if (loading) {
     return (
@@ -298,7 +555,7 @@ export default function HomeScreen() {
   return (
     <SafeAreaView className="flex-1 bg-bg">
       <ScrollView className="flex-1" showsVerticalScrollIndicator={false}>
-        <Header title="Brainrot" showInfo />
+        {/* <Header title="Brainrot" showInfo /> */}
         
         {/* Debug Panel (only in development) */}
         {__DEV__ && (
@@ -316,8 +573,22 @@ export default function HomeScreen() {
               Permission: {hasUsagePermission ? 'Granted' : 'Not Granted'}
             </Text>
             <Text className="text-xs text-gray-600">
-              Apps Loaded: {topApps.length}
+              Apps Loaded: {topApps.length} / {allApps.length}
             </Text>
+
+            <TouchableOpacity 
+              onPress={() => {
+                const today = new Date().toISOString().split('T')[0];
+                database.cleanupDuplicateEntries(today);
+              }} 
+              className="mt-2 p-1 bg-yellow-200 rounded"
+            >
+              <Text className="text-xs text-center">Clean Today</Text>
+            </TouchableOpacity>
+
+            <TouchableOpacity onPress={debugDuplicateIssue} className="mt-2 p-1 bg-red-200 rounded">
+              <Text className="text-xs text-center">Debug Duplicates</Text>
+            </TouchableOpacity>
             
             <TouchableOpacity onPress={testNativeModule} className="mt-2 p-1 bg-gray-200 rounded">
               <Text className="text-xs text-center">Run Full Test</Text>
@@ -327,7 +598,7 @@ export default function HomeScreen() {
         
         {/* Brain Animation Section */}
         <View className="items-center py-lg">
-          <View className="w-48 h-48">
+          <View className="w-64 h-64">
             <LottieView
               source={require('../../assets/animations/brain.json')}
               autoPlay
@@ -383,21 +654,27 @@ export default function HomeScreen() {
         {/* Today's Summary */}
         <Card className="mx-md mb-md">
           <Text className="text-lg font-semibold text-text mb-sm">Today&apos;s Summary</Text>
-          <View className="flex-row justify-between items-center mb-md">
+          <View className="flex-row justify-between items-center">
             <Text className="text-base text-muted">Total Screen Time</Text>
             <Text className="text-base font-semibold text-text">{formatTime(totalScreenTime)}</Text>
           </View>
-          <TouchableOpacity 
-            className="bg-surface p-sm rounded-lg"
-            onPress={() => {/* Navigate to calendar */}}
-          >
-            <Text className="text-sm text-accent text-center">View Calendar Details</Text>
-          </TouchableOpacity>
         </Card>
 
         {/* Top Apps */}
         <Card className="mx-md mb-md">
-          <Text className="text-lg font-semibold text-text mb-sm">Top Apps Today</Text>
+          <View className="flex-row items-center justify-between mb-sm">
+            <Text className="text-lg font-semibold text-text">Top Apps Today</Text>
+            {allApps.length > 0 && (
+              <TouchableOpacity 
+                onPress={() => setShowAllAppsModal(true)}
+                className="flex-row items-center"
+              >
+                <Text className="text-sm text-accent font-medium mr-1">Show All</Text>
+                <Ionicons name="chevron-forward" size={16} color="#3B82F6" />
+              </TouchableOpacity>
+            )}
+          </View>
+          
           {topApps.length === 0 ? (
             <View className="py-lg">
               <Text className="text-base text-muted text-center">
@@ -415,9 +692,9 @@ export default function HomeScreen() {
           ) : (
             topApps.map((app, index) => (
               <TouchableOpacity 
-                key={app.packageName}
+                key={`${app.packageName}-${index}`} 
                 className="flex-row items-center justify-between py-sm border-b border-surface last:border-b-0"
-                onPress={() => {/* Navigate to app settings */}}
+                onPress={() => setShowAllAppsModal(true)}
               >
                 <View className="flex-row items-center flex-1">
                   <View className="w-8 h-8 bg-accent/20 rounded-full items-center justify-center mr-sm">
@@ -434,6 +711,9 @@ export default function HomeScreen() {
           )}
         </Card>
       </ScrollView>
+      
+      {/* All Apps Modal */}
+      {renderAllAppsModal()}
     </SafeAreaView>
   );
 }

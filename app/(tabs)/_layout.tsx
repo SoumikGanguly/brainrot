@@ -50,7 +50,7 @@ export default function RootLayout() {
           options={{
             title: 'Calendar',
             tabBarIcon: ({ color, size }) => (
-              <MaterialIcons name="calendar-today" size={size} color={color} />
+              <MaterialIcons name="calendar-month" size={size} color={color} />
             ),
           }}
         />

@@ -6,13 +6,17 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { PrimaryButton, SecondaryButton } from '../../components/Buttons';
 import { Card } from '../../components/Card';
 import { Header } from '../../components/Header';
-import { Slider } from '../../components/Slider';
+// import { Slider } from '../../components/Slider';
 
+import AppSelectionBottomSheet from '@/components/AppSelectionBottomSheet';
 import { database } from '../../services/database';
 import { NotificationService } from '../../services/NotificationService';
 import { PurchaseService } from '../../services/PurchaseService';
 import { TrialService } from '../../services/TrialService';
 import { UsageService } from '../../services/UsageService';
+
+import { UsageMonitoringService } from '@/services/UsageMonitoringService';
+import type { AppSelectionItem } from '../../types';
 
 interface MonitoredApp {
   packageName: string;
@@ -21,9 +25,17 @@ interface MonitoredApp {
   isMonitored: boolean;
 }
 
+interface AvailableApp {
+  packageName: string;
+  appName: string;
+  isRecommended: boolean;
+  category?: string;
+}
+
 interface SettingsState {
   // Monitored Apps
   monitoredApps: MonitoredApp[];
+  availableApps: AvailableApp[];
   
   // Notifications
   notificationsEnabled: boolean;
@@ -45,6 +57,7 @@ interface SettingsState {
 export default function Settings() {
   const [settings, setSettings] = useState<SettingsState>({
     monitoredApps: [],
+    availableApps: [],
     notificationsEnabled: true,
     notificationIntensity: 2,
     notificationsSnoozeUntil: 0,
@@ -56,6 +69,7 @@ export default function Settings() {
   });
   const [loading, setLoading] = useState(true);
   const [purchasing, setPurchasing] = useState(false);
+  const [showAppSelection, setShowAppSelection] = useState(false);
 
   useEffect(() => {
     loadSettings();
@@ -63,56 +77,82 @@ export default function Settings() {
 
   const loadSettings = async () => {
     try {
-      setLoading(true);
-      
-      // Load monitored apps
-      const installedApps = await UsageService.getInstalledApps();
-      const monitoredAppsData = await database.getMeta('monitored_apps');
-      const monitoredPackages = monitoredAppsData ? JSON.parse(monitoredAppsData) : [];
-      
-      const apps: MonitoredApp[] = installedApps.map(app => ({
-        ...app,
-        isMonitored: monitoredPackages.includes(app.packageName) || app.isRecommended,
+    setLoading(true);
+
+    const installedApps = await UsageService.getInstalledApps(); // native list including isRecommended
+    // Build availableApps from installedApps
+    const availableApps: AvailableApp[] = (installedApps || []).filter(a => a && a.packageName && a.appName).map(a => ({
+      packageName: a.packageName,
+      appName: a.appName,
+      isRecommended: !!(a as any).isRecommended,
+      category: (a as any).category || undefined,
+    }));
+
+    // Read saved monitored app list
+    const monitoredAppsData = await database.getMeta('monitored_apps');
+    let monitoredPackages: string[] = [];
+
+    if (monitoredAppsData) {
+      // Use the user's saved monitored set
+      monitoredPackages = Array.isArray(JSON.parse(monitoredAppsData))
+        ? JSON.parse(monitoredAppsData)
+        : [];
+    } else {
+      // First run: default to only recommended/social apps
+      monitoredPackages = availableApps
+        .filter(app => app.isRecommended) // only recommended apps
+        .map(app => app.packageName);
+
+      // Persist default monitored list so subsequent loads keep the same behavior
+      await database.setMeta('monitored_apps', JSON.stringify(monitoredPackages));
+    }
+
+    // Build monitoredApps list for UI (recommended first)
+    const monitoredApps: MonitoredApp[] = availableApps
+      .filter(app => monitoredPackages.includes(app.packageName))
+      .map(app => ({
+        packageName: app.packageName,
+        appName: app.appName,
+        isRecommended: app.isRecommended,
+        isMonitored: true,
       }));
 
-      // Load notification settings
+      // Load simple metas
       const notificationsEnabled = (await database.getMeta('notifications_enabled')) !== 'false';
-      const notificationIntensity = parseInt(await database.getMeta('notification_intensity') || '2');
-      const notificationsSnoozeUntil = parseInt(await database.getMeta('notifications_snooze_until') || '0');
+      const notificationIntensity = parseInt(await database.getMeta('notification_intensity') || '2', 10);
+      const notificationsSnoozeUntil = parseInt(await database.getMeta('notifications_snooze_until') || '0', 10);
 
-      // Load monitoring settings
       const backgroundChecksEnabled = (await database.getMeta('background_checks_enabled')) !== 'false';
       const realtimeMonitoringEnabled = (await database.getMeta('realtime_monitoring_enabled')) === 'true';
-
-      // Load privacy settings
       const analyticsEnabled = (await database.getMeta('analytics_enabled')) !== 'false';
 
-      // Load trial/purchase info with error handling
+      // Trial/purchase with safe error narrowing
       let trialInfo = { isActive: false, daysRemaining: 0, expired: false };
       let isPremium = false;
 
       try {
-        trialInfo = await TrialService.getTrialInfo();
-      } catch (error) {
-        console.log('TrialService not available in dev mode:', error.message);
-        // In dev mode, provide mock trial data
-        if (__DEV__) {
-          trialInfo = { isActive: true, daysRemaining: 7, expired: false };
-        }
+        const ti = await TrialService.getTrialInfo();
+        if (ti && typeof ti === 'object') trialInfo = ti;
+      } catch (err) {
+        // err is unknown — cast or test
+        console.log('TrialService not available in dev mode:', (err as any)?.message ?? err);
+        if (__DEV__) trialInfo = { isActive: true, daysRemaining: 7, expired: false };
       }
 
       try {
-        isPremium = await PurchaseService.isPremium();
-      } catch (error) {
-        console.log('PurchaseService not available in dev mode:', error.message);
-        // In dev mode, you can set this to true to test premium features
-        if (__DEV__) {
-          isPremium = false; // Set to true if you want to test premium UI
-        }
+        const premium = await PurchaseService.isPremium();
+        isPremium = !!premium;
+      } catch (err) {
+        console.log('PurchaseService not available in dev mode:', (err as any)?.message ?? err);
+        if (__DEV__) isPremium = false;
       }
 
-      setSettings({
-        monitoredApps: apps,
+      // Finally set state (we have availableApps variable in scope)
+      // Build non-monitored available list is simply availableApps (all apps)
+      setSettings(prev => ({
+        ...prev,
+        monitoredApps,
+        availableApps,
         notificationsEnabled,
         notificationIntensity,
         notificationsSnoozeUntil,
@@ -121,13 +161,25 @@ export default function Settings() {
         analyticsEnabled,
         trialInfo,
         isPremium,
-      });
-    } catch (error) {
-      console.error('Error loading settings:', error);
+      }));
+
+      console.log('installedApps raw ->', installedApps?.length, installedApps?.slice?.(0, 10));
+      console.log('availableApps ->', availableApps.length, availableApps.slice(0,10));
+      console.log('monitoredPackages (from meta) ->', monitoredPackages.length, monitoredPackages);
+      console.log('settings.monitoredApps ->', monitoredApps.length, monitoredApps.slice(0,10));
+
+    } catch (err) {
+      console.error('Error loading settings:', err);
+      setSettings(prev => ({
+        ...prev,
+        monitoredApps: [],
+        availableApps: [],
+      }));
     } finally {
       setLoading(false);
     }
   };
+
 
   const updateMonitoredApp = async (packageName: string, isMonitored: boolean) => {
     if (!packageName) {
@@ -135,20 +187,83 @@ export default function Settings() {
       return;
     }
 
-    const updatedApps = settings.monitoredApps.map(app =>
-      app?.packageName === packageName ? { ...app, isMonitored } : app
-    ).filter(Boolean); // Remove any undefined/null apps
+    const updatedApps = settings.monitoredApps
+      .filter(app => app && app.packageName) // Ensure valid apps
+      .map(app =>
+        app.packageName === packageName ? { ...app, isMonitored } : app
+      );
     
     const monitoredPackages = updatedApps
-      .filter(app => app?.isMonitored && app?.packageName)
+      .filter(app => app && app.isMonitored && app.packageName)
       .map(app => app.packageName);
     
     try {
       await database.setMeta('monitored_apps', JSON.stringify(monitoredPackages));
       setSettings(prev => ({ ...prev, monitoredApps: updatedApps }));
+
+      const monitoringService = UsageMonitoringService.getInstance();
+      await monitoringService.refreshMonitoredApps();
     } catch (error) {
       console.error('Error updating monitored apps:', error);
     }
+  };
+
+  const handleAddApps = async (selectedPackages: string[]) => {
+    try {
+      // Get current monitored packages
+      const monitoredAppsData = await database.getMeta('monitored_apps');
+      const currentMonitored = monitoredAppsData ? JSON.parse(monitoredAppsData) : [];
+      
+      // Add new packages
+      const updatedMonitored = [...new Set([...currentMonitored, ...selectedPackages])];
+      
+      // Save to database
+      await database.setMeta('monitored_apps', JSON.stringify(updatedMonitored));
+      
+      // Update local state
+      const updatedApps = settings.availableApps
+        .filter(app => updatedMonitored.includes(app.packageName))
+        .map(app => ({
+          packageName: app.packageName,
+          appName: app.appName,
+          isRecommended: app.isRecommended,
+          isMonitored: true,
+        }));
+
+      setSettings(prev => ({
+        ...prev,
+        monitoredApps: [...prev.monitoredApps, ...updatedApps.filter(app => 
+          !prev.monitoredApps.some(existing => existing.packageName === app.packageName)
+        )]
+      }));
+
+      const monitoringService = UsageMonitoringService.getInstance();
+      await monitoringService.refreshMonitoredApps();
+
+      Alert.alert(
+        'Apps Added',
+        `Successfully added ${selectedPackages.length} app${selectedPackages.length > 1 ? 's' : ''} to monitoring.`
+      );
+    } catch (error) {
+      console.error('Error adding apps:', error);
+      Alert.alert('Error', 'Failed to add apps. Please try again.');
+    }
+  };
+
+  
+  const handleRemoveMonitoredApp = async (packageName: string) => {
+    Alert.alert(
+      'Remove App',
+      'Are you sure you want to stop monitoring this app?',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Remove',
+          style: 'destructive',
+          onPress: () => updateMonitoredApp(packageName, false)
+        }
+      ]
+    );
   };
 
   const updateNotificationSettings = async (key: string, value: any) => {
@@ -167,14 +282,16 @@ export default function Settings() {
   const updateMonitoringSettings = async (key: string, value: boolean) => {
     await database.setMeta(key, value.toString());
     
+    const monitoringService = UsageMonitoringService.getInstance();
+    
     // Handle background monitoring toggle
     if (key === 'background_checks_enabled') {
       if (value) {
-        // Start background work (would call native module)
         console.log('Starting background checks');
+        await monitoringService.startMonitoring();
       } else {
-        // Stop background work
         console.log('Stopping background checks');
+        await monitoringService.stopMonitoring();
       }
       setSettings(prev => ({ ...prev, backgroundChecksEnabled: value }));
     }
@@ -190,20 +307,22 @@ export default function Settings() {
             {
               text: 'Enable',
               onPress: async () => {
-                // Start foreground service (would call native module)
                 console.log('Starting realtime monitoring');
+                await monitoringService.startMonitoring();
                 setSettings(prev => ({ ...prev, realtimeMonitoringEnabled: true }));
               }
             }
           ]
         );
       } else {
-        // Stop foreground service
         console.log('Stopping realtime monitoring');
+        await monitoringService.stopMonitoring();
         setSettings(prev => ({ ...prev, realtimeMonitoringEnabled: false }));
       }
     }
   };
+
+  {console.log('settings.availableApps', settings.availableApps)}
 
   const handlePurchase = async () => {
     if (purchasing) return;
@@ -361,49 +480,53 @@ export default function Settings() {
           </Text>
           
           {/* Recommended Apps First */}
-          {settings.monitoredApps.filter(app => app.isRecommended).map((app) => (
-            <View key={app.packageName} className="flex-row items-center justify-between py-sm border-b border-gray-100">
-              <View className="flex-1">
-                <View className="flex-row items-center">
-                  <Text className="text-base font-medium text-text mr-xs">{app.appName}</Text>
-                  <View className="px-xs py-0.5 bg-accent/20 rounded">
-                    <Text className="text-xs text-accent font-medium">Recommended</Text>
+          {settings.monitoredApps?.filter(app => app?.isRecommended).map((app) => {
+            if (!app || !app.packageName || !app.appName) return null;
+            
+            return (
+              <View key={app.packageName} className="flex-row items-center justify-between py-sm border-b border-gray-100">
+                <View className="flex-1">
+                  <View className="flex-row items-center">
+                    <Text className="text-base font-medium text-text mr-xs">{app.appName}</Text>
+                    <View className="px-xs py-0.5 bg-accent/20 rounded">
+                      <Text className="text-xs text-accent font-medium">Recommended</Text>
+                    </View>
                   </View>
+                  <Text className="text-sm text-muted">{app.packageName}</Text>
                 </View>
-                <Text className="text-sm text-muted">{app.packageName}</Text>
+                <Switch
+                  value={app.isMonitored}
+                  onValueChange={(value) => updateMonitoredApp(app.packageName, value)}
+                  trackColor={{ false: '#E5E7EB', true: '#4F46E5' }}
+                  thumbColor={app.isMonitored ? '#FFFFFF' : '#9CA3AF'}
+                />
               </View>
-              <Switch
-                value={app.isMonitored}
-                onValueChange={(value) => updateMonitoredApp(app.packageName, value)}
-                trackColor={{ false: '#E5E7EB', true: '#4F46E5' }}
-                thumbColor={app.isMonitored ? '#FFFFFF' : '#9CA3AF'}
-              />
-            </View>
-          ))}
+            );
+          })}
 
           {/* Other Apps */}
-          {settings.monitoredApps.filter(app => !app.isRecommended && app.isMonitored).length > 0 && (
-            <Text className="text-sm font-medium text-muted mt-md mb-sm">Other Apps</Text>
+          {settings.monitoredApps.filter(app => !app.isRecommended).length > 0 && (
+            <Text className="text-sm font-medium text-muted mt-md mb-sm">Other Monitored Apps</Text>
           )}
           
-          {settings.monitoredApps.filter(app => !app.isRecommended && app.isMonitored).map((app) => (
+          {settings.monitoredApps.filter(app => !app.isRecommended).map((app) => (
             <View key={app.packageName} className="flex-row items-center justify-between py-sm border-b border-gray-100 last:border-b-0">
               <View className="flex-1">
                 <Text className="text-base font-medium text-text">{app.appName}</Text>
                 <Text className="text-sm text-muted">{app.packageName}</Text>
               </View>
-              <Switch
-                value={app.isMonitored}
-                onValueChange={(value) => updateMonitoredApp(app.packageName, value)}
-                trackColor={{ false: '#E5E7EB', true: '#4F46E5' }}
-                thumbColor={app.isMonitored ? '#FFFFFF' : '#9CA3AF'}
-              />
+              <TouchableOpacity
+                onPress={() => handleRemoveMonitoredApp(app.packageName)}
+                className="p-xs"
+              >
+                <Ionicons name="remove-circle" size={24} color="#EF4444" />
+              </TouchableOpacity>
             </View>
           ))}
 
           <TouchableOpacity 
             className="flex-row items-center justify-center py-md mt-sm border-t border-gray-200"
-            onPress={() => {/* Navigate to app selection screen */}}
+            onPress={() => setShowAppSelection(true)}
           >
             <Ionicons name="add" size={20} color="#4F46E5" className="mr-xs" />
             <Text className="text-base text-accent">Add More Apps</Text>
@@ -441,13 +564,13 @@ export default function Settings() {
                 <Text className="text-sm text-muted mb-sm">
                   Higher intensity = more direct and frequent reminders
                 </Text>
-                <Slider
+                {/* <Slider
                   minimumValue={1}
                   maximumValue={4}
                   step={1}
                   value={settings.notificationIntensity}
                   onValueChange={(value) => updateNotificationSettings('notification_intensity', value)}
-                />
+                /> */}
                 <View className="flex-row justify-between">
                   <Text className="text-xs text-muted">Mild</Text>
                   <Text className="text-xs text-muted">Critical</Text>
@@ -600,6 +723,22 @@ export default function Settings() {
             </TouchableOpacity>
 
             <TouchableOpacity 
+              className="py-sm"
+              onPress={async () => {
+                const monitoringService = UsageMonitoringService.getInstance();
+                const status = monitoringService.getMonitoringStatus();
+                Alert.alert('Monitoring Status', 
+                  `Monitoring: ${status.isMonitoring}\n` +
+                  `Tracked Apps: ${status.trackedApps}\n` +
+                  `Background: ${status.backgroundEnabled}\n` +
+                  `Realtime: ${status.realtimeEnabled}`
+                );
+              }}
+            >
+              <Text className="text-base text-text">Check Monitoring Status</Text>
+            </TouchableOpacity>
+
+            <TouchableOpacity 
               className="py-sm border-b border-gray-200"
               onPress={() => {
                 setSettings(prev => ({ ...prev, isPremium: !prev.isPremium }));
@@ -620,7 +759,7 @@ export default function Settings() {
                     Alert.alert('Debug', 'NotificationService not available or scheduleUsageAlert method missing');
                   }
                 } catch (error) {
-                  Alert.alert('Debug', `Notification error: ${error?.message || 'Unknown error'}`);
+                  Alert.alert('Debug', `Notification error: ${error instanceof Error ? error.message : 'Unknown error'}`);
                 }
               }}
             >
@@ -629,6 +768,22 @@ export default function Settings() {
           </Card>
         )}
       </ScrollView>
+      <AppSelectionBottomSheet
+        isOpen={showAppSelection}
+        onClose={() => setShowAppSelection(false)}
+        onSave={handleAddApps}
+        availableApps={settings.availableApps.map((app): AppSelectionItem => ({
+          packageName: app.packageName,
+          appName: app.appName,
+          isRecommended: app.isRecommended,
+          category: app.category,
+          // mark currently monitored apps; modal will filter them out on init
+          isCurrentlyMonitored: settings.monitoredApps.some(m => m.packageName === app.packageName),
+          // default selection state; false is fine
+          isSelected: false,
+        }))}
+        currentlyMonitored={settings.monitoredApps.map(m => m.packageName)}
+      />
     </SafeAreaView>
   );
 }

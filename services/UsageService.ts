@@ -261,7 +261,7 @@ export class UsageService {
     } catch (error) {
       return {
         hasAccess: false,
-        message: `Permission check failed: ${error.message}`
+        message: `Permission check failed: ${error instanceof Error ? error.message : 'Unknown error'}`
       };
     }
   }

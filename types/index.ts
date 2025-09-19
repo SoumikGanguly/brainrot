@@ -38,3 +38,27 @@ export interface PurchaseInfo {
   productId?: string;
   purchaseDate?: number;
 }
+
+export interface AvailableApp {
+  packageName: string;
+  appName: string;
+  isRecommended: boolean;
+  category?: string;
+}
+
+export interface MonitoredApp extends AvailableApp {
+  isMonitored: boolean;
+}
+
+export interface AppSelectionItem extends AvailableApp {
+  isCurrentlyMonitored: boolean;
+  isSelected: boolean;
+}
+
+export interface AppSelectionBottomSheetProps {
+  isOpen: boolean;
+  onClose: () => void;
+  onSave: (selectedApps: string[]) => void;
+  availableApps: AppSelectionItem[];
+  currentlyMonitored: string[];
+}

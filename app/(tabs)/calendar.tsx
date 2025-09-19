@@ -8,6 +8,8 @@ import { SecondaryButton } from '../../components/Buttons';
 import { Card } from '../../components/Card';
 import { Header } from '../../components/Header';
 import { database } from '../../services/database';
+
+import { calculateBrainScore, getScoreColor, getScoreLabel } from '../../utils/brainScore';
 import { formatTime, formatTimeDetailed } from '../../utils/time';
 
 interface DailyData {
@@ -47,33 +49,61 @@ export default function Calendar() {
   const loadHistoricalData = async () => {
     try {
       setLoading(true);
-      const data = await database.getHistoricalData(90); // Load 3 months of data
-      setHistoricalData(data);
+
+      // Try to get precomputed summaries (monitored-only) for last 90 days
+      // database.getHistoricalData should return DailyData[] where each entry is already the monitored-only summary
+      let data = await database.getHistoricalData(90);
+
+      // If a day is missing summary but raw usage exists, compute monitored-only summary as fallback.
+      // This loop is lightweight because historicalData is limited (e.g. 90 days)
+      const resolved: DailyData[] = [];
+      for (const day of data) {
+        if (day && typeof day.brainScore === 'number') {
+          // already a summary
+          resolved.push(day);
+        } else {
+          // fallback: attempt to compute from raw saved usage
+          try {
+            const raw = await database.getDailyUsage(day.date); // raw usage entries
+            // load monitored packages from meta
+            const meta = await database.getMeta('monitored_apps');
+            const monitoredPackages: string[] = meta ? JSON.parse(meta) : [];
+
+            // compute monitored-only summary for that day: use computeBrainScoreForMonitored with startTime for the date
+            // computeBrainScoreForMonitored expects a startTime, we'll pass start of day ms for that date
+            const startOfDay = new Date(day.date + 'T00:00:00').getTime();
+
+            // Note: computeBrainScoreForMonitored fetches usage via UsageService.getUsageSince.
+            // To avoid double fetching we could also compute from raw: filter raw by monitoredPackages & sum.
+            // We'll do the raw-based fallback here to keep it local and faster:
+            const filtered = (raw || []).filter((r: any) => monitoredPackages.includes(r.packageName) && r.packageName !== 'com.soumikganguly.brainrot');
+            const total = filtered.reduce((s: number, a: any) => s + (a.totalTimeMs || 0), 0);
+            const score = calculateBrainScore(total);
+
+            resolved.push({
+              date: day.date,
+              totalScreenTime: total,
+              brainScore: score,
+              apps: filtered.map((f: any) => ({ packageName: f.packageName, appName: f.appName, totalTimeMs: f.totalTimeMs })),
+            });
+          } catch (err) {
+            // If anything fails, push the original day as a fallback (may be missing fields)
+            console.warn('Failed to compute fallback summary for', day.date, err);
+            resolved.push(day);
+          }
+        }
+      }
+
+      // sort by date descending
+      resolved.sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
+
+      setHistoricalData(resolved);
     } catch (error) {
       console.error('Error loading historical data:', error);
+      setHistoricalData([]);
     } finally {
       setLoading(false);
     }
-  };
-
-  const getScoreColor = (score: number) => {
-    if (score >= 90) return '#059669'; // Emerald-600 - Excellent
-    if (score >= 80) return '#10B981'; // Emerald-500 - Good
-    if (score >= 70) return '#34D399'; // Emerald-400 - Okay
-    if (score >= 50) return '#FCD34D'; // Yellow-300 - Warning
-    if (score >= 30) return '#F59E0B'; // Amber-500 - Poor
-    if (score >= 15) return '#EF4444'; // Red-500 - Bad
-    return '#DC2626'; // Red-600 - Critical
-  };
-
-  const getScoreLabel = (score: number) => {
-    if (score >= 90) return 'Excellent';
-    if (score >= 80) return 'Good';
-    if (score >= 70) return 'Okay';
-    if (score >= 50) return 'Warning';
-    if (score >= 30) return 'Poor';
-    if (score >= 15) return 'Bad';
-    return 'Critical';
   };
 
   const generateHeatmapData = (): HeatmapDay[][] => {
@@ -118,37 +148,69 @@ export default function Calendar() {
 
   const openDayDetail = async (dateStr: string) => {
     try {
-      const dayUsage = await database.getDailyUsage(dateStr);
-      const totalTime = dayUsage.reduce((sum, app) => sum + app.totalTimeMs, 0);
-      const score = Math.max(0, Math.round(100 - (totalTime / (8 * 60 * 60 * 1000)) * 100));
-      
+      // Prefer saved summary (monitored-only)
+      const summary = await database.getDailySummary(dateStr);
+      if (summary) {
+        setSelectedDay(summary);
+        setShowModal(true);
+        return;
+      }
+
+      // Fallback: compute from raw saved usage
+      const raw = await database.getDailyUsage(dateStr); // raw entries saved earlier
+      // load monitored packages
+      const meta = await database.getMeta('monitored_apps');
+      const monitoredPackages: string[] = meta ? JSON.parse(meta) : [];
+
+      // Filter raw to only monitored apps and exclude self
+      const filtered = (raw || []).filter((r: any) => monitoredPackages.includes(r.packageName) && r.packageName !== 'com.soumikganguly.brainrot');
+
+      const totalTime = filtered.reduce((s: number, a: any) => s + (a.totalTimeMs || 0), 0);
+      const score = calculateBrainScore(totalTime);
+
       setSelectedDay({
         date: dateStr,
         totalScreenTime: totalTime,
         brainScore: score,
-        apps: dayUsage.sort((a, b) => b.totalTimeMs - a.totalTimeMs)
+        apps: filtered.sort((a: any, b: any) => b.totalTimeMs - a.totalTimeMs),
       });
       setShowModal(true);
     } catch (error) {
       console.error('Error loading day detail:', error);
+      Alert.alert('Error', 'Could not load day details. Please try again.');
     }
   };
 
   const exportData = async () => {
     try {
+      // Ensure we have up-to-date historical data
+      const data = await database.getHistoricalData(365); // e.g. 1 year
+
       // Generate CSV data
       let csvContent = 'Date,Total Screen Time (minutes),Brain Score,Top App,Usage (minutes)\n';
-      
-      historicalData
-        .sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime())
-        .forEach(day => {
-          const screenTimeMinutes = Math.round(day.totalScreenTime / (1000 * 60));
-          const topApp = day.apps?.[0];
-          const topAppUsage = topApp ? Math.round(topApp.totalTimeMs / (1000 * 60)) : 0;
-          csvContent += `${day.date},${screenTimeMinutes},${day.brainScore},"${topApp?.appName || 'N/A'}",${topAppUsage}\n`;
-        });
 
-      // Share the CSV content
+      for (const day of data.sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime())) {
+        let total = day.totalScreenTime ?? 0;
+        let score = day.brainScore ?? calculateBrainScore(total);
+        let topAppName = 'N/A';
+        let topAppUsage = 0;
+
+        if (day.apps && day.apps.length > 0) {
+          const top = day.apps[0];
+          topAppName = top.appName || top.packageName || 'N/A';
+          topAppUsage = Math.round((top.totalTimeMs || 0) / (1000 * 60));
+        } else {
+          // Fallback to raw usage
+          const raw = await database.getDailyUsage(day.date);
+          const rawTotal = raw.reduce((s: number, a: any) => s + (a.totalTimeMs || 0), 0);
+          total = total || rawTotal;
+          score = score || calculateBrainScore(rawTotal);
+        }
+
+        const screenTimeMinutes = Math.round(total / (1000 * 60));
+        csvContent += `${day.date},${screenTimeMinutes},${score},"${topAppName}",${topAppUsage}\n`;
+      }
+
       await Share.share({
         message: csvContent,
         title: 'Brainrot Usage Data Export',
@@ -158,6 +220,7 @@ export default function Calendar() {
       Alert.alert('Export Failed', 'Could not export your data. Please try again.');
     }
   };
+
 
   const navigateMonth = (direction: 'prev' | 'next') => {
     setCurrentMonth(prev => {
@@ -169,7 +232,7 @@ export default function Calendar() {
 
   const renderHeatmapView = () => {
     const heatmapWeeks = generateHeatmapData();
-    const cellSize = Math.min(32, (screenWidth - 80) / 7);
+    const cellSize = Math.min(42, (screenWidth - 80) / 7);
     const heatmapWidth = cellSize * 7;
     const heatmapHeight = cellSize * heatmapWeeks.length;
 
@@ -339,11 +402,36 @@ export default function Calendar() {
 
   const renderListView = () => (
     <Card className="mx-md mb-md">
-      <View className="flex-row items-center justify-between mb-md">
-        <Text className="text-lg font-semibold text-text">Recent Days</Text>
-        <SecondaryButton title="Export CSV" onPress={exportData} />
+      <View className="flex-col items-center justify-between mb-md">
+        <View className='flex-row justify-between w-full'>
+          <Text className="text-lg font-semibold text-text">Recent Days</Text>
+        
+          <View className="flex-row space-x-sm">
+            <TouchableOpacity
+              onPress={() => setViewMode('heatmap')}
+              className={`px-sm py-xs rounded ${viewMode === 'heatmap' ? 'bg-accent' : 'bg-surface'}`}
+            >
+              <Text className={`text-sm ${viewMode === 'heatmap' ? 'text-white' : 'text-muted'}`}>
+                Grid
+              </Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              onPress={() => setViewMode('list')}
+              className={`px-sm py-xs rounded ${viewMode === 'list' ? 'bg-accent' : 'bg-surface'}`}
+            >
+              <Text className={`text-sm ${viewMode === 'list' ? 'text-white' : 'text-muted'}`}>
+                List
+              </Text>
+            </TouchableOpacity>
+          </View>
+        
+        </View>
+        <View className='flex-row justify-end w-full mt-sm'>
+          <SecondaryButton className='' title="Export CSV" onPress={exportData} />
+        </View>
       </View>
       
+      {/* Rest of the list view content stays the same */}
       {historicalData.slice(0, 30).map((day) => (
         <TouchableOpacity
           key={day.date}
