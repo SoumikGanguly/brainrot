@@ -13,6 +13,7 @@ import { TrialService } from '../../services/TrialService';
 import { UsageService } from '../../services/UsageService';
 
 import { DailyResetService } from '@/services/DailyResetService';
+import { HistoricalDataService } from '@/services/HistoricalDataService';
 import { UsageMonitoringService } from '@/services/UsageMonitoringService';
 import { computeBrainScoreForMonitored } from '@/utils/brainScoreRunner';
 import { calculateBrainScore, getBrainScoreStatus } from '../../utils/brainScore';
@@ -37,6 +38,26 @@ export default function HomeScreen() {
   const [showAllAppsModal, setShowAllAppsModal] = useState(false);
 
   useEffect(() => {
+  const initializeServices = async () => {
+      try {
+        // Initialize monitoring
+        const monitoringService = UsageMonitoringService.getInstance();
+        await monitoringService.initialize();
+        
+        // Initialize and backfill historical data
+        const historicalService = HistoricalDataService.getInstance();
+        await historicalService.backfillHistoricalData(90); // Backfill last 90 days
+        
+        // Initialize daily reset
+        const dailyResetService = DailyResetService.getInstance();
+        dailyResetService.initialize();
+        
+      } catch (error) {
+        console.error('Failed to initialize services:', error);
+      }
+    };
+
+    initializeServices();
 
     const cleanupAndInitialize = async () => {
       try {

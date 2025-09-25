@@ -30,6 +30,7 @@ interface AvailableApp {
   appName: string;
   isRecommended: boolean;
   category?: string;
+  isCurrentlyMonitored?: boolean;
 }
 
 interface SettingsState {
@@ -70,6 +71,8 @@ export default function Settings() {
   const [loading, setLoading] = useState(true);
   const [purchasing, setPurchasing] = useState(false);
   const [showAppSelection, setShowAppSelection] = useState(false);
+
+  const [modalKey, setModalKey] = useState(0);
 
   useEffect(() => {
     loadSettings();
@@ -147,6 +150,22 @@ export default function Settings() {
         if (__DEV__) isPremium = false;
       }
 
+      // Check if comprehensive monitoring should be active
+      const monitoringEnabled = await database.getMeta('monitoring_enabled');
+        if (monitoringEnabled === 'true' && (backgroundChecksEnabled || realtimeMonitoringEnabled)) {
+          // Ensure monitoring service is running if settings indicate it should be
+          try {
+            const status = UsageMonitoringService.getInstance().getMonitoringStatus();
+            if (!status.isMonitoring) {
+              console.log('Restarting monitoring based on saved settings');
+              await UsageService.startComprehensiveMonitoring();
+            }
+          } catch (error) {
+            console.log('Could not restart monitoring:', error);
+          }
+        }
+
+        
       // Finally set state (we have availableApps variable in scope)
       // Build non-monitored available list is simply availableApps (all apps)
       setSettings(prev => ({
@@ -188,7 +207,7 @@ export default function Settings() {
     }
 
     const updatedApps = settings.monitoredApps
-      .filter(app => app && app.packageName) // Ensure valid apps
+      .filter(app => app && app.packageName)
       .map(app =>
         app.packageName === packageName ? { ...app, isMonitored } : app
       );
@@ -199,8 +218,18 @@ export default function Settings() {
     
     try {
       await database.setMeta('monitored_apps', JSON.stringify(monitoredPackages));
-      setSettings(prev => ({ ...prev, monitoredApps: updatedApps }));
-
+      setSettings(prev => ({ 
+        ...prev, 
+        monitoredApps: updatedApps,
+        // FIX: Update availableApps when removing
+        availableApps: prev.availableApps.map(app => 
+          app.packageName === packageName 
+            ? { ...app, isCurrentlyMonitored: isMonitored }
+            : app
+        )
+      }));
+      
+      // Refresh monitoring service
       const monitoringService = UsageMonitoringService.getInstance();
       await monitoringService.refreshMonitoredApps();
     } catch (error) {
@@ -210,17 +239,13 @@ export default function Settings() {
 
   const handleAddApps = async (selectedPackages: string[]) => {
     try {
-      // Get current monitored packages
+      // Your existing add apps logic...
       const monitoredAppsData = await database.getMeta('monitored_apps');
       const currentMonitored = monitoredAppsData ? JSON.parse(monitoredAppsData) : [];
-      
-      // Add new packages
       const updatedMonitored = [...new Set([...currentMonitored, ...selectedPackages])];
-      
-      // Save to database
       await database.setMeta('monitored_apps', JSON.stringify(updatedMonitored));
       
-      // Update local state
+      // Update local state...
       const updatedApps = settings.availableApps
         .filter(app => updatedMonitored.includes(app.packageName))
         .map(app => ({
@@ -234,11 +259,20 @@ export default function Settings() {
         ...prev,
         monitoredApps: [...prev.monitoredApps, ...updatedApps.filter(app => 
           !prev.monitoredApps.some(existing => existing.packageName === app.packageName)
-        )]
+        )],
+        // FIX: Update availableApps to mark newly added apps as monitored
+        availableApps: prev.availableApps.map(app => 
+          selectedPackages.includes(app.packageName) 
+            ? { ...app, isCurrentlyMonitored: true }
+            : app
+        )
       }));
 
+      // Refresh monitoring service
       const monitoringService = UsageMonitoringService.getInstance();
       await monitoringService.refreshMonitoredApps();
+
+      setModalKey(prev => prev + 1);
 
       Alert.alert(
         'Apps Added',
@@ -281,42 +315,59 @@ export default function Settings() {
 
   const updateMonitoringSettings = async (key: string, value: boolean) => {
     await database.setMeta(key, value.toString());
-    
-    const monitoringService = UsageMonitoringService.getInstance();
+  
     
     // Handle background monitoring toggle
     if (key === 'background_checks_enabled') {
       if (value) {
         console.log('Starting background checks');
-        await monitoringService.startMonitoring();
+        // Use the enhanced comprehensive monitoring
+        await UsageService.startComprehensiveMonitoring();
       } else {
         console.log('Stopping background checks');
-        await monitoringService.stopMonitoring();
+        await UsageService.stopComprehensiveMonitoring();
       }
       setSettings(prev => ({ ...prev, backgroundChecksEnabled: value }));
     }
     
-    // Handle realtime monitoring toggle
+    // Handle realtime monitoring toggle - this now integrates with comprehensive monitoring
     if (key === 'realtime_monitoring_enabled') {
       if (value) {
         Alert.alert(
           'Real-time Monitoring',
-          'This will show a persistent notification and may increase battery usage. Continue?',
+          'This will detect when you open monitored apps and send immediate notifications. This may impact battery life. Continue?',
           [
             { text: 'Cancel', style: 'cancel' },
             {
               text: 'Enable',
               onPress: async () => {
-                console.log('Starting realtime monitoring');
-                await monitoringService.startMonitoring();
-                setSettings(prev => ({ ...prev, realtimeMonitoringEnabled: true }));
+                // Set the setting first
+                await database.setMeta(key, 'true');
+                
+                // Start comprehensive monitoring which includes real-time detection
+                const success = await UsageService.startComprehensiveMonitoring();
+                
+                if (success) {
+                  setSettings(prev => ({ ...prev, realtimeMonitoringEnabled: true }));
+                  Alert.alert(
+                    'Real-time Monitoring Active', 
+                    'You\'ll now receive immediate notifications when opening monitored apps.'
+                  );
+                } else {
+                  Alert.alert('Error', 'Failed to enable real-time monitoring. Please check permissions.');
+                }
               }
             }
           ]
         );
       } else {
-        console.log('Stopping realtime monitoring');
-        await monitoringService.stopMonitoring();
+        await database.setMeta(key, 'false');
+        // Stop comprehensive monitoring and restart with just background
+        await UsageService.stopComprehensiveMonitoring();
+        if (settings.backgroundChecksEnabled) {
+          // Restart with just background monitoring
+          setTimeout(() => UsageService.startComprehensiveMonitoring(), 1000);
+        }
         setSettings(prev => ({ ...prev, realtimeMonitoringEnabled: false }));
       }
     }
@@ -722,20 +773,39 @@ export default function Settings() {
               <Text className="text-base text-text">Reset Trial</Text>
             </TouchableOpacity>
 
-            <TouchableOpacity 
+           <TouchableOpacity 
               className="py-sm"
               onPress={async () => {
                 const monitoringService = UsageMonitoringService.getInstance();
                 const status = monitoringService.getMonitoringStatus();
+                const isActive = await database.getMeta('monitoring_enabled');
+                
                 Alert.alert('Monitoring Status', 
                   `Monitoring: ${status.isMonitoring}\n` +
                   `Tracked Apps: ${status.trackedApps}\n` +
                   `Background: ${status.backgroundEnabled}\n` +
-                  `Realtime: ${status.realtimeEnabled}`
+                  `Realtime: ${status.realtimeEnabled}\n` +
+                  `Service Active: ${isActive === 'true'}\n` +
+                  `Native Available: ${UsageService.isNativeModuleAvailable()}`
                 );
               }}
             >
               <Text className="text-base text-text">Check Monitoring Status</Text>
+            </TouchableOpacity>
+
+            <TouchableOpacity 
+              className="py-sm"
+              onPress={async () => {
+                try {
+                  const monitoringService = UsageMonitoringService.getInstance();
+                  await monitoringService.triggerManualCheck();
+                  Alert.alert('Debug', 'Manual monitoring check triggered');
+                } catch (error) {
+                  Alert.alert('Debug', `Manual check failed: ${error}`);
+                }
+              }}
+            >
+              <Text className="text-base text-text">Trigger Manual Check</Text>
             </TouchableOpacity>
 
             <TouchableOpacity 
@@ -769,6 +839,7 @@ export default function Settings() {
         )}
       </ScrollView>
       <AppSelectionBottomSheet
+        key={modalKey}
         isOpen={showAppSelection}
         onClose={() => setShowAppSelection(false)}
         onSave={handleAddApps}
@@ -777,9 +848,10 @@ export default function Settings() {
           appName: app.appName,
           isRecommended: app.isRecommended,
           category: app.category,
-          // mark currently monitored apps; modal will filter them out on init
-          isCurrentlyMonitored: settings.monitoredApps.some(m => m.packageName === app.packageName),
-          // default selection state; false is fine
+          // FIX: Use the isCurrentlyMonitored property if it exists, otherwise check monitoredApps
+          isCurrentlyMonitored: app.hasOwnProperty('isCurrentlyMonitored') 
+            ? app.isCurrentlyMonitored 
+            : settings.monitoredApps.some(m => m.packageName === app.packageName),
           isSelected: false,
         }))}
         currentlyMonitored={settings.monitoredApps.map(m => m.packageName)}

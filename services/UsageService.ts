@@ -1,4 +1,5 @@
 import { NativeModules, Platform } from 'react-native';
+import { database } from './database';
 
 const { UsageStatsModule } = NativeModules;
 
@@ -16,7 +17,6 @@ interface UsageData {
 }
 
 export class UsageService {
-  // Default recommended apps for fallback
   private static readonly RECOMMENDED_APPS = [
     { packageName: 'com.google.android.youtube', appName: 'YouTube', isRecommended: true },
     { packageName: 'com.instagram.android', appName: 'Instagram', isRecommended: true },
@@ -55,13 +55,7 @@ export class UsageService {
         return false;
       }
 
-      if (UsageStatsModule.forceRefreshPermission) {
-        return await UsageStatsModule.forceRefreshPermission();
-      } else {
-        // Fallback: just check permission again after a short delay
-        await new Promise(resolve => setTimeout(resolve, 1000));
-        return await this.isUsageAccessGranted();
-      }
+      return await UsageStatsModule.forceRefreshPermission();
     } catch (error) {
       console.error('Error force refreshing permission:', error);
       return false;
@@ -144,6 +138,121 @@ export class UsageService {
     }
   }
 
+  // Enhanced methods for realtime monitoring
+  static async startRealtimeAppDetection(): Promise<boolean> {
+    try {
+      if (Platform.OS !== 'android' || !UsageStatsModule) {
+        console.warn('Realtime app detection only supported on Android');
+        return false;
+      }
+
+      const hasPermission = await this.isUsageAccessGranted();
+      if (!hasPermission) {
+        console.warn('Usage permission required for realtime detection');
+        return false;
+      }
+
+      await UsageStatsModule.startRealtimeAppDetection();
+      console.log('Started realtime app detection');
+      return true;
+    } catch (error) {
+      console.error('Error starting realtime app detection:', error);
+      return false;
+    }
+  }
+
+  // Check if monitoring is currently active
+  static async isMonitoringActive(): Promise<boolean> {
+    try {
+      const monitoringEnabled = await database.getMeta('monitoring_enabled');
+      return monitoringEnabled === 'true';
+    } catch (error) {
+      console.error('Error checking monitoring status:', error);
+      return false;
+    }
+  }
+
+  static async stopRealtimeAppDetection(): Promise<boolean> {
+    try {
+      if (Platform.OS !== 'android' || !UsageStatsModule) {
+        return false;
+      }
+
+      await UsageStatsModule.stopRealtimeAppDetection();
+      console.log('Stopped realtime app detection');
+      return true;
+    } catch (error) {
+      console.error('Error stopping realtime app detection:', error);
+      return false;
+    }
+  }
+
+  static async triggerManualUsageCheck(): Promise<void> {
+    try {
+      if (Platform.OS !== 'android' || !UsageStatsModule) {
+        return;
+      }
+
+      UsageStatsModule.triggerUsageCheck();
+      console.log('Triggered manual usage check');
+    } catch (error) {
+      console.error('Error triggering usage check:', error);
+    }
+  }
+
+  // Start comprehensive monitoring (background + realtime)
+  static async startComprehensiveMonitoring(): Promise<boolean> {
+    try {
+      console.log('Starting comprehensive monitoring...');
+      
+      const hasPermission = await this.isUsageAccessGranted();
+      if (!hasPermission) {
+        console.warn('Usage permission required for monitoring');
+        return false;
+      }
+
+      // Start background monitoring with 15-minute intervals
+      if (UsageStatsModule.startBackgroundMonitoring) {
+        UsageStatsModule.startBackgroundMonitoring(15);
+        console.log('Started background monitoring (15min intervals)');
+      }
+
+      // Start realtime app detection
+      const realtimeStarted = await this.startRealtimeAppDetection();
+      
+      // Save monitoring state to database
+      await database.setMeta('monitoring_enabled', 'true');
+      await database.setMeta('monitoring_started_at', Date.now().toString());
+      
+      console.log(`Comprehensive monitoring started - Background: true, Realtime: ${realtimeStarted}`);
+      return true;
+    } catch (error) {
+      console.error('Error starting comprehensive monitoring:', error);
+      return false;
+    }
+  }
+
+  static async stopComprehensiveMonitoring(): Promise<void> {
+    try {
+      console.log('Stopping comprehensive monitoring...');
+
+      // Stop background monitoring
+      if (UsageStatsModule.stopBackgroundMonitoring) {
+        UsageStatsModule.stopBackgroundMonitoring();
+      }
+
+      // Stop realtime monitoring
+      await this.stopRealtimeAppDetection();
+
+      // Update monitoring state
+      await database.setMeta('monitoring_enabled', 'false');
+      
+      console.log('Comprehensive monitoring stopped');
+    } catch (error) {
+      console.error('Error stopping comprehensive monitoring:', error);
+    }
+  }
+
   static async getWeekUsage(): Promise<UsageData[]> {
     try {
       const startOfWeek = new Date();
@@ -168,7 +277,6 @@ export class UsageService {
     }
   }
 
-  // Helper method to check if specific app is installed
   static async isAppInstalled(packageName: string): Promise<boolean> {
     try {
       const installedApps = await this.getInstalledApps();
@@ -179,7 +287,6 @@ export class UsageService {
     }
   }
 
-  // Get usage for specific app
   static async getAppUsage(packageName: string, startTimeMs: number): Promise<number> {
     try {
       const usageData = await this.getUsageSince(startTimeMs);
@@ -191,7 +298,6 @@ export class UsageService {
     }
   }
 
-  // Get total screen time for a period
   static async getTotalScreenTime(startTimeMs: number): Promise<number> {
     try {
       const usageData = await this.getUsageSince(startTimeMs);
@@ -202,7 +308,6 @@ export class UsageService {
     }
   }
 
-  // Get most used apps for a period
   static async getMostUsedApps(startTimeMs: number, limit: number = 5): Promise<UsageData[]> {
     try {
       const usageData = await this.getUsageSince(startTimeMs);
@@ -216,25 +321,21 @@ export class UsageService {
     }
   }
 
-  // Check if native module is properly connected
   static isNativeModuleAvailable(): boolean {
     return Platform.OS === 'android' && !!UsageStatsModule && !!UsageStatsModule.isUsageAccessGranted;
   }
 
-  // Get human readable app name from package name
   static getAppDisplayName(packageName: string): string {
     const knownApp = this.RECOMMENDED_APPS.find(app => app.packageName === packageName);
     if (knownApp) {
       return knownApp.appName;
     }
 
-    // Try to extract a readable name from package name
     const parts = packageName.split('.');
     const lastPart = parts[parts.length - 1];
     return lastPart.charAt(0).toUpperCase() + lastPart.slice(1);
   }
 
-  // Validate that we have proper permissions
   static async validatePermissions(): Promise<{ hasAccess: boolean; message: string }> {
     try {
       if (Platform.OS !== 'android') {
@@ -263,6 +364,26 @@ export class UsageService {
         hasAccess: false,
         message: `Permission check failed: ${error instanceof Error ? error.message : 'Unknown error'}`
       };
+    }
+  }
+
+  // Method to reset daily tracking (called at midnight)
+  static async resetDailyTracking(): Promise<void> {
+    try {
+      // This would typically be handled by the native module and background workers
+      // but we can use it to clear any local state if needed
+      console.log('Daily tracking reset requested');
+      
+      // Trigger the native module's reset if available
+      if (this.isNativeModuleAvailable() && UsageStatsModule.resetDailyTracking) {
+        UsageStatsModule.resetDailyTracking();
+      }
+      
+      // Save the reset timestamp
+      await database.setMeta('last_daily_reset', Date.now().toString());
+      
+    } catch (error) {
+      console.error('Error resetting daily tracking:', error);
     }
   }
 }

@@ -1,14 +1,15 @@
 package com.soumikganguly.brainrot
 
 import android.app.AppOpsManager
-import android.app.usage.UsageStats
-import android.app.usage.UsageStatsManager
 import android.app.usage.UsageEvents
+import android.app.usage.UsageStatsManager
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ApplicationInfo
 import android.content.pm.PackageManager
 import android.os.Build
+import android.os.Handler
+import android.os.Looper
 import android.os.Process
 import android.provider.Settings
 import android.util.Log
@@ -18,15 +19,17 @@ import java.util.*
 class UsageStatsModule(reactContext: ReactApplicationContext) : ReactContextBaseJavaModule(reactContext) {
 
     private val TAG = "UsageStatsModule"
+    private val usageChecker = UsageChecker(reactContext)
+    private var realtimeHandler: Handler? = null
+    private var realtimeRunnable: Runnable? = null
+    private var lastForegroundApp: String? = null
+    private var isRealtimeMonitoring = false
 
     init {
-        Log.d(TAG, "UsageStatsModule initialized")
+        Log.d(TAG, "UsageStatsModule initialized with enhanced UsageChecker")
     }
 
-    override fun getName(): String {
-        Log.d(TAG, "getName() called - returning UsageStatsModule")
-        return "UsageStatsModule"
-    }
+    override fun getName(): String = "UsageStatsModule"
 
     @ReactMethod
     fun isUsageAccessGranted(promise: Promise) {
@@ -38,52 +41,6 @@ class UsageStatsModule(reactContext: ReactApplicationContext) : ReactContextBase
         } catch (e: Exception) {
             Log.e(TAG, "Error checking usage access", e)
             promise.resolve(false)
-        }
-    }
-
-    private fun checkUsageStatsPermission(): Boolean {
-        try {
-            // Method 1: Try AppOpsManager approach (more reliable)
-            val appOpsManager = reactApplicationContext.getSystemService(Context.APP_OPS_SERVICE) as AppOpsManager
-            val mode = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                appOpsManager.unsafeCheckOpNoThrow(AppOpsManager.OPSTR_GET_USAGE_STATS, Process.myUid(), reactApplicationContext.packageName)
-            } else {
-                @Suppress("DEPRECATION")
-                appOpsManager.checkOpNoThrow(AppOpsManager.OPSTR_GET_USAGE_STATS, Process.myUid(), reactApplicationContext.packageName)
-            }
-            
-            Log.d(TAG, "AppOpsManager check result: $mode")
-            
-            if (mode == AppOpsManager.MODE_ALLOWED) {
-                return true
-            }
-
-            // Method 2: Try UsageStatsManager approach as fallback
-            Log.d(TAG, "AppOpsManager denied, trying UsageStatsManager approach")
-            val usageStatsManager = reactApplicationContext.getSystemService(Context.USAGE_STATS_SERVICE) as UsageStatsManager
-            val time = System.currentTimeMillis()
-            
-            // Try different time ranges to be more lenient
-            val timeRanges = arrayOf(
-                time - 1000 * 60,           // 1 minute ago
-                time - 1000 * 60 * 60,      // 1 hour ago  
-                time - 1000 * 60 * 60 * 24  // 1 day ago
-            )
-            
-            for (startTime in timeRanges) {
-                val stats = usageStatsManager.queryUsageStats(UsageStatsManager.INTERVAL_DAILY, startTime, time)
-                Log.d(TAG, "UsageStats check with ${(time - startTime) / (1000 * 60)} min range: ${stats.size} apps")
-                if (stats.isNotEmpty()) {
-                    return true
-                }
-            }
-            
-            Log.d(TAG, "All permission checks failed")
-            return false
-            
-        } catch (e: Exception) {
-            Log.e(TAG, "Exception in permission check", e)
-            return false
         }
     }
 
@@ -101,61 +58,55 @@ class UsageStatsModule(reactContext: ReactApplicationContext) : ReactContextBase
 
     @ReactMethod
     fun getInstalledMonitoredApps(promise: Promise) {
-    Log.d(TAG, "getInstalledMonitoredApps() called - using launcher query")
-    try {
-        val pm = reactApplicationContext.packageManager
+        Log.d(TAG, "getInstalledMonitoredApps() called")
+        try {
+            val pm = reactApplicationContext.packageManager
+            val mainIntent = Intent(Intent.ACTION_MAIN, null)
+            mainIntent.addCategory(Intent.CATEGORY_LAUNCHER)
 
-        // Intent to discover launchable apps
-        val mainIntent = Intent(Intent.ACTION_MAIN, null)
-        mainIntent.addCategory(Intent.CATEGORY_LAUNCHER)
+            val resolveInfos = pm.queryIntentActivities(mainIntent, 0)
+            Log.d(TAG, "Found ${resolveInfos.size} launchable apps")
 
-        val resolveInfos = pm.queryIntentActivities(mainIntent, 0)
-        Log.d(TAG, "queryIntentActivities returned: ${resolveInfos.size}")
+            val monitoredApps = setOf(
+                "com.google.android.youtube",
+                "com.instagram.android",
+                "com.whatsapp",
+                "com.facebook.katana",
+                "com.ss.android.ugc.tiktok",
+                "com.zhiliaoapp.musically",
+                "com.twitter.android",
+                "com.snapchat.android",
+                "com.reddit.frontpage",
+                "com.discord"
+            )
 
-        val monitoredApps = setOf(
-        "com.google.android.youtube",
-        "com.instagram.android",
-        "com.whatsapp",
-        "com.facebook.katana",
-        "com.ss.android.ugc.tiktok",
-        "com.zhiliaoapp.musically",
-        "com.twitter.android",
-        "com.snapchat.android",
-        "com.reddit.frontpage",
-        "com.discord"
-        )
+            val result = WritableNativeArray()
+            val seen = HashSet<String>()
 
-        val result = WritableNativeArray()
-        val seen = HashSet<String>()
+            for (ri in resolveInfos) {
+                val pkg = ri.activityInfo?.packageName ?: continue
+                if (seen.contains(pkg)) continue
+                seen.add(pkg)
 
-        for (ri in resolveInfos) {
-        val pkg = ri.activityInfo?.packageName ?: continue
-        if (seen.contains(pkg)) continue
-        seen.add(pkg)
+                val label = ri.loadLabel(pm)?.toString() ?: pkg
+                val map = WritableNativeMap()
+                map.putString("packageName", pkg)
+                map.putString("appName", label)
+                map.putBoolean("isRecommended", monitoredApps.contains(pkg))
+                result.pushMap(map)
+            }
 
-        // Skip system-only apps if you want (optional)
-        // val applicationInfo = pm.getApplicationInfo(pkg, 0)
-        // if ((applicationInfo.flags and ApplicationInfo.FLAG_SYSTEM) != 0) continue
-
-        val label = ri.loadLabel(pm)?.toString() ?: pkg
-        val map = WritableNativeMap()
-        map.putString("packageName", pkg)
-        map.putString("appName", label)
-        map.putBoolean("isRecommended", monitoredApps.contains(pkg))
-        result.pushMap(map)
+            Log.d(TAG, "Returning ${result.size()} apps")
+            promise.resolve(result)
+        } catch (e: Exception) {
+            Log.e(TAG, "Error in getInstalledMonitoredApps", e)
+            promise.reject("GET_APPS_ERROR", e.message)
         }
-
-        Log.d(TAG, "Returning ${result.size()} launchable apps")
-        promise.resolve(result)
-    } catch (e: Exception) {
-        Log.e(TAG, "Error in getInstalledMonitoredApps", e)
-        promise.reject("GET_APPS_ERROR", e.message)
-    }
     }
 
     @ReactMethod
     fun getUsageSince(startTimeMs: Double, promise: Promise) {
-        Log.d(TAG, "getUsageSince (events-based) called with startTime: $startTimeMs")
+        Log.d(TAG, "getUsageSince called with startTime: $startTimeMs")
         try {
             if (!checkUsageStatsPermission()) {
                 Log.d(TAG, "No usage permission, returning empty array")
@@ -163,71 +114,8 @@ class UsageStatsModule(reactContext: ReactApplicationContext) : ReactContextBase
                 return
             }
 
-            val usageStatsManager = reactApplicationContext.getSystemService(Context.USAGE_STATS_SERVICE) as UsageStatsManager
-            val endTime = System.currentTimeMillis()
-            val startTime = startTimeMs.toLong()
-
-            // Query events
-            val events = usageStatsManager.queryEvents(startTime, endTime)
-            val event = UsageEvents.Event()
-            val usageMap = HashMap<String, Long>()
-            val sessionStartTimes = HashMap<String, Long>()
-
-            while (events.hasNextEvent()) {
-                events.getNextEvent(event)
-                val pkg = event.packageName ?: continue
-                
-                // Skip our own app
-                if (pkg == reactApplicationContext.packageName) continue
-
-                when (event.eventType) {
-                    UsageEvents.Event.MOVE_TO_FOREGROUND -> {
-                        sessionStartTimes[pkg] = event.timeStamp
-                    }
-                    UsageEvents.Event.MOVE_TO_BACKGROUND -> {
-                        val startTs = sessionStartTimes[pkg]
-                        if (startTs != null && event.timeStamp > startTs) {
-                            val sessionDuration = event.timeStamp - startTs
-                            usageMap[pkg] = (usageMap[pkg] ?: 0L) + sessionDuration
-                            sessionStartTimes.remove(pkg)
-                        }
-                    }
-                }
-            }
-
-            // Close any open sessions at endTime
-            sessionStartTimes.forEach { (pkg, startTs) ->
-                if (endTime > startTs) {
-                    val sessionDuration = endTime - startTs
-                    usageMap[pkg] = (usageMap[pkg] ?: 0L) + sessionDuration
-                }
-            }
-
-            // Convert to result array
-            val pm = reactApplicationContext.packageManager
-            val result = WritableNativeArray()
-            
-            usageMap.entries
-                .filter { it.value > 0 } // Only include apps with actual usage
-                .sortedByDescending { it.value } // Sort by usage time
-                .forEach { (pkg, totalMs) ->
-                    try {
-                        val ai = pm.getApplicationInfo(pkg, 0)
-                        val label = pm.getApplicationLabel(ai).toString()
-                        
-                        val map = WritableNativeMap()
-                        map.putString("packageName", pkg)
-                        map.putString("appName", label)
-                        map.putDouble("totalTimeMs", totalMs.toDouble())
-                        map.putDouble("lastTimeUsed", endTime.toDouble())
-                        result.pushMap(map)
-                    } catch (e: PackageManager.NameNotFoundException) {
-                        // App was uninstalled, skip
-                    }
-                }
-
-            Log.d(TAG, "Returning ${result.size()} apps with usage data")
-            promise.resolve(result)
+            val usageData = getUsageDataSince(startTimeMs.toLong())
+            promise.resolve(usageData)
         } catch (e: Exception) {
             Log.e(TAG, "Error in getUsageSince", e)
             promise.reject("GET_USAGE_ERROR", e.message)
@@ -237,26 +125,70 @@ class UsageStatsModule(reactContext: ReactApplicationContext) : ReactContextBase
     @ReactMethod
     fun startBackgroundMonitoring(intervalMinutes: Int) {
         Log.d(TAG, "startBackgroundMonitoring() called with interval: $intervalMinutes")
-        BackgroundUsageWorker.startPeriodicWork(reactApplicationContext, intervalMinutes.toLong())
-    }
-
-    @ReactMethod  
-    fun stopBackgroundMonitoring() {
-        Log.d(TAG, "stopBackgroundMonitoring() called")
-        BackgroundUsageWorker.stopPeriodicWork(reactApplicationContext)
+        try {
+            BackgroundUsageWorker.startPeriodicWork(reactApplicationContext, intervalMinutes.toLong())
+            
+            // Also start realtime monitoring for immediate app detection
+            startRealtimeMonitoring()
+        } catch (e: Exception) {
+            Log.e(TAG, "Error starting background monitoring", e)
+        }
     }
 
     @ReactMethod
-    fun testModule(promise: Promise) {
-        Log.d(TAG, "testModule() called - module is working!")
-        promise.resolve("UsageStatsModule is working correctly!")
+    fun stopBackgroundMonitoring() {
+        Log.d(TAG, "stopBackgroundMonitoring() called")
+        try {
+            BackgroundUsageWorker.stopPeriodicWork(reactApplicationContext)
+            stopRealtimeMonitoring()
+        } catch (e: Exception) {
+            Log.e(TAG, "Error stopping background monitoring", e)
+        }
+    }
+
+    @ReactMethod
+    fun startRealtimeAppDetection(promise: Promise) {
+        Log.d(TAG, "startRealtimeAppDetection() called")
+        try {
+            if (!checkUsageStatsPermission()) {
+                promise.reject("NO_PERMISSION", "Usage access permission required")
+                return
+            }
+            
+            startRealtimeMonitoring()
+            promise.resolve(true)
+        } catch (e: Exception) {
+            Log.e(TAG, "Error starting realtime detection", e)
+            promise.reject("START_REALTIME_ERROR", e.message)
+        }
+    }
+
+    @ReactMethod
+    fun stopRealtimeAppDetection(promise: Promise) {
+        Log.d(TAG, "stopRealtimeAppDetection() called")
+        try {
+            stopRealtimeMonitoring()
+            promise.resolve(true)
+        } catch (e: Exception) {
+            Log.e(TAG, "Error stopping realtime detection", e)
+            promise.reject("STOP_REALTIME_ERROR", e.message)
+        }
+    }
+
+    @ReactMethod
+    fun triggerUsageCheck() {
+        Log.d(TAG, "Manual usage check triggered")
+        try {
+            usageChecker.checkUsageAndNotify()
+        } catch (e: Exception) {
+            Log.e(TAG, "Error in manual usage check", e)
+        }
     }
 
     @ReactMethod
     fun forceRefreshPermission(promise: Promise) {
         Log.d(TAG, "forceRefreshPermission() called")
         try {
-            // Wait a bit then check again
             Thread.sleep(1000)
             val hasAccess = checkUsageStatsPermission()
             Log.d(TAG, "Force refresh result: $hasAccess")
@@ -264,6 +196,175 @@ class UsageStatsModule(reactContext: ReactApplicationContext) : ReactContextBase
         } catch (e: Exception) {
             Log.e(TAG, "Error in force refresh", e)
             promise.resolve(false)
+        }
+    }
+
+    @ReactMethod
+    fun testModule(promise: Promise) {
+        Log.d(TAG, "testModule() called - enhanced module working!")
+        promise.resolve("Enhanced UsageStatsModule is working correctly!")
+    }
+
+    private fun startRealtimeMonitoring() {
+        if (isRealtimeMonitoring) {
+            Log.d(TAG, "Realtime monitoring already running")
+            return
+        }
+
+        Log.d(TAG, "Starting realtime app monitoring")
+        isRealtimeMonitoring = true
+        realtimeHandler = Handler(Looper.getMainLooper())
+        
+        realtimeRunnable = object : Runnable {
+            override fun run() {
+                if (isRealtimeMonitoring) {
+                    checkCurrentForegroundApp()
+                    realtimeHandler?.postDelayed(this, 2000) // Check every 2 seconds
+                }
+            }
+        }
+        
+        realtimeHandler?.post(realtimeRunnable!!)
+        Log.d(TAG, "Realtime monitoring started")
+    }
+
+    private fun stopRealtimeMonitoring() {
+        Log.d(TAG, "Stopping realtime monitoring")
+        isRealtimeMonitoring = false
+        realtimeRunnable?.let { realtimeHandler?.removeCallbacks(it) }
+        realtimeHandler = null
+        realtimeRunnable = null
+    }
+
+    private fun checkCurrentForegroundApp() {
+        try {
+            val usageStatsManager = reactApplicationContext.getSystemService(Context.USAGE_STATS_SERVICE) as UsageStatsManager
+            val currentTime = System.currentTimeMillis()
+            val events = usageStatsManager.queryEvents(currentTime - 10000, currentTime) // Last 10 seconds
+
+            var lastEventTime = 0L
+            var foregroundApp: String? = null
+            val event = UsageEvents.Event()
+
+            while (events.hasNextEvent()) {
+                events.getNextEvent(event)
+                if (event.eventType == UsageEvents.Event.MOVE_TO_FOREGROUND && event.timeStamp > lastEventTime) {
+                    lastEventTime = event.timeStamp
+                    foregroundApp = event.packageName
+                }
+            }
+
+            // Check if a new monitored app came to foreground
+            if (foregroundApp != null && 
+                foregroundApp != lastForegroundApp && 
+                foregroundApp != reactApplicationContext.packageName && // Not our own app
+                isMonitoredApp(foregroundApp)) {
+                
+                Log.d(TAG, "Detected monitored app in foreground: $foregroundApp")
+                lastForegroundApp = foregroundApp
+                
+                // Trigger immediate usage check for this app
+                usageChecker.checkRealtimeAppUsage(foregroundApp)
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Error checking foreground app", e)
+        }
+    }
+
+    private fun isMonitoredApp(packageName: String): Boolean {
+        val monitoredApps = setOf(
+            "com.google.android.youtube",
+            "com.instagram.android",
+            "com.whatsapp",
+            "com.facebook.katana",
+            "com.ss.android.ugc.tiktok",
+            "com.zhiliaoapp.musically",
+            "com.twitter.android",
+            "com.snapchat.android",
+            "com.reddit.frontpage",
+            "com.discord"
+        )
+        return monitoredApps.contains(packageName)
+    }
+
+    private fun getUsageDataSince(startTimeMs: Long): WritableNativeArray {
+        val usageStatsManager = reactApplicationContext.getSystemService(Context.USAGE_STATS_SERVICE) as UsageStatsManager
+        val endTime = System.currentTimeMillis()
+
+        val events = usageStatsManager.queryEvents(startTimeMs, endTime)
+        val event = UsageEvents.Event()
+        val usageMap = HashMap<String, Long>()
+        val sessionStartTimes = HashMap<String, Long>()
+
+        while (events.hasNextEvent()) {
+            events.getNextEvent(event)
+            val pkg = event.packageName ?: continue
+            
+            if (pkg == reactApplicationContext.packageName) continue
+
+            when (event.eventType) {
+                UsageEvents.Event.MOVE_TO_FOREGROUND -> {
+                    sessionStartTimes[pkg] = event.timeStamp
+                }
+                UsageEvents.Event.MOVE_TO_BACKGROUND -> {
+                    val startTs = sessionStartTimes[pkg]
+                    if (startTs != null && event.timeStamp > startTs) {
+                        val sessionDuration = event.timeStamp - startTs
+                        usageMap[pkg] = (usageMap[pkg] ?: 0L) + sessionDuration
+                        sessionStartTimes.remove(pkg)
+                    }
+                }
+            }
+        }
+
+        // Close any open sessions at endTime
+        sessionStartTimes.forEach { (pkg, startTs) ->
+            if (endTime > startTs) {
+                val sessionDuration = endTime - startTs
+                usageMap[pkg] = (usageMap[pkg] ?: 0L) + sessionDuration
+            }
+        }
+
+        val pm = reactApplicationContext.packageManager
+        val result = WritableNativeArray()
+        
+        usageMap.entries
+            .filter { it.value > 0 }
+            .sortedByDescending { it.value }
+            .forEach { (pkg, totalMs) ->
+                try {
+                    val ai = pm.getApplicationInfo(pkg, 0)
+                    val label = pm.getApplicationLabel(ai).toString()
+                    
+                    val map = WritableNativeMap()
+                    map.putString("packageName", pkg)
+                    map.putString("appName", label)
+                    map.putDouble("totalTimeMs", totalMs.toDouble())
+                    map.putDouble("lastTimeUsed", endTime.toDouble())
+                    result.pushMap(map)
+                } catch (e: PackageManager.NameNotFoundException) {
+                    // Skip uninstalled apps
+                }
+            }
+
+        return result
+    }
+
+    private fun checkUsageStatsPermission(): Boolean {
+        return try {
+            val appOpsManager = reactApplicationContext.getSystemService(Context.APP_OPS_SERVICE) as AppOpsManager
+            val mode = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                appOpsManager.unsafeCheckOpNoThrow(AppOpsManager.OPSTR_GET_USAGE_STATS, Process.myUid(), reactApplicationContext.packageName)
+            } else {
+                @Suppress("DEPRECATION")
+                appOpsManager.checkOpNoThrow(AppOpsManager.OPSTR_GET_USAGE_STATS, Process.myUid(), reactApplicationContext.packageName)
+            }
+            
+            Log.d(TAG, "Permission check result: $mode")
+            mode == AppOpsManager.MODE_ALLOWED
+        } catch (e: Exception) {
+            Log.e(TAG, "Exception in permission check", e)
+            false
         }
     }
 }

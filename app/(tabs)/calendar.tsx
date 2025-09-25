@@ -69,10 +69,6 @@ export default function Calendar() {
             const meta = await database.getMeta('monitored_apps');
             const monitoredPackages: string[] = meta ? JSON.parse(meta) : [];
 
-            // compute monitored-only summary for that day: use computeBrainScoreForMonitored with startTime for the date
-            // computeBrainScoreForMonitored expects a startTime, we'll pass start of day ms for that date
-            const startOfDay = new Date(day.date + 'T00:00:00').getTime();
-
             // Note: computeBrainScoreForMonitored fetches usage via UsageService.getUsageSince.
             // To avoid double fetching we could also compute from raw: filter raw by monitoredPackages & sum.
             // We'll do the raw-based fallback here to keep it local and faster:
@@ -533,7 +529,7 @@ export default function Calendar() {
                     style={{ backgroundColor: `${getScoreColor(selectedDay.brainScore)}20` }}
                   >
                     <Text className="text-2xl font-bold" style={{ color: getScoreColor(selectedDay.brainScore) }}>
-                      {selectedDay.brainScore}
+                      {Math.round(selectedDay.brainScore)}
                     </Text>
                   </View>
                   <Text className="text-base font-medium text-text">
