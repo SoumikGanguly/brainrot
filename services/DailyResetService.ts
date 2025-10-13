@@ -1,3 +1,4 @@
+import { AppBlockingService } from './AppBlockingService';
 import { HistoricalDataService } from './HistoricalDataService';
 import { UsageMonitoringService } from './UsageMonitoringService';
 import { UsageService } from './UsageService';
@@ -108,8 +109,17 @@ export class DailyResetService {
       // Step 5: Refresh monitored apps in case settings changed
       console.log('Step 5: Refreshing monitored apps...');
       await monitoringService.refreshMonitoredApps();
+
+      //Step 6: Reset app blocking limits
+      console.log('Step 6: Resetting app blocking limits...');
+      try {
+        const blockingService = AppBlockingService.getInstance();
+        await blockingService.resetDailyLimits();
+      } catch (error) {
+        console.log('App blocking reset failed:', error);
+      }
       
-      // Step 6: Store reset timestamp and stats
+      // Step 7: Store reset timestamp and stats
       const resetEndTime = Date.now();
       const resetDuration = resetEndTime - resetStartTime;
       

@@ -19,6 +19,8 @@ import { computeBrainScoreForMonitored } from '@/utils/brainScoreRunner';
 import { calculateBrainScore, getBrainScoreStatus } from '../../utils/brainScore';
 import { formatTime } from '../../utils/time';
 
+import { AppBlockingService } from '@/services/AppBlockingService';
+
 
 interface AppUsage {
   packageName: string;
@@ -38,65 +40,84 @@ export default function HomeScreen() {
   const [showAllAppsModal, setShowAllAppsModal] = useState(false);
 
   useEffect(() => {
-  const initializeServices = async () => {
+    let isInitialized = false;
+    
+    const initializeAllServices = async () => {
+      if (isInitialized) return; // Prevent multiple initializations
+      
       try {
-        // Initialize monitoring
+        console.log('=== INITIALIZING ALL SERVICES ===');
+        
+        // 1. Initialize monitoring service first (handles notifications)
         const monitoringService = UsageMonitoringService.getInstance();
         await monitoringService.initialize();
+        console.log('✓ Monitoring service initialized');
         
-        // Initialize and backfill historical data
+        // 2. Initialize blocking service
+        const blockingService = AppBlockingService.getInstance();
+        await blockingService.initialize();
+        console.log('✓ Blocking service initialized');
+        
+        // 3. Initialize historical data service
         const historicalService = HistoricalDataService.getInstance();
-        await historicalService.backfillHistoricalData(90); // Backfill last 90 days
+        // Only backfill if needed, not on every app start
+        const lastBackfill = await database.getMeta('last_backfill_date');
+        const today = new Date().toISOString().split('T')[0];
+        if (lastBackfill !== today) {
+          await historicalService.backfillHistoricalData(90);
+          await database.setMeta('last_backfill_date', today);
+          console.log('✓ Historical data backfilled');
+        }
         
-        // Initialize daily reset
+        // 4. Initialize service coordinator (connects monitoring and blocking)
+        const coordinator = (await import('@/services/ServiceCoordinator')).ServiceCoordinator.getInstance();
+        await coordinator.initialize();
+        console.log('✓ Service coordinator initialized');
+        
+        // 5. Initialize daily reset service
         const dailyResetService = DailyResetService.getInstance();
         dailyResetService.initialize();
+        console.log('✓ Daily reset service initialized');
+        
+        // 5. Clean up duplicates once
+        await database.cleanupDuplicateEntries();
+        console.log('✓ Database cleanup completed');
+        
+        isInitialized = true;
+        console.log('=== ALL SERVICES INITIALIZED ===');
         
       } catch (error) {
         console.error('Failed to initialize services:', error);
       }
     };
 
-    initializeServices();
+    // Initialize once
+    initializeAllServices();
 
-    const cleanupAndInitialize = async () => {
-      try {
-        await database.cleanupDuplicateEntries();
-        const monitoringService = UsageMonitoringService.getInstance();
-        await monitoringService.initialize();
-      } catch (error) {
-        console.error('Failed to initialize:', error);
-      }
-    };
-
-    cleanupAndInitialize();
-
-    // Initialize monitoring service when app starts
-    const initializeMonitoring = async () => {
-      try {
-        const monitoringService = UsageMonitoringService.getInstance();
-        await monitoringService.initialize();
-      } catch (error) {
-        console.error('Failed to initialize usage monitoring:', error);
-      }
-    };
-
-    initializeMonitoring();
-
-    // Handle app state changes for monitoring
-    const handleAppStateChange = (nextAppState: string) => {
-      const monitoringService = UsageMonitoringService.getInstance();
-      
+    
+    // Handle app state changes
+    const handleAppStateChange = async (nextAppState: string) => {
       if (nextAppState === 'active') {
-        // App came to foreground
-        monitoringService.startMonitoring();
+        console.log('App became active, refreshing services...');
+        
+        // Refresh monitoring when app comes to foreground
+        const monitoringService = UsageMonitoringService.getInstance();
+        await monitoringService.startMonitoring();
+        
+        // Refresh blocking service
+        const blockingService = AppBlockingService.getInstance();
+        await blockingService.initialize(); // This will reload settings and blocked apps
+        
+        // Trigger immediate usage check
+        setTimeout(() => {
+          monitoringService.triggerManualCheck();
+        }, 1000);
       }
-      // Background handling is done in the service itself
     };
 
     const subscription = AppState.addEventListener('change', handleAppStateChange);
 
-    // Cleanup
+    // Cleanup on unmount
     return () => {
       subscription?.remove();
     };

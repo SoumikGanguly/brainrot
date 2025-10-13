@@ -6,7 +6,6 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { PrimaryButton, SecondaryButton } from '../../components/Buttons';
 import { Card } from '../../components/Card';
 import { Header } from '../../components/Header';
-// import { Slider } from '../../components/Slider';
 
 import AppSelectionBottomSheet from '@/components/AppSelectionBottomSheet';
 import { database } from '../../services/database';
@@ -15,6 +14,7 @@ import { PurchaseService } from '../../services/PurchaseService';
 import { TrialService } from '../../services/TrialService';
 import { UsageService } from '../../services/UsageService';
 
+import { AppBlockingService, BlockingMode } from '@/services/AppBlockingService';
 import { UsageMonitoringService } from '@/services/UsageMonitoringService';
 import type { AppSelectionItem } from '../../types';
 
@@ -23,6 +23,8 @@ interface MonitoredApp {
   appName: string;
   isRecommended: boolean;
   isMonitored: boolean;
+  isBlocked: boolean;
+  blockTimeLimit?: number;
 }
 
 interface AvailableApp {
@@ -37,10 +39,17 @@ interface SettingsState {
   // Monitored Apps
   monitoredApps: MonitoredApp[];
   availableApps: AvailableApp[];
+
+  appBlockingEnabled: boolean;
+  blockingMode: 'soft' | 'hard';
+  blockBypassLimit: number;
+  blockScheduleEnabled: boolean;
+  blockScheduleStart: string;
+  blockScheduleEnd: string;
   
   // Notifications
   notificationsEnabled: boolean;
-  notificationIntensity: number; // 1=Mild, 2=Normal, 3=Harsh, 4=Critical
+  notificationIntensity: number;
   notificationsSnoozeUntil: number;
   
   // Background Monitoring
@@ -67,11 +76,16 @@ export default function Settings() {
     analyticsEnabled: true,
     trialInfo: { isActive: false, daysRemaining: 0, expired: false },
     isPremium: false,
+    appBlockingEnabled: false,
+    blockingMode: 'soft',
+    blockBypassLimit: 3,
+    blockScheduleEnabled: false,
+    blockScheduleStart: '22:00',
+    blockScheduleEnd: '06:00',
   });
   const [loading, setLoading] = useState(true);
   const [purchasing, setPurchasing] = useState(false);
   const [showAppSelection, setShowAppSelection] = useState(false);
-
   const [modalKey, setModalKey] = useState(0);
 
   useEffect(() => {
@@ -80,56 +94,79 @@ export default function Settings() {
 
   const loadSettings = async () => {
     try {
-    setLoading(true);
+      setLoading(true);
 
-    const installedApps = await UsageService.getInstalledApps(); // native list including isRecommended
-    // Build availableApps from installedApps
-    const availableApps: AvailableApp[] = (installedApps || []).filter(a => a && a.packageName && a.appName).map(a => ({
-      packageName: a.packageName,
-      appName: a.appName,
-      isRecommended: !!(a as any).isRecommended,
-      category: (a as any).category || undefined,
-    }));
+      // Get installed apps
+      const installedApps = await UsageService.getInstalledApps();
+      
+      // Build available apps list
+      const availableApps: AvailableApp[] = (installedApps || [])
+        .filter(a => a && a.packageName && a.appName)
+        .map(a => ({
+          packageName: a.packageName,
+          appName: a.appName,
+          isRecommended: !!(a as any).isRecommended,
+          category: (a as any).category || undefined,
+        }));
 
-    // Read saved monitored app list
-    const monitoredAppsData = await database.getMeta('monitored_apps');
-    let monitoredPackages: string[] = [];
+      // Load app blocking settings first
+      const appBlockingEnabled = (await database.getMeta('app_blocking_enabled')) === 'true';
+      const blockingMode = (await database.getMeta('blocking_mode') || 'soft') as BlockingMode;
+      const blockBypassLimit = parseInt(await database.getMeta('block_bypass_limit') || '3', 10);
+      const blockScheduleEnabled = (await database.getMeta('block_schedule_enabled')) === 'true';
+      const blockScheduleStart = await database.getMeta('block_schedule_start') || '22:00';
+      const blockScheduleEnd = await database.getMeta('block_schedule_end') || '06:00';
 
-    if (monitoredAppsData) {
-      // Use the user's saved monitored set
-      monitoredPackages = Array.isArray(JSON.parse(monitoredAppsData))
-        ? JSON.parse(monitoredAppsData)
-        : [];
-    } else {
-      // First run: default to only recommended/social apps
-      monitoredPackages = availableApps
-        .filter(app => app.isRecommended) // only recommended apps
-        .map(app => app.packageName);
+      // Load blocked apps
+      const blockedAppsData = await database.getMeta('blocked_apps');
+      const blockedPackages = blockedAppsData ? JSON.parse(blockedAppsData) : [];
 
-      // Persist default monitored list so subsequent loads keep the same behavior
-      await database.setMeta('monitored_apps', JSON.stringify(monitoredPackages));
-    }
+      // Read saved monitored app list
+      const monitoredAppsData = await database.getMeta('monitored_apps');
+      let monitoredPackages: string[] = [];
 
-    // Build monitoredApps list for UI (recommended first)
-    const monitoredApps: MonitoredApp[] = availableApps
-      .filter(app => monitoredPackages.includes(app.packageName))
-      .map(app => ({
-        packageName: app.packageName,
-        appName: app.appName,
-        isRecommended: app.isRecommended,
-        isMonitored: true,
-      }));
+      if (monitoredAppsData) {
+        monitoredPackages = Array.isArray(JSON.parse(monitoredAppsData))
+          ? JSON.parse(monitoredAppsData)
+          : [];
+      } else {
+        // First run: default to recommended apps
+        monitoredPackages = availableApps
+          .filter(app => app.isRecommended)
+          .map(app => app.packageName);
 
-      // Load simple metas
+        await database.setMeta('monitored_apps', JSON.stringify(monitoredPackages));
+      }
+
+      // Build monitored apps list with blocking status
+      const monitoredApps: MonitoredApp[] = availableApps
+        .filter(app => monitoredPackages.includes(app.packageName))
+        .map(app => ({
+          packageName: app.packageName,
+          appName: app.appName,
+          isRecommended: app.isRecommended,
+          isMonitored: true,
+          isBlocked: blockedPackages.includes(app.packageName),
+        }))
+        .sort((a, b) => {
+          // Sort: recommended first, then alphabetical
+          if (a.isRecommended !== b.isRecommended) {
+            return a.isRecommended ? -1 : 1;
+          }
+          return a.appName.localeCompare(b.appName);
+        });
+
+      // Load notification settings
       const notificationsEnabled = (await database.getMeta('notifications_enabled')) !== 'false';
       const notificationIntensity = parseInt(await database.getMeta('notification_intensity') || '2', 10);
       const notificationsSnoozeUntil = parseInt(await database.getMeta('notifications_snooze_until') || '0', 10);
 
+      // Load monitoring settings
       const backgroundChecksEnabled = (await database.getMeta('background_checks_enabled')) !== 'false';
       const realtimeMonitoringEnabled = (await database.getMeta('realtime_monitoring_enabled')) === 'true';
       const analyticsEnabled = (await database.getMeta('analytics_enabled')) !== 'false';
 
-      // Trial/purchase with safe error narrowing
+      // Trial/purchase info
       let trialInfo = { isActive: false, daysRemaining: 0, expired: false };
       let isPremium = false;
 
@@ -137,7 +174,6 @@ export default function Settings() {
         const ti = await TrialService.getTrialInfo();
         if (ti && typeof ti === 'object') trialInfo = ti;
       } catch (err) {
-        // err is unknown — cast or test
         console.log('TrialService not available in dev mode:', (err as any)?.message ?? err);
         if (__DEV__) trialInfo = { isActive: true, daysRemaining: 7, expired: false };
       }
@@ -150,28 +186,29 @@ export default function Settings() {
         if (__DEV__) isPremium = false;
       }
 
-      // Check if comprehensive monitoring should be active
+      // Check monitoring status
       const monitoringEnabled = await database.getMeta('monitoring_enabled');
-        if (monitoringEnabled === 'true' && (backgroundChecksEnabled || realtimeMonitoringEnabled)) {
-          // Ensure monitoring service is running if settings indicate it should be
-          try {
-            const status = UsageMonitoringService.getInstance().getMonitoringStatus();
-            if (!status.isMonitoring) {
-              console.log('Restarting monitoring based on saved settings');
-              await UsageService.startComprehensiveMonitoring();
-            }
-          } catch (error) {
-            console.log('Could not restart monitoring:', error);
+      if (monitoringEnabled === 'true' && (backgroundChecksEnabled || realtimeMonitoringEnabled)) {
+        try {
+          const status = UsageMonitoringService.getInstance().getMonitoringStatus();
+          if (!status.isMonitoring) {
+            console.log('Restarting monitoring based on saved settings');
+            await UsageService.startComprehensiveMonitoring();
           }
+        } catch (error) {
+          console.log('Could not restart monitoring:', error);
         }
+      }
 
-        
-      // Finally set state (we have availableApps variable in scope)
-      // Build non-monitored available list is simply availableApps (all apps)
-      setSettings(prev => ({
-        ...prev,
+      // Update available apps to mark currently monitored
+      const availableAppsWithStatus = availableApps.map(app => ({
+        ...app,
+        isCurrentlyMonitored: monitoredPackages.includes(app.packageName)
+      }));
+
+      setSettings({
         monitoredApps,
-        availableApps,
+        availableApps: availableAppsWithStatus,
         notificationsEnabled,
         notificationIntensity,
         notificationsSnoozeUntil,
@@ -180,12 +217,13 @@ export default function Settings() {
         analyticsEnabled,
         trialInfo,
         isPremium,
-      }));
-
-      console.log('installedApps raw ->', installedApps?.length, installedApps?.slice?.(0, 10));
-      console.log('availableApps ->', availableApps.length, availableApps.slice(0,10));
-      console.log('monitoredPackages (from meta) ->', monitoredPackages.length, monitoredPackages);
-      console.log('settings.monitoredApps ->', monitoredApps.length, monitoredApps.slice(0,10));
+        appBlockingEnabled,
+        blockingMode,
+        blockBypassLimit,
+        blockScheduleEnabled,
+        blockScheduleStart,
+        blockScheduleEnd,
+      });
 
     } catch (err) {
       console.error('Error loading settings:', err);
@@ -199,29 +237,55 @@ export default function Settings() {
     }
   };
 
-
   const updateMonitoredApp = async (packageName: string, isMonitored: boolean) => {
     if (!packageName) {
       console.error('updateMonitoredApp: packageName is required');
       return;
     }
 
-    const updatedApps = settings.monitoredApps
-      .filter(app => app && app.packageName)
-      .map(app =>
-        app.packageName === packageName ? { ...app, isMonitored } : app
-      );
-    
-    const monitoredPackages = updatedApps
-      .filter(app => app && app.isMonitored && app.packageName)
-      .map(app => app.packageName);
-    
     try {
+      let updatedMonitoredApps: MonitoredApp[];
+      
+      if (isMonitored) {
+        // Adding back to monitored
+        const appToAdd = settings.availableApps.find(app => app.packageName === packageName);
+        if (!appToAdd) return;
+        
+        updatedMonitoredApps = [...settings.monitoredApps, {
+          packageName: appToAdd.packageName,
+          appName: appToAdd.appName,
+          isRecommended: appToAdd.isRecommended,
+          isMonitored: true,
+          isBlocked: false,
+        }];
+      } else {
+        // Removing from monitored
+        updatedMonitoredApps = settings.monitoredApps.filter(app => app.packageName !== packageName);
+        
+        // Also remove from blocked apps if it was blocked
+        const blockedAppsData = await database.getMeta('blocked_apps');
+        const blockedPackages = blockedAppsData ? JSON.parse(blockedAppsData) : [];
+        const updatedBlockedPackages = blockedPackages.filter((pkg: string) => pkg !== packageName);
+        await database.setMeta('blocked_apps', JSON.stringify(updatedBlockedPackages));
+        
+        // Notify blocking service
+        const blockingService = AppBlockingService.getInstance();
+        await blockingService.unblockApp(packageName);
+      }
+      
+      // Save updated monitored list
+      const monitoredPackages = updatedMonitoredApps.map(app => app.packageName);
       await database.setMeta('monitored_apps', JSON.stringify(monitoredPackages));
-      setSettings(prev => ({ 
-        ...prev, 
-        monitoredApps: updatedApps,
-        // FIX: Update availableApps when removing
+      
+      // Update state
+      setSettings(prev => ({
+        ...prev,
+        monitoredApps: updatedMonitoredApps.sort((a, b) => {
+          if (a.isRecommended !== b.isRecommended) {
+            return a.isRecommended ? -1 : 1;
+          }
+          return a.appName.localeCompare(b.appName);
+        }),
         availableApps: prev.availableApps.map(app => 
           app.packageName === packageName 
             ? { ...app, isCurrentlyMonitored: isMonitored }
@@ -232,35 +296,130 @@ export default function Settings() {
       // Refresh monitoring service
       const monitoringService = UsageMonitoringService.getInstance();
       await monitoringService.refreshMonitoredApps();
+      
     } catch (error) {
       console.error('Error updating monitored apps:', error);
+      Alert.alert('Error', 'Failed to update monitored apps. Please try again.');
     }
+  };
+
+  const toggleAppBlocking = async (packageName: string, isBlocked: boolean) => {
+    try {
+      // Update local state
+      const updatedApps = settings.monitoredApps.map(app =>
+        app.packageName === packageName ? { ...app, isBlocked } : app
+      );
+      
+      // Save blocked apps list to database
+      const blockedPackages = updatedApps
+        .filter(app => app.isBlocked)
+        .map(app => app.packageName);
+      
+      await database.setMeta('blocked_apps', JSON.stringify(blockedPackages));
+      
+      setSettings(prev => ({ ...prev, monitoredApps: updatedApps }));
+      
+      // Notify the blocking service
+      const blockingService = AppBlockingService.getInstance();
+      if (isBlocked) {
+        await blockingService.blockApp(packageName);
+      } else {
+        await blockingService.unblockApp(packageName);
+      }
+      
+    } catch (error) {
+      console.error('Error toggling app blocking:', error);
+      Alert.alert('Error', 'Failed to update app blocking. Please try again.');
+    }
+  };
+
+  const updateBlockingSettings = async (key: string, value: any) => {
+    try {
+      await database.setMeta(key, value.toString());
+      
+      if (key === 'app_blocking_enabled') {
+        setSettings(prev => ({ ...prev, appBlockingEnabled: value }));
+        
+        const blockingService = AppBlockingService.getInstance();
+        if (value) {
+          await blockingService.initialize();
+        } else {
+          await blockingService.cleanup();
+        }
+      } else if (key === 'blocking_mode') {
+        setSettings(prev => ({ ...prev, blockingMode: value }));
+        const blockingService = AppBlockingService.getInstance();
+        await blockingService.setBlockingMode(value);
+      } else if (key === 'block_bypass_limit') {
+        setSettings(prev => ({ ...prev, blockBypassLimit: value }));
+      } else if (key === 'block_schedule_enabled') {
+        setSettings(prev => ({ ...prev, blockScheduleEnabled: value }));
+      } else if (key === 'block_schedule_start') {
+        setSettings(prev => ({ ...prev, blockScheduleStart: value }));
+      } else if (key === 'block_schedule_end') {
+        setSettings(prev => ({ ...prev, blockScheduleEnd: value }));
+      }
+      
+    } catch (error) {
+      console.error('Error updating blocking settings:', error);
+    }
+  };
+
+  const showTimePicker = (type: 'start' | 'end') => {
+    Alert.prompt(
+      `Set ${type === 'start' ? 'Start' : 'End'} Time`,
+      'Enter time in HH:MM format (24-hour)',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Set',
+          onPress: (time) => {
+            if (time && /^\d{2}:\d{2}$/.test(time)) {
+              const key = type === 'start' ? 'block_schedule_start' : 'block_schedule_end';
+              updateBlockingSettings(key, time);
+            }
+          }
+        }
+      ],
+      'plain-text',
+      settings[type === 'start' ? 'blockScheduleStart' : 'blockScheduleEnd']
+    );
   };
 
   const handleAddApps = async (selectedPackages: string[]) => {
     try {
-      // Your existing add apps logic...
       const monitoredAppsData = await database.getMeta('monitored_apps');
       const currentMonitored = monitoredAppsData ? JSON.parse(monitoredAppsData) : [];
       const updatedMonitored = [...new Set([...currentMonitored, ...selectedPackages])];
       await database.setMeta('monitored_apps', JSON.stringify(updatedMonitored));
       
-      // Update local state...
-      const updatedApps = settings.availableApps
-        .filter(app => updatedMonitored.includes(app.packageName))
+      // Create new monitored apps from available apps
+      const newMonitoredApps = settings.availableApps
+        .filter(app => selectedPackages.includes(app.packageName))
         .map(app => ({
           packageName: app.packageName,
           appName: app.appName,
           isRecommended: app.isRecommended,
           isMonitored: true,
+          isBlocked: false,
         }));
+
+      // Merge with existing monitored apps
+      const allMonitoredApps = [...settings.monitoredApps];
+      newMonitoredApps.forEach(newApp => {
+        if (!allMonitoredApps.some(app => app.packageName === newApp.packageName)) {
+          allMonitoredApps.push(newApp);
+        }
+      });
 
       setSettings(prev => ({
         ...prev,
-        monitoredApps: [...prev.monitoredApps, ...updatedApps.filter(app => 
-          !prev.monitoredApps.some(existing => existing.packageName === app.packageName)
-        )],
-        // FIX: Update availableApps to mark newly added apps as monitored
+        monitoredApps: allMonitoredApps.sort((a, b) => {
+          if (a.isRecommended !== b.isRecommended) {
+            return a.isRecommended ? -1 : 1;
+          }
+          return a.appName.localeCompare(b.appName);
+        }),
         availableApps: prev.availableApps.map(app => 
           selectedPackages.includes(app.packageName) 
             ? { ...app, isCurrentlyMonitored: true }
@@ -284,7 +443,6 @@ export default function Settings() {
     }
   };
 
-  
   const handleRemoveMonitoredApp = async (packageName: string) => {
     Alert.alert(
       'Remove App',
@@ -302,7 +460,12 @@ export default function Settings() {
 
   const updateNotificationSettings = async (key: string, value: any) => {
     await database.setMeta(key, value.toString());
-    setSettings(prev => ({ ...prev, [key.replace('_', '')] : value }));
+    
+    if (key === 'notifications_enabled') {
+      setSettings(prev => ({ ...prev, notificationsEnabled: value }));
+    } else if (key === 'notification_intensity') {
+      setSettings(prev => ({ ...prev, notificationIntensity: value }));
+    }
   };
 
   const snoozeNotifications = async (hours: number) => {
@@ -316,12 +479,9 @@ export default function Settings() {
   const updateMonitoringSettings = async (key: string, value: boolean) => {
     await database.setMeta(key, value.toString());
   
-    
-    // Handle background monitoring toggle
     if (key === 'background_checks_enabled') {
       if (value) {
         console.log('Starting background checks');
-        // Use the enhanced comprehensive monitoring
         await UsageService.startComprehensiveMonitoring();
       } else {
         console.log('Stopping background checks');
@@ -330,7 +490,6 @@ export default function Settings() {
       setSettings(prev => ({ ...prev, backgroundChecksEnabled: value }));
     }
     
-    // Handle realtime monitoring toggle - this now integrates with comprehensive monitoring
     if (key === 'realtime_monitoring_enabled') {
       if (value) {
         Alert.alert(
@@ -341,10 +500,7 @@ export default function Settings() {
             {
               text: 'Enable',
               onPress: async () => {
-                // Set the setting first
                 await database.setMeta(key, 'true');
-                
-                // Start comprehensive monitoring which includes real-time detection
                 const success = await UsageService.startComprehensiveMonitoring();
                 
                 if (success) {
@@ -362,10 +518,8 @@ export default function Settings() {
         );
       } else {
         await database.setMeta(key, 'false');
-        // Stop comprehensive monitoring and restart with just background
         await UsageService.stopComprehensiveMonitoring();
         if (settings.backgroundChecksEnabled) {
-          // Restart with just background monitoring
           setTimeout(() => UsageService.startComprehensiveMonitoring(), 1000);
         }
         setSettings(prev => ({ ...prev, realtimeMonitoringEnabled: false }));
@@ -373,15 +527,12 @@ export default function Settings() {
     }
   };
 
-  {console.log('settings.availableApps', settings.availableApps)}
-
   const handlePurchase = async () => {
     if (purchasing) return;
     
     try {
       setPurchasing(true);
       
-      // Handle dev mode
       if (__DEV__) {
         Alert.alert('Dev Mode', 'Purchase simulation - would normally integrate with RevenueCat');
         setTimeout(() => {
@@ -416,7 +567,6 @@ export default function Settings() {
 
   const handleRestore = async () => {
     try {
-      // Handle dev mode
       if (__DEV__) {
         Alert.alert('Dev Mode', 'Restore simulation - would normally check RevenueCat');
         return;
@@ -523,65 +673,227 @@ export default function Settings() {
           </Card>
         )}
 
-        {/* Monitored Apps */}
+        {/* Monitored Apps Section */}
         <Card className="mx-md mb-md">
           <Text className="text-lg font-semibold text-text mb-sm">Monitored Apps</Text>
           <Text className="text-sm text-muted mb-md">
             Select which apps to monitor for usage tracking and notifications
           </Text>
           
-          {/* Recommended Apps First */}
-          {settings.monitoredApps?.filter(app => app?.isRecommended).map((app) => {
+          {/* List all monitored apps */}
+          {settings.monitoredApps?.map((app) => {
             if (!app || !app.packageName || !app.appName) return null;
             
             return (
-              <View key={app.packageName} className="flex-row items-center justify-between py-sm border-b border-gray-100">
-                <View className="flex-1">
-                  <View className="flex-row items-center">
-                    <Text className="text-base font-medium text-text mr-xs">{app.appName}</Text>
-                    <View className="px-xs py-0.5 bg-accent/20 rounded">
-                      <Text className="text-xs text-accent font-medium">Recommended</Text>
+              <View key={app.packageName} className="py-sm border-b border-gray-100 last:border-b-0">
+                {/* App info row */}
+                <View className="flex-row items-center justify-between">
+                  <View className="flex-1">
+                    <View className="flex-row items-center">
+                      <Text className="text-base font-medium text-text mr-xs">{app.appName}</Text>
+                      {app.isRecommended && (
+                        <View className="px-xs py-0.5 bg-accent/20 rounded">
+                          <Text className="text-xs text-accent font-medium">Social</Text>
+                        </View>
+                      )}
                     </View>
+                    <Text className="text-xs text-muted mt-0.5">{app.packageName}</Text>
                   </View>
-                  <Text className="text-sm text-muted">{app.packageName}</Text>
+                  
+                  {/* Remove button for non-recommended apps */}
+                  {!app.isRecommended ? (
+                    <TouchableOpacity
+                      onPress={() => handleRemoveMonitoredApp(app.packageName)}
+                      className="p-xs"
+                    >
+                      <Ionicons name="remove-circle" size={24} color="#EF4444" />
+                    </TouchableOpacity>
+                  ) : (
+                    <Switch
+                      value={app.isMonitored}
+                      onValueChange={(value) => updateMonitoredApp(app.packageName, value)}
+                      trackColor={{ false: '#E5E7EB', true: '#4F46E5' }}
+                      thumbColor={app.isMonitored ? '#FFFFFF' : '#9CA3AF'}
+                    />
+                  )}
                 </View>
-                <Switch
-                  value={app.isMonitored}
-                  onValueChange={(value) => updateMonitoredApp(app.packageName, value)}
-                  trackColor={{ false: '#E5E7EB', true: '#4F46E5' }}
-                  thumbColor={app.isMonitored ? '#FFFFFF' : '#9CA3AF'}
-                />
+                
+                {/* Blocking controls - show if app blocking is enabled */}
+                {settings.appBlockingEnabled && app.isMonitored && (
+                  <View className="flex-row items-center justify-between mt-3 pl-2">
+                    <View className="flex-row items-center flex-1">
+                      <Ionicons 
+                        name={app.isBlocked ? "lock-closed" : "lock-open-outline"} 
+                        size={18} 
+                        color={app.isBlocked ? "#EF4444" : "#6B7280"} 
+                      />
+                      <Text className="text-sm text-muted ml-2">
+                        {app.isBlocked ? 'Blocked' : 'Not blocked'}
+                      </Text>
+                    </View>
+                    <TouchableOpacity
+                      onPress={() => toggleAppBlocking(app.packageName, !app.isBlocked)}
+                      className={`px-4 py-1.5 rounded-full border ${
+                        app.isBlocked 
+                          ? 'bg-red-50 border-red-200' 
+                          : 'bg-green-50 border-green-200'
+                      }`}
+                    >
+                      <Text className={`text-sm font-medium ${
+                        app.isBlocked ? 'text-red-600' : 'text-green-600'
+                      }`}>
+                        {app.isBlocked ? 'Unblock' : 'Block'}
+                      </Text>
+                    </TouchableOpacity>
+                  </View>
+                )}
               </View>
             );
           })}
 
-          {/* Other Apps */}
-          {settings.monitoredApps.filter(app => !app.isRecommended).length > 0 && (
-            <Text className="text-sm font-medium text-muted mt-md mb-sm">Other Monitored Apps</Text>
-          )}
-          
-          {settings.monitoredApps.filter(app => !app.isRecommended).map((app) => (
-            <View key={app.packageName} className="flex-row items-center justify-between py-sm border-b border-gray-100 last:border-b-0">
-              <View className="flex-1">
-                <Text className="text-base font-medium text-text">{app.appName}</Text>
-                <Text className="text-sm text-muted">{app.packageName}</Text>
-              </View>
-              <TouchableOpacity
-                onPress={() => handleRemoveMonitoredApp(app.packageName)}
-                className="p-xs"
-              >
-                <Ionicons name="remove-circle" size={24} color="#EF4444" />
-              </TouchableOpacity>
-            </View>
-          ))}
-
+          {/* Add more apps button */}
           <TouchableOpacity 
             className="flex-row items-center justify-center py-md mt-sm border-t border-gray-200"
             onPress={() => setShowAppSelection(true)}
           >
-            <Ionicons name="add" size={20} color="#4F46E5" className="mr-xs" />
+            <Ionicons name="add-circle-outline" size={20} color="#4F46E5" className="mr-xs" />
             <Text className="text-base text-accent">Add More Apps</Text>
           </TouchableOpacity>
+        </Card>
+
+        {/* App Blocking Settings */}
+        <Card className="mx-md mb-md">
+          <Text className="text-lg font-semibold text-text mb-sm">App Blocking</Text>
+          <Text className="text-sm text-muted mb-md">
+            Block access to monitored apps after time limits or during scheduled periods
+          </Text>
+          
+          {/* Enable App Blocking Toggle */}
+          <View className="flex-row items-center justify-between py-sm mb-md">
+            <View className="flex-1">
+              <Text className="text-base font-medium text-text">Enable App Blocking</Text>
+              <Text className="text-sm text-muted">
+                Restrict access to monitored apps based on usage limits
+              </Text>
+            </View>
+            <Switch
+              value={settings.appBlockingEnabled}
+              onValueChange={(value) => updateBlockingSettings('app_blocking_enabled', value)}
+              trackColor={{ false: '#E5E7EB', true: '#4F46E5' }}
+              thumbColor={settings.appBlockingEnabled ? '#FFFFFF' : '#9CA3AF'}
+            />
+          </View>
+
+          {settings.appBlockingEnabled && (
+            <>
+              {/* Blocking Mode Selection */}
+              <View className="mb-md">
+                <Text className="text-base font-medium text-text mb-sm">Blocking Mode</Text>
+                <View className="flex-row space-x-sm">
+                  <TouchableOpacity
+                    onPress={() => updateBlockingSettings('blocking_mode', 'soft')}
+                    className={`flex-1 p-3 rounded-lg border ${
+                      settings.blockingMode === 'soft' 
+                        ? 'bg-accent/10 border-accent' 
+                        : 'bg-surface border-gray-200'
+                    }`}
+                  >
+                    <Text className={`text-sm font-medium text-center ${
+                      settings.blockingMode === 'soft' ? 'text-accent' : 'text-text'
+                    }`}>
+                      Soft Block
+                    </Text>
+                    <Text className="text-xs text-muted text-center mt-1">
+                      Warning overlay
+                    </Text>
+                  </TouchableOpacity>
+                  
+                  <TouchableOpacity
+                    onPress={() => updateBlockingSettings('blocking_mode', 'hard')}
+                    className={`flex-1 p-3 rounded-lg border ${
+                      settings.blockingMode === 'hard' 
+                        ? 'bg-danger/10 border-danger' 
+                        : 'bg-surface border-gray-200'
+                    }`}
+                  >
+                    <Text className={`text-sm font-medium text-center ${
+                      settings.blockingMode === 'hard' ? 'text-danger' : 'text-text'
+                    }`}>
+                      Hard Block
+                    </Text>
+                    <Text className="text-xs text-muted text-center mt-1">
+                      Full prevention
+                    </Text>
+                  </TouchableOpacity>
+                </View>
+              </View>
+
+              {/* Daily Bypass Limit */}
+              <View className="mb-md">
+                <Text className="text-base font-medium text-text mb-sm">
+                  Daily Bypass Limit: {settings.blockBypassLimit}
+                </Text>
+                <Text className="text-sm text-muted mb-sm">
+                  Number of times user can override blocking per day
+                </Text>
+                <View className="flex-row space-x-sm">
+                  {[0, 1, 3, 5, 10].map(limit => (
+                    <TouchableOpacity
+                      key={limit}
+                      onPress={() => updateBlockingSettings('block_bypass_limit', limit)}
+                      className={`px-4 py-2 rounded-full ${
+                        settings.blockBypassLimit === limit
+                          ? 'bg-accent text-white'
+                          : 'bg-surface border border-gray-200'
+                      }`}
+                    >
+                      <Text className={`text-sm font-medium ${
+                        settings.blockBypassLimit === limit ? 'text-white' : 'text-text'
+                      }`}>
+                        {limit === 0 ? 'None' : limit.toString()}
+                      </Text>
+                    </TouchableOpacity>
+                  ))}
+                </View>
+              </View>
+
+              {/* Schedule Blocking */}
+              <View className="pt-md border-t border-gray-200">
+                <View className="flex-row items-center justify-between mb-sm">
+                  <Text className="text-base font-medium text-text">Schedule Blocking</Text>
+                  <Switch
+                    value={settings.blockScheduleEnabled}
+                    onValueChange={(value) => updateBlockingSettings('block_schedule_enabled', value)}
+                    trackColor={{ false: '#E5E7EB', true: '#4F46E5' }}
+                    thumbColor={settings.blockScheduleEnabled ? '#FFFFFF' : '#9CA3AF'}
+                  />
+                </View>
+                
+                {settings.blockScheduleEnabled && (
+                  <View className="flex-row space-x-md">
+                    <View className="flex-1">
+                      <Text className="text-sm text-muted mb-xs">Block From</Text>
+                      <TouchableOpacity 
+                        className="bg-surface p-3 rounded-lg border border-gray-200"
+                        onPress={() => showTimePicker('start')}
+                      >
+                        <Text className="text-base text-text text-center">{settings.blockScheduleStart}</Text>
+                      </TouchableOpacity>
+                    </View>
+                    <View className="flex-1">
+                      <Text className="text-sm text-muted mb-xs">Block Until</Text>
+                      <TouchableOpacity 
+                        className="bg-surface p-3 rounded-lg border border-gray-200"
+                        onPress={() => showTimePicker('end')}
+                      >
+                        <Text className="text-base text-text text-center">{settings.blockScheduleEnd}</Text>
+                      </TouchableOpacity>
+                    </View>
+                  </View>
+                )}
+              </View>
+            </>
+          )}
         </Card>
 
         {/* Notifications */}
@@ -604,27 +916,32 @@ export default function Settings() {
 
           {settings.notificationsEnabled && (
             <>
-              {/* Intensity Slider */}
+              {/* Intensity Selection */}
               <View className="mb-md">
-                <View className="flex-row items-center justify-between mb-sm">
-                  <Text className="text-base font-medium text-text">Notification Intensity</Text>
-                  <Text className="text-sm text-accent font-medium">
-                    {getIntensityLabel(settings.notificationIntensity)}
-                  </Text>
-                </View>
+                <Text className="text-base font-medium text-text mb-sm">
+                  Notification Intensity: {getIntensityLabel(settings.notificationIntensity)}
+                </Text>
                 <Text className="text-sm text-muted mb-sm">
                   Higher intensity = more direct and frequent reminders
                 </Text>
-                {/* <Slider
-                  minimumValue={1}
-                  maximumValue={4}
-                  step={1}
-                  value={settings.notificationIntensity}
-                  onValueChange={(value) => updateNotificationSettings('notification_intensity', value)}
-                /> */}
-                <View className="flex-row justify-between">
-                  <Text className="text-xs text-muted">Mild</Text>
-                  <Text className="text-xs text-muted">Critical</Text>
+                <View className="flex-row space-x-sm">
+                  {[1, 2, 3, 4].map(intensity => (
+                    <TouchableOpacity
+                      key={intensity}
+                      onPress={() => updateNotificationSettings('notification_intensity', intensity)}
+                      className={`flex-1 p-2 rounded-lg border ${
+                        settings.notificationIntensity === intensity
+                          ? 'bg-accent/10 border-accent'
+                          : 'bg-surface border-gray-200'
+                      }`}
+                    >
+                      <Text className={`text-xs font-medium text-center ${
+                        settings.notificationIntensity === intensity ? 'text-accent' : 'text-text'
+                      }`}>
+                        {getIntensityLabel(intensity)}
+                      </Text>
+                    </TouchableOpacity>
+                  ))}
                 </View>
               </View>
 
@@ -641,19 +958,19 @@ export default function Settings() {
                 
                 <View className="flex-row space-x-sm">
                   <TouchableOpacity 
-                    className="flex-1 bg-surface p-sm rounded-lg items-center"
+                    className="flex-1 bg-surface p-sm rounded-lg items-center border border-gray-200"
                     onPress={() => snoozeNotifications(1)}
                   >
                     <Text className="text-sm font-medium text-text">1 Hour</Text>
                   </TouchableOpacity>
                   <TouchableOpacity 
-                    className="flex-1 bg-surface p-sm rounded-lg items-center"
+                    className="flex-1 bg-surface p-sm rounded-lg items-center border border-gray-200"
                     onPress={() => snoozeNotifications(4)}
                   >
                     <Text className="text-sm font-medium text-text">4 Hours</Text>
                   </TouchableOpacity>
                   <TouchableOpacity 
-                    className="flex-1 bg-surface p-sm rounded-lg items-center"
+                    className="flex-1 bg-surface p-sm rounded-lg items-center border border-gray-200"
                     onPress={() => snoozeNotifications(24)}
                   >
                     <Text className="text-sm font-medium text-text">24 Hours</Text>
@@ -773,8 +1090,8 @@ export default function Settings() {
               <Text className="text-base text-text">Reset Trial</Text>
             </TouchableOpacity>
 
-           <TouchableOpacity 
-              className="py-sm"
+            <TouchableOpacity 
+              className="py-sm border-b border-gray-200"
               onPress={async () => {
                 const monitoringService = UsageMonitoringService.getInstance();
                 const status = monitoringService.getMonitoringStatus();
@@ -794,7 +1111,7 @@ export default function Settings() {
             </TouchableOpacity>
 
             <TouchableOpacity 
-              className="py-sm"
+              className="py-sm border-b border-gray-200"
               onPress={async () => {
                 try {
                   const monitoringService = UsageMonitoringService.getInstance();
@@ -826,7 +1143,7 @@ export default function Settings() {
                     await NotificationService.scheduleUsageAlert('TestApp', '2h 30m', 'normal');
                     Alert.alert('Debug', 'Test notification sent');
                   } else {
-                    Alert.alert('Debug', 'NotificationService not available or scheduleUsageAlert method missing');
+                    Alert.alert('Debug', 'NotificationService not available');
                   }
                 } catch (error) {
                   Alert.alert('Debug', `Notification error: ${error instanceof Error ? error.message : 'Unknown error'}`);
@@ -835,9 +1152,25 @@ export default function Settings() {
             >
               <Text className="text-base text-text">Test Notification</Text>
             </TouchableOpacity>
+
+            <TouchableOpacity 
+              onPress={async () => {
+                const blockingService = AppBlockingService.getInstance();
+                const status = blockingService.getBlockingStatus();
+                Alert.alert('Blocking Status', JSON.stringify(status, null, 2));
+              }}
+              className="py-sm"
+            >
+              <Text className="text-base text-text">Check Blocking Status</Text>
+            </TouchableOpacity>
           </Card>
         )}
+        
+        {/* Bottom padding */}
+        <View className="h-20" />
       </ScrollView>
+
+      {/* App Selection Bottom Sheet */}
       <AppSelectionBottomSheet
         key={modalKey}
         isOpen={showAppSelection}
@@ -848,10 +1181,7 @@ export default function Settings() {
           appName: app.appName,
           isRecommended: app.isRecommended,
           category: app.category,
-          // FIX: Use the isCurrentlyMonitored property if it exists, otherwise check monitoredApps
-          isCurrentlyMonitored: app.hasOwnProperty('isCurrentlyMonitored') 
-            ? app.isCurrentlyMonitored 
-            : settings.monitoredApps.some(m => m.packageName === app.packageName),
+          isCurrentlyMonitored: app.isCurrentlyMonitored || false,
           isSelected: false,
         }))}
         currentlyMonitored={settings.monitoredApps.map(m => m.packageName)}
