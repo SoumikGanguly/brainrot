@@ -46,8 +46,18 @@
         "expo-build-properties",
         {
           "android": {
-            "extraMavenRepos": ["https://maven.google.com"]
+            "extraMavenRepos": [
+              "https://maven.google.com"
+            ]
           }
+        }
+      ],
+      [
+        "@sentry/react-native/expo",
+        {
+          "url": "https://sentry.io/",
+          "project": "brainrot",
+          "organization": "twine-rf"
         }
       ]
     ],

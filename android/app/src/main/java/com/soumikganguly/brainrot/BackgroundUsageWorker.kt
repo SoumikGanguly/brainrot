@@ -1,15 +1,3 @@
-package com.soumikganguly.brainrot
-
-import android.content.Context
-import android.util.Log
-import androidx.work.*
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.withContext
-import java.util.concurrent.TimeUnit
-
-private const val TAG = "BackgroundUsageWorker"
-private const val WORK_NAME = "background_usage_check"
-
 class BackgroundUsageWorker(
     context: Context,
     params: WorkerParameters
@@ -18,45 +6,54 @@ class BackgroundUsageWorker(
     override suspend fun doWork(): Result = withContext(Dispatchers.IO) {
         return@withContext try {
             Log.d(TAG, "Background usage worker started")
-            val usageChecker = UsageChecker(applicationContext)
-            usageChecker.checkUsageAndNotify()
+            
+            // Check if app has required permissions
+            val usageModule = UsageChecker(applicationContext)
+            usageModule.checkUsageAndNotify()
+            
+            // Check for app blocking violations
+            checkBlockingViolations()
+            
             Log.d(TAG, "Background usage worker completed successfully")
             Result.success()
         } catch (e: Exception) {
             Log.e(TAG, "Worker failed", e)
-            Result.retry()
+            if (runAttemptCount < 3) {
+                Result.retry()
+            } else {
+                Result.failure()
+            }
         }
+    }
+    
+    private suspend fun checkBlockingViolations() {
+        // Load blocked apps from SharedPreferences
+        val prefs = applicationContext.getSharedPreferences("brainrot_prefs", Context.MODE_PRIVATE)
+        val blockedAppsJson = prefs.getString("blocked_apps", "[]")
+        // ... check if any blocked apps are currently in use
     }
 
     companion object {
         fun startPeriodicWork(context: Context, intervalMinutes: Long = 15) {
-            Log.d(TAG, "Starting periodic work with interval: $intervalMinutes minutes")
-            
             val constraints = Constraints.Builder()
-                .setRequiresBatteryNotLow(true)
+                .setRequiresBatteryNotLow(false) // Allow even on low battery
                 .setRequiredNetworkType(NetworkType.NOT_REQUIRED)
                 .build()
 
             val request = PeriodicWorkRequestBuilder<BackgroundUsageWorker>(
-                intervalMinutes, TimeUnit.MINUTES
+                intervalMinutes, TimeUnit.MINUTES,
+                5, TimeUnit.MINUTES // 5 minute flex period
             )
-                .setBackoffCriteria(BackoffPolicy.LINEAR, 10, TimeUnit.MINUTES)
+                .setBackoffCriteria(BackoffPolicy.EXPONENTIAL, 10, TimeUnit.MINUTES)
                 .setConstraints(constraints)
                 .addTag(WORK_NAME)
                 .build()
 
             WorkManager.getInstance(context).enqueueUniquePeriodicWork(
                 WORK_NAME,
-                ExistingPeriodicWorkPolicy.REPLACE,
+                ExistingPeriodicWorkPolicy.KEEP, // Keep existing work
                 request
             )
-            
-            Log.d(TAG, "Periodic work enqueued successfully")
-        }
-
-        fun stopPeriodicWork(context: Context) {
-            Log.d(TAG, "Stopping periodic work")
-            WorkManager.getInstance(context).cancelUniqueWork(WORK_NAME)
         }
     }
 }

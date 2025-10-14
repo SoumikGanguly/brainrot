@@ -1,7 +1,7 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:tools="http://schemas.android.com/tools">
   
-  <!-- Existing permissions -->
+  <!-- Permissions -->
   <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>
   <uses-permission android:name="android.permission.INTERNET"/>
   <uses-permission android:name="android.permission.PACKAGE_USAGE_STATS" tools:ignore="ProtectedPermissions"/>
@@ -11,9 +11,8 @@
   <uses-permission android:name="android.permission.VIBRATE"/>
   <uses-permission android:name="android.permission.WAKE_LOCK"/>
   <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE"/>
-  
-  <!-- Add WorkManager permission -->
   <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED"/>
+  <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS"/>
   
   <queries>
     <intent>
@@ -24,22 +23,17 @@
     <intent>
       <action android:name="android.settings.USAGE_ACCESS_SETTINGS" />
     </intent>
-  </queries>
-
-  <queries>
     <!-- Allow querying launchable apps -->
     <intent>
       <action android:name="android.intent.action.MAIN" />
       <category android:name="android.intent.category.LAUNCHER" />
     </intent>
 
-    <!-- Optional: list known packages you interact with (improves visibility) -->
+    <!-- Optional: list known packages you interact with -->
     <package android:name="com.google.android.youtube" />
     <package android:name="com.instagram.android" />
-    <!-- add more if you need to query specific packages -->
   </queries>
 
-  
   <application 
     android:name=".MainApplication" 
     android:label="@string/app_name" 
@@ -48,6 +42,18 @@
     android:allowBackup="true" 
     android:theme="@style/AppTheme" 
     android:supportsRtl="true">
+
+    <!-- Services - MOVED INSIDE APPLICATION TAG -->
+    <service
+      android:name=".BlockingOverlayService"
+      android:enabled="true"
+      android:exported="false" />
+    
+    <service
+      android:name=".FloatingScoreService"
+      android:enabled="true"
+      android:exported="false"
+      android:foregroundServiceType="mediaProjection" />
     
     <!-- Existing meta-data -->
     <meta-data android:name="expo.modules.updates.ENABLED" android:value="false"/>

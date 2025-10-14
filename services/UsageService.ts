@@ -9,7 +9,7 @@ interface InstalledApp {
   isRecommended: boolean;
 }
 
-interface UsageData {
+export interface UsageData {
   packageName: string;
   appName: string;
   totalTimeMs: number;
@@ -384,6 +384,136 @@ export class UsageService {
       
     } catch (error) {
       console.error('Error resetting daily tracking:', error);
+    }
+  }
+
+  static async getManufacturerInfo(): Promise<{
+    manufacturer: string;
+    needsSpecialPermission: boolean;
+    title: string;
+    instructions: string;
+    canOpenDirectly: boolean;
+  } | null> {
+    try {
+      if (Platform.OS !== 'android' || !UsageStatsModule) {
+        return null;
+      }
+      
+      return await UsageStatsModule.getManufacturerInfo();
+    } catch (error) {
+      console.error('Error getting manufacturer info:', error);
+      return null;
+    }
+  }
+  
+  static async needsSpecialPermission(): Promise<boolean> {
+    try {
+      if (Platform.OS !== 'android' || !UsageStatsModule) {
+        return false;
+      }
+      
+      return await UsageStatsModule.needsSpecialPermission();
+    } catch (error) {
+      console.error('Error checking special permission:', error);
+      return false;
+    }
+  }
+  
+  static async openManufacturerSettings(): Promise<boolean> {
+    try {
+      if (Platform.OS !== 'android' || !UsageStatsModule) {
+        return false;
+      }
+      
+      return await UsageStatsModule.openManufacturerSettings();
+    } catch (error) {
+      console.error('Error opening manufacturer settings:', error);
+      return false;
+    }
+  }
+  
+  static async requestBatteryOptimizationExemption(): Promise<boolean> {
+    try {
+      if (Platform.OS !== 'android' || !UsageStatsModule) {
+        return false;
+      }
+      
+      return await UsageStatsModule.requestBatteryOptimizationExemption();
+    } catch (error) {
+      console.error('Error requesting battery exemption:', error);
+      return false;
+    }
+  }
+
+  static async hasOverlayPermission(): Promise<boolean> {
+    try {
+      if (Platform.OS !== 'android' || !UsageStatsModule) {
+        return false;
+      }
+      
+      return await UsageStatsModule.hasOverlayPermission();
+    } catch (error) {
+      console.error('Error checking overlay permission:', error);
+      return false;
+    }
+  }
+  
+  static async requestOverlayPermission(): Promise<void> {
+    try {
+      if (Platform.OS !== 'android' || !UsageStatsModule) {
+        return;
+      }
+      
+      await UsageStatsModule.requestOverlayPermission();
+    } catch (error) {
+      console.error('Error requesting overlay permission:', error);
+      throw error;
+    }
+  }
+  
+  static async startFloatingScore(
+    appName: string,
+    initialScore: number,
+    timeMs: number
+  ): Promise<boolean> {
+    try {
+      if (Platform.OS !== 'android' || !UsageStatsModule) {
+        return false;
+      }
+      
+      return await UsageStatsModule.startFloatingScore(appName, initialScore, timeMs);
+    } catch (error) {
+      console.error('Error starting floating score:', error);
+      return false;
+    }
+  }
+  
+  static async updateFloatingScore(
+    score: number,
+    appName: string,
+    timeMs: number
+  ): Promise<void> {
+    try {
+      if (Platform.OS !== 'android' || !UsageStatsModule) {
+        return;
+      }
+      
+      UsageStatsModule.updateFloatingScore(score, appName, timeMs);
+    } catch (error) {
+      console.error('Error updating floating score:', error);
+    }
+  }
+  
+  static async stopFloatingScore(): Promise<boolean> {
+    try {
+      if (Platform.OS !== 'android' || !UsageStatsModule) {
+        return false;
+      }
+      
+      return await UsageStatsModule.stopFloatingScore();
+    } catch (error) {
+      console.error('Error stopping floating score:', error);
+      return false;
     }
   }
 }

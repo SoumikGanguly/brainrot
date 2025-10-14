@@ -8,6 +8,7 @@ import android.content.Intent
 import android.content.pm.ApplicationInfo
 import android.content.pm.PackageManager
 import android.os.Build
+import android.net.Uri
 import android.os.Handler
 import android.os.Looper
 import android.os.Process
@@ -24,12 +25,48 @@ class UsageStatsModule(reactContext: ReactApplicationContext) : ReactContextBase
     private var realtimeRunnable: Runnable? = null
     private var lastForegroundApp: String? = null
     private var isRealtimeMonitoring = false
+    private val permissionHelper = ManufacturerPermissionHelper(reactContext)
 
     init {
         Log.d(TAG, "UsageStatsModule initialized with enhanced UsageChecker")
     }
 
     override fun getName(): String = "UsageStatsModule"
+
+    @ReactMethod
+    fun getManufacturerInfo(promise: Promise) {
+        try {
+            val info = permissionHelper.getPermissionInstructions()
+            promise.resolve(info)
+        } catch (e: Exception) {
+            promise.reject("GET_MANUFACTURER_ERROR", e.message)
+        }
+    }
+    
+    @ReactMethod
+    fun needsSpecialPermission(promise: Promise) {
+        promise.resolve(permissionHelper.needsSpecialPermission())
+    }
+    
+    @ReactMethod
+    fun openManufacturerSettings(promise: Promise) {
+        try {
+            val success = permissionHelper.openManufacturerSettings()
+            promise.resolve(success)
+        } catch (e: Exception) {
+            promise.reject("OPEN_SETTINGS_ERROR", e.message)
+        }
+    }
+    
+    @ReactMethod
+    fun requestBatteryOptimizationExemption(promise: Promise) {
+        try {
+            val success = permissionHelper.requestIgnoreBatteryOptimization()
+            promise.resolve(success)
+        } catch (e: Exception) {
+            promise.reject("BATTERY_OPT_ERROR", e.message)
+        }
+    }
 
     @ReactMethod
     fun isUsageAccessGranted(promise: Promise) {
@@ -186,6 +223,51 @@ class UsageStatsModule(reactContext: ReactApplicationContext) : ReactContextBase
     }
 
     @ReactMethod
+    fun showBlockingOverlay(packageName: String, appName: String, blockMode: String, promise: Promise) {
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                if (!Settings.canDrawOverlays(reactApplicationContext)) {
+                    promise.reject("NO_OVERLAY_PERMISSION", "Overlay permission required")
+                    return
+                }
+            }
+            
+            val intent = Intent(reactApplicationContext, BlockingOverlayService::class.java)
+            intent.putExtra("blocked_app", appName)
+            intent.putExtra("block_mode", blockMode)
+            
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                reactApplicationContext.startForegroundService(intent)
+            } else {
+                reactApplicationContext.startService(intent)
+            }
+            
+            promise.resolve(true)
+        } catch (e: Exception) {
+            promise.reject("OVERLAY_ERROR", e.message)
+        }
+    }
+
+    @ReactMethod
+    fun requestOverlayPermission(promise: Promise) {
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                if (!Settings.canDrawOverlays(reactApplicationContext)) {
+                    val intent = Intent(
+                        Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                        Uri.parse("package:${reactApplicationContext.packageName}")
+                    )
+                    intent.flags = Intent.FLAG_ACTIVITY_NEW_TASK
+                    reactApplicationContext.startActivity(intent)
+                }
+            }
+            promise.resolve(true)
+        } catch (e: Exception) {
+            promise.reject("PERMISSION_ERROR", e.message)
+        }
+    }
+
+    @ReactMethod
     fun forceRefreshPermission(promise: Promise) {
         Log.d(TAG, "forceRefreshPermission() called")
         try {
@@ -203,6 +285,89 @@ class UsageStatsModule(reactContext: ReactApplicationContext) : ReactContextBase
     fun testModule(promise: Promise) {
         Log.d(TAG, "testModule() called - enhanced module working!")
         promise.resolve("Enhanced UsageStatsModule is working correctly!")
+    }
+
+    @ReactMethod
+    fun startFloatingScore(appName: String, initialScore: Int, timeMs: Double, promise: Promise) {
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                if (!Settings.canDrawOverlays(reactApplicationContext)) {
+                    promise.reject("NO_OVERLAY_PERMISSION", "Overlay permission required")
+                    return
+                }
+            }
+            
+            val intent = Intent(reactApplicationContext, FloatingScoreService::class.java)
+            intent.putExtra(FloatingScoreService.EXTRA_SCORE, initialScore)
+            intent.putExtra(FloatingScoreService.EXTRA_APP_NAME, appName)
+            intent.putExtra(FloatingScoreService.EXTRA_TIME_MS, timeMs.toLong())
+            
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                reactApplicationContext.startForegroundService(intent)
+            } else {
+                reactApplicationContext.startService(intent)
+            }
+            
+            promise.resolve(true)
+        } catch (e: Exception) {
+            Log.e(TAG, "Error starting floating score", e)
+            promise.reject("START_FLOATING_ERROR", e.message)
+        }
+    }
+    
+    @ReactMethod
+    fun updateFloatingScore(score: Int, appName: String, timeMs: Double) {
+        try {
+            val intent = Intent(reactApplicationContext, FloatingScoreService::class.java)
+            intent.action = FloatingScoreService.ACTION_UPDATE_SCORE
+            intent.putExtra(FloatingScoreService.EXTRA_SCORE, score)
+            intent.putExtra(FloatingScoreService.EXTRA_APP_NAME, appName)
+            intent.putExtra(FloatingScoreService.EXTRA_TIME_MS, timeMs.toLong())
+            
+            reactApplicationContext.startService(intent)
+        } catch (e: Exception) {
+            Log.e(TAG, "Error updating floating score", e)
+        }
+    }
+    
+    @ReactMethod
+    fun stopFloatingScore(promise: Promise) {
+        try {
+            val intent = Intent(reactApplicationContext, FloatingScoreService::class.java)
+            reactApplicationContext.stopService(intent)
+            promise.resolve(true)
+        } catch (e: Exception) {
+            Log.e(TAG, "Error stopping floating score", e)
+            promise.reject("STOP_FLOATING_ERROR", e.message)
+        }
+    }
+    
+    @ReactMethod
+    fun hasOverlayPermission(promise: Promise) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            promise.resolve(Settings.canDrawOverlays(reactApplicationContext))
+        } else {
+            promise.resolve(true)
+        }
+    }
+    
+    @ReactMethod
+    fun requestOverlayPermission(promise: Promise) {
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                if (!Settings.canDrawOverlays(reactApplicationContext)) {
+                    val intent = Intent(
+                        Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                        Uri.parse("package:${reactApplicationContext.packageName}")
+                    )
+                    intent.flags = Intent.FLAG_ACTIVITY_NEW_TASK
+                    reactApplicationContext.startActivity(intent)
+                }
+            }
+            promise.resolve(true)
+        } catch (e: Exception) {
+            promise.reject("PERMISSION_ERROR", e.message)
+        }
     }
 
     private fun startRealtimeMonitoring() {

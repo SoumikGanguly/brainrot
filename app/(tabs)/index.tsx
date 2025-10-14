@@ -328,6 +328,7 @@ export default function HomeScreen() {
   const loadHomeData = async () => {
     try {
       setLoading(true);
+      
       addDebugMessage('Starting home data load...');
       
       // Step 1: Check module and permissions
@@ -602,6 +603,7 @@ export default function HomeScreen() {
         {/* Debug Panel (only in development) */}
         {__DEV__ && (
           <Card className="mx-md mb-md bg-gray-50">
+            
             <View className="flex-row justify-between items-center mb-2">
               <Text className="text-sm font-semibold">Debug Info</Text>
               <TouchableOpacity onPress={refreshData} className="px-2 py-1 bg-blue-500 rounded">

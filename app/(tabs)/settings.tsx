@@ -16,6 +16,7 @@ import { UsageService } from '../../services/UsageService';
 
 import { AppBlockingService, BlockingMode } from '@/services/AppBlockingService';
 import { UsageMonitoringService } from '@/services/UsageMonitoringService';
+import * as Sentry from '@sentry/react-native';
 import type { AppSelectionItem } from '../../types';
 
 interface MonitoredApp {
@@ -87,6 +88,7 @@ export default function Settings() {
   const [purchasing, setPurchasing] = useState(false);
   const [showAppSelection, setShowAppSelection] = useState(false);
   const [modalKey, setModalKey] = useState(0);
+  const [hasOverlayPermission, setHasOverlayPermission] = useState(false);
 
   useEffect(() => {
     loadSettings();
@@ -234,6 +236,28 @@ export default function Settings() {
       }));
     } finally {
       setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    checkOverlayPermission();
+  }, []);
+  
+  const checkOverlayPermission = async () => {
+    const hasPermission = await UsageService.hasOverlayPermission();
+    setHasOverlayPermission(hasPermission);
+  };
+  
+  const requestOverlayPermission = async () => {
+    try {
+      await UsageService.requestOverlayPermission();
+      
+      // Check again after a delay
+      setTimeout(async () => {
+        await checkOverlayPermission();
+      }, 2000);
+    } catch (error) {
+      Alert.alert('Error', 'Failed to request overlay permission');
     }
   };
 
@@ -433,10 +457,10 @@ export default function Settings() {
 
       setModalKey(prev => prev + 1);
 
-      Alert.alert(
-        'Apps Added',
-        `Successfully added ${selectedPackages.length} app${selectedPackages.length > 1 ? 's' : ''} to monitoring.`
-      );
+      // Alert.alert(
+      //   'Apps Added',
+      //   `Successfully added ${selectedPackages.length} app${selectedPackages.length > 1 ? 's' : ''} to monitoring.`
+      // );
     } catch (error) {
       console.error('Error adding apps:', error);
       Alert.alert('Error', 'Failed to add apps. Please try again.');
@@ -786,6 +810,29 @@ export default function Settings() {
 
           {settings.appBlockingEnabled && (
             <>
+              <Card className="mx-md mb-md">
+                <Text className="text-lg font-semibold text-text mb-sm">Display Permissions</Text>
+                
+                <View className="flex-row items-center justify-between py-sm">
+                  <View className="flex-1">
+                    <Text className="text-base font-medium text-text">Display Over Apps</Text>
+                    <Text className="text-sm text-muted">
+                      Required for floating score and blocking overlays
+                    </Text>
+                  </View>
+                  {hasOverlayPermission ? (
+                    <Ionicons name="checkmark-circle" size={24} color="#10B981" />
+                  ) : (
+                    <TouchableOpacity
+                      onPress={requestOverlayPermission}
+                      className="px-4 py-2 bg-accent rounded-lg"
+                    >
+                      <Text className="text-white text-sm font-medium">Grant</Text>
+                    </TouchableOpacity>
+                  )}
+                </View>
+              </Card>
+            
               {/* Blocking Mode Selection */}
               <View className="mb-md">
                 <Text className="text-base font-medium text-text mb-sm">Blocking Mode</Text>
@@ -1078,6 +1125,16 @@ export default function Settings() {
         {__DEV__ && (
           <Card className="mx-md mb-md bg-gray-50">
             <Text className="text-lg font-semibold text-text mb-sm">Developer Options</Text>
+
+            <TouchableOpacity onPress={ () => { Sentry.captureException(Error, {
+              level: 'error',
+              tags: {
+                section: 'home_screen',
+                action: 'load_data'
+              }
+            }); }}>
+              <Text className="text-base text-text">Test Sentry</Text>
+            </TouchableOpacity>
             
             <TouchableOpacity 
               className="py-sm border-b border-gray-200"
@@ -1088,6 +1145,26 @@ export default function Settings() {
               }}
             >
               <Text className="text-base text-text">Reset Trial</Text>
+            </TouchableOpacity>
+
+            <TouchableOpacity 
+              onPress={async () => {
+                const hasPermission = await UsageService.hasOverlayPermission();
+                Alert.alert('Overlay Permission', `Has permission: ${hasPermission}`);
+              }}
+              className="mt-2 p-1 bg-blue-200 rounded"
+            >
+              <Text className="text-xs text-center">Check Overlay Permission</Text>
+            </TouchableOpacity>
+
+            <TouchableOpacity 
+              onPress={async () => {
+                const started = await UsageService.startFloatingScore('Instagram', 75, 1800000);
+                Alert.alert('Test', `Floating score started: ${started}`);
+              }}
+              className="mt-2 p-1 bg-green-200 rounded"
+            >
+              <Text className="text-xs text-center">Test Floating Score</Text>
             </TouchableOpacity>
 
             <TouchableOpacity 
