@@ -49,10 +49,11 @@ class FloatingScoreService : Service() {
         private const val NOTIFICATION_ID = 2001
         private const val CHANNEL_ID = "floating_score"
         
-        const val ACTION_UPDATE_SCORE = "com.soumikganguly.brainrot.UPDATE_SCORE"
-        const val EXTRA_SCORE = "score"
-        const val EXTRA_APP_NAME = "app_name"
-        const val EXTRA_TIME_MS = "time_ms"
+        // Use simple string keys that match UsageStatsModule
+        const val ACTION_UPDATE_SCORE = "ACTION_UPDATE_SCORE"
+        const val EXTRA_SCORE = "EXTRA_SCORE"
+        const val EXTRA_APP_NAME = "EXTRA_APP_NAME"
+        const val EXTRA_TIME_MS = "EXTRA_TIME_MS"
     }
     
     override fun onCreate() {
@@ -68,12 +69,19 @@ class FloatingScoreService : Service() {
                 appName = intent.getStringExtra(EXTRA_APP_NAME) ?: ""
                 timeInApp = intent.getLongExtra(EXTRA_TIME_MS, 0)
                 updateFloatingView()
+                Log.d(TAG, "Updated score: $currentScore for $appName")
             }
             else -> {
-                startTime = System.currentTimeMillis()
+                // Initial start
+                currentScore = intent?.getIntExtra(EXTRA_SCORE, 100) ?: 100
+                appName = intent?.getStringExtra(EXTRA_APP_NAME) ?: ""
+                timeInApp = intent?.getLongExtra(EXTRA_TIME_MS, 0) ?: 0
+                startTime = System.currentTimeMillis() - timeInApp
+                
                 showFloatingView()
                 startForeground(NOTIFICATION_ID, createNotification())
                 updateHandler.post(updateRunnable)
+                Log.d(TAG, "Started floating score for $appName with score $currentScore")
             }
         }
         
@@ -81,18 +89,15 @@ class FloatingScoreService : Service() {
     }
     
     private fun showFloatingView() {
-        if (floatingView != null) return
+        if (floatingView != null) {
+            Log.d(TAG, "Floating view already exists")
+            return
+        }
         
         windowManager = getSystemService(WINDOW_SERVICE) as WindowManager
         
-        floatingView = LayoutInflater.from(this).inflate(
-            R.layout.floating_score_view,
-            null
-        )
-        
-        scoreTextView = floatingView?.findViewById(R.id.scoreText)
-        timerTextView = floatingView?.findViewById(R.id.timerText)
-        circleView = floatingView?.findViewById(R.id.circleView)
+        // Create a simple layout programmatically since we don't have XML
+        floatingView = createFloatingViewLayout()
         
         val params = WindowManager.LayoutParams(
             WindowManager.LayoutParams.WRAP_CONTENT,
@@ -100,6 +105,7 @@ class FloatingScoreService : Service() {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O)
                 WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
             else
+                @Suppress("DEPRECATION")
                 WindowManager.LayoutParams.TYPE_PHONE,
             WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
                     WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
@@ -109,6 +115,7 @@ class FloatingScoreService : Service() {
         params.gravity = Gravity.TOP or Gravity.END
         params.x = 20
         params.y = 100
+        
         // Make it draggable
         floatingView?.setOnTouchListener(object : View.OnTouchListener {
             private var initialX = 0
@@ -136,16 +143,108 @@ class FloatingScoreService : Service() {
             }
         })
         
-        windowManager?.addView(floatingView, params)
-        updateFloatingView()
+        try {
+            windowManager?.addView(floatingView, params)
+            updateFloatingView()
+            Log.d(TAG, "Floating view added to window")
+        } catch (e: Exception) {
+            Log.e(TAG, "Error adding floating view", e)
+        }
+    }
+    
+    private fun createFloatingViewLayout(): View {
+        val container = FrameLayout(this).apply {
+            background = createRoundedBackground()
+            setPadding(24, 24, 24, 24)
+        }
+
+        // Create close button (X)
+        val closeButton = TextView(this).apply {
+            text = "×"
+            textSize = 28f
+            setTextColor(Color.parseColor("#9CA3AF"))
+            setPadding(8, 0, 8, 0)
+            gravity = android.view.Gravity.CENTER
+            layoutParams = FrameLayout.LayoutParams(
+                (48 * resources.displayMetrics.density).toInt(),
+                (48 * resources.displayMetrics.density).toInt()
+            ).apply {
+                gravity = Gravity.TOP or Gravity.END
+                topMargin = (-8 * resources.displayMetrics.density).toInt()
+                rightMargin = (-8 * resources.displayMetrics.density).toInt()
+            }
+            
+            // Make clickable with ripple effect
+            isClickable = true
+            isFocusable = true
+            
+            setOnClickListener {
+                Log.d(TAG, "Close button clicked")
+                // Stop the service (this will close the floating window)
+                stopSelf()
+            }
+        }
+        container.addView(closeButton)
+        
+        // Create circle view
+        circleView = ScoreCircleView(this).apply {
+            layoutParams = FrameLayout.LayoutParams(
+                (120 * resources.displayMetrics.density).toInt(),
+                (120 * resources.displayMetrics.density).toInt()
+            ).apply {
+                gravity = Gravity.CENTER
+            }
+        }
+        container.addView(circleView)
+        
+        // Create score text
+        scoreTextView = TextView(this).apply {
+            textSize = 24f
+            setTextColor(Color.parseColor("#1F2937"))
+            setTypeface(null, android.graphics.Typeface.BOLD)
+            layoutParams = FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.WRAP_CONTENT,
+                FrameLayout.LayoutParams.WRAP_CONTENT
+            ).apply {
+                gravity = Gravity.CENTER
+            }
+        }
+        container.addView(scoreTextView)
+        
+        // Create timer text
+        timerTextView = TextView(this).apply {
+            textSize = 12f
+            setTextColor(Color.parseColor("#6B7280"))
+            layoutParams = FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.WRAP_CONTENT,
+                FrameLayout.LayoutParams.WRAP_CONTENT
+            ).apply {
+                gravity = Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL
+                bottomMargin = (8 * resources.displayMetrics.density).toInt()
+            }
+        }
+        container.addView(timerTextView)
+        
+        return container
+    }
+
+    private fun createRoundedBackground(): android.graphics.drawable.GradientDrawable {
+        return android.graphics.drawable.GradientDrawable().apply {
+            shape = android.graphics.drawable.GradientDrawable.RECTANGLE
+            cornerRadius = 16f * resources.displayMetrics.density
+            setColor(Color.WHITE)
+            setStroke(
+                (2 * resources.displayMetrics.density).toInt(),
+                Color.parseColor("#E5E7EB")
+            )
+        }
     }
     
     private fun updateScore() {
         timeInApp = System.currentTimeMillis() - startTime
         
-        // Calculate score degradation (example formula)
-        // Every 15 minutes reduces score
-        val minutesInApp = timeInApp / (1000 * 60)
+        // Calculate score degradation
+        val minutesInApp = (timeInApp / (1000 * 60)).toInt()
         val scoreLoss = (minutesInApp / 15) * 10
         currentScore = (100 - scoreLoss).coerceIn(0, 100)
         
@@ -166,7 +265,12 @@ class FloatingScoreService : Service() {
     
     private fun removeFloatingView() {
         floatingView?.let {
-            windowManager?.removeView(it)
+            try {
+                windowManager?.removeView(it)
+                Log.d(TAG, "Floating view removed")
+            } catch (e: Exception) {
+                Log.e(TAG, "Error removing floating view", e)
+            }
         }
         floatingView = null
     }
@@ -193,13 +297,17 @@ class FloatingScoreService : Service() {
             this,
             0,
             intent,
-            PendingIntent.FLAG_IMMUTABLE
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                PendingIntent.FLAG_IMMUTABLE
+            } else {
+                0
+            }
         )
         
         return NotificationCompat.Builder(this, CHANNEL_ID)
             .setContentTitle("Monitoring: $appName")
             .setContentText("Brain Score: $currentScore")
-            .setSmallIcon(R.drawable.ic_notification)
+            .setSmallIcon(android.R.drawable.ic_dialog_info) // Fallback icon
             .setContentIntent(pendingIntent)
             .setOngoing(true)
             .setPriority(NotificationCompat.PRIORITY_LOW)
@@ -210,6 +318,7 @@ class FloatingScoreService : Service() {
         super.onDestroy()
         updateHandler.removeCallbacks(updateRunnable)
         removeFloatingView()
+        Log.d(TAG, "FloatingScoreService destroyed")
     }
     
     override fun onBind(intent: Intent?): IBinder? = null
@@ -224,7 +333,6 @@ class ScoreCircleView @JvmOverloads constructor(
     
     private var currentScore = 100
     private var timeInAppMs = 0L
-    private var animationProgress = 0f
     
     private val backgroundPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         style = Paint.Style.STROKE
@@ -262,6 +370,8 @@ class ScoreCircleView @JvmOverloads constructor(
     
     override fun onDraw(canvas: Canvas) {
         super.onDraw(canvas)
+        
+        if (width == 0 || height == 0) return
         
         val size = min(width, height).toFloat()
         val padding = 16f

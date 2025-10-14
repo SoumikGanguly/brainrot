@@ -516,4 +516,17 @@ export class UsageService {
       return false;
     }
   }
+
+   static async showBlockingOverlay(
+    packageName: string,
+    appName: string,
+    blockMode: 'soft' | 'hard'
+  ): Promise<void> {
+    try {
+      await UsageStatsModule.showBlockingOverlay(packageName, appName, blockMode);
+    } catch (error) {
+      console.error('Error showing blocking overlay:', error);
+      throw error;
+    }
+  }
 }

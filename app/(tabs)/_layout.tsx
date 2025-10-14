@@ -2,9 +2,11 @@ import { Ionicons, MaterialIcons } from '@expo/vector-icons';
 import { useFonts } from 'expo-font';
 import { SplashScreen, Tabs } from 'expo-router';
 import { useEffect } from 'react';
-import { SafeAreaProvider } from 'react-native-safe-area-context';
+import { SafeAreaProvider, useSafeAreaInsets } from 'react-native-safe-area-context';
 
 export default function RootLayout() {
+  const insets = useSafeAreaInsets();
+
   const [loaded] = useFonts({
     SpaceMono: require('../../assets/fonts/SpaceMono-Regular.ttf'),
   });
@@ -19,6 +21,7 @@ export default function RootLayout() {
     return null;
   }
 
+
   return (
     <SafeAreaProvider>
       <Tabs
@@ -29,8 +32,8 @@ export default function RootLayout() {
             backgroundColor: '#FFFFFF',
             borderTopWidth: 1,
             borderTopColor: '#E5E7EB',
-            height: 60,
-            paddingBottom: 8,
+            paddingBottom: insets.bottom,
+            height: 60 + insets.bottom, 
             paddingTop: 8,
           },
           headerShown: false,

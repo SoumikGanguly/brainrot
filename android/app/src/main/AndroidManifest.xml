@@ -3,6 +3,7 @@
   
   <!-- Permissions -->
   <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>
+  <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
   <uses-permission android:name="android.permission.INTERNET"/>
   <uses-permission android:name="android.permission.PACKAGE_USAGE_STATS" tools:ignore="ProtectedPermissions"/>
   <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
@@ -48,12 +49,16 @@
       android:name=".BlockingOverlayService"
       android:enabled="true"
       android:exported="false" />
-    
-    <service
-      android:name=".FloatingScoreService"
-      android:enabled="true"
-      android:exported="false"
-      android:foregroundServiceType="mediaProjection" />
+
+      <service
+        android:name=".FloatingScoreService"
+        android:enabled="true"
+        android:exported="false"
+        android:foregroundServiceType="specialUse">
+        <property
+          android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+          android:value="Display floating widget" />
+      </service>
     
     <!-- Existing meta-data -->
     <meta-data android:name="expo.modules.updates.ENABLED" android:value="false"/>
