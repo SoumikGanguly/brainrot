@@ -12,7 +12,9 @@ import { database } from '../../services/database';
 import { NotificationService } from '../../services/NotificationService';
 import { PurchaseService } from '../../services/PurchaseService';
 import { TrialService } from '../../services/TrialService';
-import { UsageService } from '../../services/UsageService';
+// import { UsageService } from '../../services/UsageService';
+
+import { UnifiedUsageService } from '@/services/UnifiedUsageService';
 
 import { AppBlockingService, BlockingMode } from '@/services/AppBlockingService';
 import { UsageMonitoringService } from '@/services/UsageMonitoringService';
@@ -40,6 +42,9 @@ interface SettingsState {
   // Monitored Apps
   monitoredApps: MonitoredApp[];
   availableApps: AvailableApp[];
+
+  // Add this line:
+  monitoringEnabled: boolean;
 
   appBlockingEnabled: boolean;
   blockingMode: 'soft' | 'hard';
@@ -69,6 +74,7 @@ export default function Settings() {
   const [settings, setSettings] = useState<SettingsState>({
     monitoredApps: [],
     availableApps: [],
+    monitoringEnabled: false,
     notificationsEnabled: true,
     notificationIntensity: 2,
     notificationsSnoozeUntil: 0,
@@ -99,7 +105,7 @@ export default function Settings() {
       setLoading(true);
 
       // Get installed apps
-      const installedApps = await UsageService.getInstalledApps();
+      const installedApps = await UnifiedUsageService.getInstalledApps();
       
       // Build available apps list
       const availableApps: AvailableApp[] = (installedApps || [])
@@ -189,13 +195,13 @@ export default function Settings() {
       }
 
       // Check monitoring status
-      const monitoringEnabled = await database.getMeta('monitoring_enabled');
-      if (monitoringEnabled === 'true' && (backgroundChecksEnabled || realtimeMonitoringEnabled)) {
+      const monitoringEnabled = (await database.getMeta('monitoring_enabled')) === 'true';
+      if (monitoringEnabled && (backgroundChecksEnabled || realtimeMonitoringEnabled)) {
         try {
           const status = UsageMonitoringService.getInstance().getMonitoringStatus();
           if (!status.isMonitoring) {
             console.log('Restarting monitoring based on saved settings');
-            await UsageService.startComprehensiveMonitoring();
+            await UnifiedUsageService.startComprehensiveMonitoring();
           }
         } catch (error) {
           console.log('Could not restart monitoring:', error);
@@ -210,6 +216,7 @@ export default function Settings() {
 
       setSettings({
         monitoredApps,
+        monitoringEnabled,
         availableApps: availableAppsWithStatus,
         notificationsEnabled,
         notificationIntensity,
@@ -244,13 +251,13 @@ export default function Settings() {
   }, []);
   
   const checkOverlayPermission = async () => {
-    const hasPermission = await UsageService.hasOverlayPermission();
+    const hasPermission = await UnifiedUsageService.hasOverlayPermission();
     setHasOverlayPermission(hasPermission);
   };
   
   const requestOverlayPermission = async () => {
     try {
-      await UsageService.requestOverlayPermission();
+      await UnifiedUsageService.requestOverlayPermission();
       
       // Check again after a delay
       setTimeout(async () => {
@@ -500,54 +507,48 @@ export default function Settings() {
     Alert.alert('Notifications Snoozed', `Notifications will be paused for ${hours} hour${hours > 1 ? 's' : ''}.`);
   };
 
-  const updateMonitoringSettings = async (key: string, value: boolean) => {
-    await database.setMeta(key, value.toString());
-  
-    if (key === 'background_checks_enabled') {
-      if (value) {
-        console.log('Starting background checks');
-        await UsageService.startComprehensiveMonitoring();
-      } else {
-        console.log('Stopping background checks');
-        await UsageService.stopComprehensiveMonitoring();
-      }
-      setSettings(prev => ({ ...prev, backgroundChecksEnabled: value }));
-    }
-    
-    if (key === 'realtime_monitoring_enabled') {
-      if (value) {
-        Alert.alert(
-          'Real-time Monitoring',
-          'This will detect when you open monitored apps and send immediate notifications. This may impact battery life. Continue?',
-          [
-            { text: 'Cancel', style: 'cancel' },
-            {
-              text: 'Enable',
-              onPress: async () => {
-                await database.setMeta(key, 'true');
-                const success = await UsageService.startComprehensiveMonitoring();
-                
-                if (success) {
-                  setSettings(prev => ({ ...prev, realtimeMonitoringEnabled: true }));
-                  Alert.alert(
-                    'Real-time Monitoring Active', 
-                    'You\'ll now receive immediate notifications when opening monitored apps.'
-                  );
-                } else {
-                  Alert.alert('Error', 'Failed to enable real-time monitoring. Please check permissions.');
-                }
-              }
-            }
-          ]
-        );
-      } else {
-        await database.setMeta(key, 'false');
-        await UsageService.stopComprehensiveMonitoring();
-        if (settings.backgroundChecksEnabled) {
-          setTimeout(() => UsageService.startComprehensiveMonitoring(), 1000);
+  const updateMonitoringSettings = async (key: string, value: any) => {
+    try {
+      await database.setMeta(key, value.toString());
+      
+      setSettings(prev => ({
+        ...prev,
+        [key === 'monitoring_enabled' ? 'monitoringEnabled' : 
+        key === 'background_checks' ? 'backgroundChecksEnabled' :
+        key === 'realtime_monitoring' ? 'realtimeMonitoringEnabled' : key]: value
+      }));
+
+      // Use the instance for basic monitoring
+      const unifiedService = UnifiedUsageService.getInstance();
+      
+      if (key === 'monitoring_enabled') {
+        if (value) {
+          await unifiedService.startMonitoring();
+        } else {
+          await unifiedService.stopMonitoring();
         }
-        setSettings(prev => ({ ...prev, realtimeMonitoringEnabled: false }));
       }
+      
+      // Use static methods for comprehensive monitoring
+      if (key === 'background_checks') {
+        if (value && settings.monitoringEnabled) {
+          await UnifiedUsageService.startComprehensiveMonitoring();
+        } else if (!value) {
+          await UnifiedUsageService.stopComprehensiveMonitoring();
+        }
+      }
+      
+      if (key === 'realtime_monitoring') {
+        if (value && settings.monitoringEnabled) {
+          await UnifiedUsageService.startComprehensiveMonitoring();
+        } else if (!value) {
+          await UnifiedUsageService.stopComprehensiveMonitoring();
+        }
+      }
+
+    } catch (err) { // Use 'err' instead of 'error'
+      console.error('Error updating monitoring settings:', err);
+      Alert.alert('Error', 'Failed to update monitoring settings');
     }
   };
 
@@ -1135,7 +1136,78 @@ export default function Settings() {
             }); }}>
               <Text className="text-base text-text">Test Sentry</Text>
             </TouchableOpacity>
+
+            <TouchableOpacity onPress={async () => {
+              const hasPermission = await UnifiedUsageService.hasOverlayPermission();
+              Alert.alert(
+                'Overlay Permission Status',
+                `Has Permission: ${hasPermission ? '✅ YES' : '❌ NO'}\n\n` +
+                `${hasPermission ? 'Permission granted' : 'GRANT PERMISSION REQUIRED'}`
+              );
+              
+              if (!hasPermission) {
+                await UnifiedUsageService.requestOverlayPermission();
+              }
+            }}>
+              <Text>Check Overlay Permission</Text>
+            </TouchableOpacity>
             
+            <TouchableOpacity onPress={() => {
+              const blockingService = AppBlockingService.getInstance();
+              const status = blockingService.getBlockingStatus();
+              
+              Alert.alert(
+                'Blocking Service Status',
+                `Enabled: ${status.enabled ? '✅' : '❌'}\n` +
+                `Mode: ${status.mode}\n` +
+                `Monitoring: ${status.monitoring ? '✅' : '❌'}\n` +
+                `Blocked Apps: ${status.blockedAppsCount}\n` +
+                `Current App: ${status.currentApp || 'None'}\n` +
+                `Floating Active: ${status.floatingWindowActive ? '✅' : '❌'}\n` +
+                `Bypass Limit: ${status.bypassLimit}`
+              );
+            }}>
+              <Text>Check Blocking Status</Text>
+            </TouchableOpacity>
+
+            <TouchableOpacity onPress={async () => {
+              try {
+                console.log('🧪 Testing floating window...');
+                
+                // Check permission first
+                const hasPermission = await UnifiedUsageService.hasOverlayPermission();
+                if (!hasPermission) {
+                  Alert.alert('Error', 'No overlay permission. Grant it first.');
+                  return;
+                }
+                
+                // Try to start floating window
+                const started = await UnifiedUsageService.startFloatingScore(
+                  'Test App',
+                  75, // test score
+                  1800000 // 30 minutes
+                );
+                
+                Alert.alert(
+                  'Floating Window Test',
+                  started ? '✅ Window started successfully!' : '❌ Failed to start window'
+                );
+                
+                // Auto-close after 10 seconds
+                if (started) {
+                  setTimeout(async () => {
+                    await UnifiedUsageService.stopFloatingScore();
+                    Alert.alert('Test Complete', 'Window closed');
+                  }, 10000);
+                }
+                
+              } catch (error) {
+                Alert.alert('Error', `Test failed: ${error}`);
+              }
+            }}>
+              <Text>Test Floating Window</Text>
+            </TouchableOpacity>
+
             <TouchableOpacity 
               className="py-sm border-b border-gray-200"
               onPress={async () => {
@@ -1149,7 +1221,7 @@ export default function Settings() {
 
             <TouchableOpacity 
               onPress={async () => {
-                const hasPermission = await UsageService.hasOverlayPermission();
+                const hasPermission = await UnifiedUsageService.hasOverlayPermission();
                 Alert.alert('Overlay Permission', `Has permission: ${hasPermission}`);
               }}
               className="mt-2 p-1 bg-blue-200 rounded"
@@ -1159,7 +1231,7 @@ export default function Settings() {
 
             <TouchableOpacity 
               onPress={async () => {
-                const started = await UsageService.startFloatingScore('Instagram', 75, 1800000);
+                const started = await UnifiedUsageService.startFloatingScore('Instagram', 75, 1800000);
                 Alert.alert('Test', `Floating score started: ${started}`);
               }}
               className="mt-2 p-1 bg-green-200 rounded"
@@ -1180,7 +1252,7 @@ export default function Settings() {
                   `Background: ${status.backgroundEnabled}\n` +
                   `Realtime: ${status.realtimeEnabled}\n` +
                   `Service Active: ${isActive === 'true'}\n` +
-                  `Native Available: ${UsageService.isNativeModuleAvailable()}`
+                  `Native Available: ${UnifiedUsageService.isNativeModuleAvailable()}`
                 );
               }}
             >

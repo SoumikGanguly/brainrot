@@ -2,6 +2,8 @@ import { AppBlockingService } from './AppBlockingService';
 import { UsageMonitoringService } from './UsageMonitoringService';
 import { database } from './database';
 
+import { UnifiedUsageService } from './UnifiedUsageService';
+
 /**
  * Coordinates between monitoring and blocking services
  * This ensures that when monitoring detects app usage, blocking is also triggered
@@ -32,14 +34,13 @@ export class ServiceCoordinator {
 
   private async setupServiceConnections(): Promise<void> {
     // Get both service instances
-    const monitoringService = UsageMonitoringService.getInstance();
-    const blockingService = AppBlockingService.getInstance();
+    const unifiedService = UnifiedUsageService.getInstance();
     
     // Extend the monitoring service's check to also trigger blocking checks
-    const originalCheck = monitoringService.checkSpecificAppUsage.bind(monitoringService);
+    const originalCheck = unifiedService.checkSpecificAppUsage.bind(unifiedService);
     
     // Override the checkSpecificAppUsage method to add blocking logic
-    monitoringService.checkSpecificAppUsage = async (packageName: string) => {
+    unifiedService.checkSpecificAppUsage = async (packageName: string) => {
       // First, run the original monitoring check (for notifications)
       await originalCheck(packageName);
       
@@ -89,8 +90,8 @@ export class ServiceCoordinator {
   async onMonitoredAppsChanged(): Promise<void> {
     console.log('Monitored apps changed, refreshing services...');
     
-    const monitoringService = UsageMonitoringService.getInstance();
-    await monitoringService.refreshMonitoredApps();
+    const unifiedService = UnifiedUsageService.getInstance();
+    await unifiedService.refreshMonitoredApps();
     
     // Also refresh blocking service in case any monitored apps are blocked
     const blockingService = AppBlockingService.getInstance();

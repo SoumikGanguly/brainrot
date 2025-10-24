@@ -1,10 +1,12 @@
+// UsageMonitoringService.ts - WITH EXTENSIVE LOGGING
+
 import { AppState, AppStateStatus } from 'react-native';
 import { database } from './database';
 import { NotificationService } from './NotificationService';
 import { UsageService } from './UsageService';
 
 interface UsageThreshold {
-  duration: number; // in milliseconds
+  duration: number;
   intensity: 'mild' | 'normal' | 'harsh' | 'critical';
 }
 
@@ -13,7 +15,7 @@ interface AppUsageTracker {
   appName: string;
   totalTodayMs: number;
   lastCheckedMs: number;
-  notificationsSent: Set<number>; // Track which thresholds have been notified
+  notificationsSent: Set<number>;
 }
 
 export class UsageMonitoringService {
@@ -22,14 +24,14 @@ export class UsageMonitoringService {
   private backgroundInterval?: ReturnType<typeof setInterval>;
   private appTrackers: Map<string, AppUsageTracker> = new Map();
   private isNativeRealtimeActive = false;
+  private checkCount = 0; // Track iterations
   
-  // Usage thresholds for notifications (in milliseconds)
   private static readonly THRESHOLDS: UsageThreshold[] = [
-    { duration: 30 * 60 * 1000, intensity: 'mild' },     // 30 minutes
-    { duration: 45 * 60 * 1000, intensity: 'normal' },   // 45 minutes
-    { duration: 60 * 60 * 1000, intensity: 'harsh' },    // 1 hour
-    { duration: 90 * 60 * 1000, intensity: 'critical' }, // 1.5 hours
-    { duration: 120 * 60 * 1000, intensity: 'critical' }, // 2 hours
+    { duration: 30 * 60 * 1000, intensity: 'mild' },
+    { duration: 45 * 60 * 1000, intensity: 'normal' },
+    { duration: 60 * 60 * 1000, intensity: 'harsh' },
+    { duration: 90 * 60 * 1000, intensity: 'critical' },
+    { duration: 120 * 60 * 1000, intensity: 'critical' },
   ];
 
   static getInstance(): UsageMonitoringService {
@@ -43,45 +45,32 @@ export class UsageMonitoringService {
     AppState.addEventListener('change', this.handleAppStateChange);
   }
 
-  private handleAppStateChange = (nextAppState: AppStateStatus) => {
-    if (nextAppState === 'active') {
-      // App came to foreground, restart monitoring
-      this.startMonitoring();
-    } else if (nextAppState === 'background') {
-      // App went to background, but keep monitoring if enabled
-      this.handleAppGoingBackground();
-    }
-  };
-
   async initialize(): Promise<void> {
     try {
-      console.log('Initializing UsageMonitoringService...');
+      console.log('========================================');
+      console.log('🔄 INITIALIZING USAGE MONITORING SERVICE');
+      console.log('========================================');
       
-      // Initialize notification service
       await NotificationService.initialize();
-      
-      // Load today's usage data to initialize trackers
       await this.initializeTodayTrackers();
       
-      // Check if monitoring should be started based on saved preferences
       const monitoringEnabled = await database.getMeta('monitoring_enabled');
       if (monitoringEnabled === 'true') {
         await this.startMonitoring();
       }
       
-      console.log('Usage monitoring service initialized');
+      console.log('✅ Usage monitoring service initialized');
+      console.log('========================================\n');
     } catch (error) {
-      console.error('Error initializing usage monitoring:', error);
+      console.error('❌ Error initializing usage monitoring:', error);
     }
   }
 
   private async initializeTodayTrackers(): Promise<void> {
     try {
-      // Get monitored apps from database
       const monitoredAppsData = await database.getMeta('monitored_apps');
       if (!monitoredAppsData) {
-        console.log('No monitored apps found, using defaults');
-        // Set default monitored apps if none exist
+        console.log('⚠️ No monitored apps found, using defaults');
         const defaultApps = [
           'com.google.android.youtube',
           'com.instagram.android',
@@ -104,10 +93,10 @@ export class UsageMonitoringService {
 
   private async initializeTrackersForApps(monitoredPackages: string[]): Promise<void> {
     try {
-      // Get today's usage data
       const todayUsage = await UsageService.getTodayUsage();
       
-      // Initialize trackers for monitored apps
+      console.log(`📱 Initializing trackers for ${monitoredPackages.length} monitored apps...`);
+      
       for (const packageName of monitoredPackages) {
         const usageData = todayUsage.find(u => u.packageName === packageName);
         const appName = UsageService.getAppDisplayName(packageName);
@@ -119,9 +108,11 @@ export class UsageMonitoringService {
           lastCheckedMs: Date.now(),
           notificationsSent: new Set()
         });
+        
+        console.log(`   ✓ ${appName} - ${Math.round((usageData?.totalTimeMs || 0) / 60000)}min today`);
       }
       
-      console.log(`Initialized trackers for ${this.appTrackers.size} monitored apps`);
+      console.log(`✅ Initialized trackers for ${this.appTrackers.size} monitored apps`);
     } catch (error) {
       console.error('Error initializing trackers for apps:', error);
     }
@@ -129,90 +120,79 @@ export class UsageMonitoringService {
 
   async startMonitoring(): Promise<boolean> {
     if (this.isMonitoring) {
-      console.log('Monitoring already active');
+      console.log('⚠️ Monitoring already active');
       return true;
     }
 
     try {
-      console.log('Starting comprehensive monitoring...');
+      console.log('\n🎬 STARTING COMPREHENSIVE MONITORING');
       
-      // Check permissions first
       const hasAccess = await UsageService.isUsageAccessGranted();
       if (!hasAccess) {
-        console.warn('Usage access not granted, cannot start monitoring');
+        console.error('❌ Usage access not granted, cannot start monitoring');
         return false;
       }
+      console.log('✅ Usage access granted');
 
-      // Start background monitoring (JavaScript intervals)
       this.startBackgroundMonitoring();
       
-      // Start native real-time monitoring (detects app opens immediately)
       const nativeStarted = await this.startNativeRealtimeMonitoring();
+      console.log(`Native realtime: ${nativeStarted ? '✅' : '⚠️ Not available'}`);
       
       this.isMonitoring = true;
       
-      // Save monitoring state
       await database.setMeta('monitoring_enabled', 'true');
       await database.setMeta('monitoring_started_at', Date.now().toString());
       
-      console.log(`Monitoring started - Background: true, Native realtime: ${nativeStarted}`);
+      console.log('🎬 Monitoring started - will log every check\n');
       
-      // Trigger initial check after 5 seconds
       setTimeout(() => this.checkUsageAndNotify(), 5000);
       
       return true;
     } catch (error) {
-      console.error('Error starting usage monitoring:', error);
+      console.error('❌ Error starting usage monitoring:', error);
       return false;
     }
   }
 
   async stopMonitoring(): Promise<void> {
-    console.log('Stopping monitoring...');
+    console.log('⏹️ Stopping monitoring...');
     
     this.isMonitoring = false;
     
-    // Stop background intervals
     if (this.backgroundInterval) {
       clearInterval(this.backgroundInterval);
       this.backgroundInterval = undefined;
     }
 
-    // Stop native real-time monitoring
     await this.stopNativeRealtimeMonitoring();
-
-    // Update database state
     await database.setMeta('monitoring_enabled', 'false');
 
-    console.log('Usage monitoring stopped');
+    console.log('✅ Usage monitoring stopped');
   }
 
   private startBackgroundMonitoring(): void {
-    // Check usage every 10 minutes for background monitoring
     this.backgroundInterval = setInterval(() => {
       this.checkUsageAndNotify();
     }, 10 * 60 * 1000); // 10 minutes
 
-    console.log('Background monitoring started (10min intervals)');
+    console.log('   ✓ Background checks: Every 10 minutes');
   }
 
   private async startNativeRealtimeMonitoring(): Promise<boolean> {
     try {
-      // Use the enhanced UsageService method to start real-time app detection
       const success = await UsageService.startRealtimeAppDetection();
       this.isNativeRealtimeActive = success;
       
       if (success) {
-        console.log('Native real-time app detection started');
-        // The native module will now detect when monitored apps are opened
-        // and call our usage checker automatically
+        console.log('   ✓ Native realtime detection started');
       } else {
-        console.warn('Failed to start native real-time monitoring');
+        console.log('   ⚠️ Native realtime not available');
       }
       
       return success;
     } catch (error) {
-      console.error('Error starting native real-time monitoring:', error);
+      console.error('   ❌ Error starting native realtime:', error);
       return false;
     }
   }
@@ -229,68 +209,126 @@ export class UsageMonitoringService {
     }
   }
 
-  // This method will be called both by intervals and by native real-time detection
   async checkUsageAndNotify(): Promise<void> {
     try {
-      console.log('Checking usage and sending notifications...');
+      this.checkCount++;
       
-      // Check if notifications are enabled
+      console.log(`\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`);
+      console.log(`🔍 USAGE CHECK #${this.checkCount} at ${new Date().toLocaleTimeString()}`);
+      console.log(`━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`);
+      
       const notificationsEnabled = await database.getMeta('notifications_enabled');
       if (notificationsEnabled === 'false') {
-        console.log('Notifications disabled, skipping check');
+        console.log('⏭️  Notifications disabled, skipping check');
         return;
       }
 
-      // Check if notifications are snoozed
       const snoozeUntilStr = await database.getMeta('notifications_snooze_until');
       const snoozeUntil = snoozeUntilStr ? parseInt(snoozeUntilStr) : 0;
       if (Date.now() < snoozeUntil) {
-        console.log('Notifications snoozed, skipping check');
+        console.log('⏭️  Notifications snoozed, skipping check');
         return;
       }
 
-      // Get current usage data
-      const todayUsage = await UsageService.getTodayUsage();
-      console.log(`Checking ${todayUsage.length} apps for usage thresholds`);
+      // ✅ NEW: Get current foreground app using native method
+      console.log('🎯 Detecting current foreground app (native method)...');
+      const currentForegroundApp = await UsageService.getCurrentForegroundApp();
       
-      // Update trackers and check for notifications
+      if (currentForegroundApp) {
+        console.log(`✅ CURRENT FOREGROUND APP:`);
+        console.log(`   Name: ${currentForegroundApp.appName}`);
+        console.log(`   Package: ${currentForegroundApp.packageName}`);
+        
+        // Check if it's a monitored app
+        const tracker = this.appTrackers.get(currentForegroundApp.packageName);
+        if (tracker) {
+          console.log(`   ✅ This is a MONITORED app!`);
+          console.log(`   Current usage today: ${this.formatDuration(tracker.totalTodayMs)}`);
+          
+          // Trigger immediate check for this app
+          await this.checkSpecificAppUsage(currentForegroundApp.packageName);
+        } else {
+          console.log(`   ℹ️  Not a monitored app`);
+        }
+      } else {
+        console.log('⚠️  Could not detect current foreground app');
+        console.log('   Possible reasons:');
+        console.log('   - Home screen is active');
+        console.log('   - System UI is in foreground');
+        console.log('   - No app opened in last 3 seconds');
+      }
+      
+      // Also check overall usage for all monitored apps
+      console.log('\n📊 Checking usage for all monitored apps...');
+      const todayUsage = await UsageService.getTodayUsage();
+      
+      if (!todayUsage || todayUsage.length === 0) {
+        console.log('⚠️  NO USAGE DATA RETURNED');
+        console.log('   This could mean:');
+        console.log('   - No apps used today');
+        console.log('   - Usage permission not granted');
+        console.log('   - Native module not returning data');
+        return;
+      }
+      
+      console.log(`✅ Got usage data for ${todayUsage.length} apps`);
+      
+      // Log top 5 apps
+      const topApps = todayUsage
+        .sort((a, b) => b.totalTimeMs - a.totalTimeMs)
+        .slice(0, 5);
+      
+      console.log('\n📱 Top 5 apps by usage today:');
+      topApps.forEach((app, index) => {
+        const minutes = Math.round(app.totalTimeMs / 60000);
+        const isMonitored = this.appTrackers.has(app.packageName) ? '⭐' : '  ';
+        console.log(`   ${isMonitored} ${index + 1}. ${app.appName} - ${minutes} minutes`);
+      });
+      
+      // Update trackers and check thresholds
       let notificationsSent = 0;
+      console.log('\n🔔 Checking notification thresholds...');
+      
       for (const [packageName, tracker] of this.appTrackers) {
         const currentUsage = todayUsage.find(u => u.packageName === packageName);
         const currentTotalMs = currentUsage?.totalTimeMs || 0;
         
-        // Only check if usage has increased since last check
         if (currentTotalMs > tracker.totalTodayMs) {
+          const previousMs = tracker.totalTodayMs;
           tracker.totalTodayMs = currentTotalMs;
           tracker.lastCheckedMs = Date.now();
+          
+          console.log(`   📈 ${tracker.appName}: ${this.formatDuration(previousMs)} → ${this.formatDuration(currentTotalMs)}`);
 
-          // Check thresholds and send notifications
           const sent = await this.checkThresholdsForApp(tracker);
           if (sent) notificationsSent++;
         }
       }
       
       if (notificationsSent > 0) {
-        console.log(`Sent ${notificationsSent} usage notifications`);
+        console.log(`\n📢 Sent ${notificationsSent} usage notifications`);
+      } else {
+        console.log('\n✓ No notifications needed');
       }
       
+      console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n');
+      
     } catch (error) {
-      console.error('Error in checkUsageAndNotify:', error);
+      console.error('\n❌ ERROR in checkUsageAndNotify:', error);
+      console.error('Stack:', error instanceof Error ? error.stack : 'No stack trace');
     }
   }
 
-  // Public method that can be called by native module when app is detected
   async checkSpecificAppUsage(packageName: string): Promise<void> {
     try {
-      console.log(`Real-time check for app: ${packageName}`);
+      console.log(`\n🔎 Checking specific app: ${packageName}`);
       
       const tracker = this.appTrackers.get(packageName);
       if (!tracker) {
-        console.log(`No tracker found for ${packageName}`);
+        console.log(`   ⚠️  No tracker found for ${packageName}`);
         return;
       }
 
-      // Get fresh usage data for this specific app
       const startOfDay = new Date();
       startOfDay.setHours(0, 0, 0, 0);
       
@@ -300,14 +338,13 @@ export class UsageMonitoringService {
         tracker.totalTodayMs = currentTotalMs;
         tracker.lastCheckedMs = Date.now();
         
-        console.log(`Updated usage for ${tracker.appName}: ${this.formatDuration(currentTotalMs)}`);
+        console.log(`   ✅ Updated usage for ${tracker.appName}: ${this.formatDuration(currentTotalMs)}`);
         
-        // Check thresholds immediately
         await this.checkThresholdsForApp(tracker);
       }
       
     } catch (error) {
-      console.error(`Error checking specific app usage for ${packageName}:`, error);
+      console.error(`❌ Error checking specific app usage for ${packageName}:`, error);
     }
   }
 
@@ -317,11 +354,8 @@ export class UsageMonitoringService {
     for (let i = 0; i < UsageMonitoringService.THRESHOLDS.length; i++) {
       const threshold = UsageMonitoringService.THRESHOLDS[i];
       
-      // Check if usage has crossed this threshold
       if (tracker.totalTodayMs >= threshold.duration) {
-        // Check if we've already sent notification for this threshold
         if (!tracker.notificationsSent.has(i)) {
-          // Send notification
           const usageTimeFormatted = this.formatDuration(tracker.totalTodayMs);
           
           try {
@@ -331,10 +365,8 @@ export class UsageMonitoringService {
               threshold.intensity
             );
 
-            // Mark this threshold as notified
             tracker.notificationsSent.add(i);
             
-            // Save notification history
             const today = new Date().toISOString().split('T')[0];
             await database.saveNotificationHistory(
               tracker.packageName,
@@ -342,14 +374,12 @@ export class UsageMonitoringService {
               today
             );
             
-            console.log(`Sent ${threshold.intensity} notification for ${tracker.appName} after ${usageTimeFormatted}`);
+            console.log(`📢 Sent ${threshold.intensity} notification for ${tracker.appName} after ${usageTimeFormatted}`);
             notificationSent = true;
-            
-            // Only send one notification per check to avoid spam
             break;
             
           } catch (error) {
-            console.error(`Error sending notification for ${tracker.appName}:`, error);
+            console.error(`❌ Error sending notification for ${tracker.appName}:`, error);
           }
         }
       }
@@ -369,8 +399,15 @@ export class UsageMonitoringService {
     }
   }
 
+  private handleAppStateChange = (nextAppState: AppStateStatus) => {
+    if (nextAppState === 'active') {
+      this.startMonitoring();
+    } else if (nextAppState === 'background') {
+      this.handleAppGoingBackground();
+    }
+  };
+
   private async handleAppGoingBackground(): Promise<void> {
-    // Keep monitoring in background if background checks are enabled
     const backgroundEnabled = await database.getMeta('background_checks_enabled');
     if (backgroundEnabled === 'false') {
       console.log('Background monitoring disabled, stopping monitoring');
@@ -380,25 +417,22 @@ export class UsageMonitoringService {
     }
   }
 
-  // Public method to refresh monitored apps (call when settings change)
   async refreshMonitoredApps(): Promise<void> {
     try {
-      console.log('Refreshing monitored apps...');
+      console.log('🔄 Refreshing monitored apps...');
       
       const monitoredAppsData = await database.getMeta('monitored_apps');
       if (!monitoredAppsData) return;
 
       const monitoredPackages = JSON.parse(monitoredAppsData) as string[];
       
-      // Remove trackers for apps no longer monitored
       for (const [packageName] of this.appTrackers) {
         if (!monitoredPackages.includes(packageName)) {
           this.appTrackers.delete(packageName);
-          console.log(`Removed tracker for ${packageName}`);
+          console.log(`   ✗ Removed tracker for ${packageName}`);
         }
       }
       
-      // Add trackers for newly monitored apps
       const todayUsage = await UsageService.getTodayUsage();
       for (const packageName of monitoredPackages) {
         if (!this.appTrackers.has(packageName)) {
@@ -413,20 +447,19 @@ export class UsageMonitoringService {
             notificationsSent: new Set()
           });
           
-          console.log(`Added tracker for ${appName}`);
+          console.log(`   ✓ Added tracker for ${appName}`);
         }
       }
       
-      console.log(`Refreshed trackers - now tracking ${this.appTrackers.size} apps`);
+      console.log(`✅ Refreshed trackers - now tracking ${this.appTrackers.size} apps`);
       
     } catch (error) {
       console.error('Error refreshing monitored apps:', error);
     }
   }
 
-  // Reset daily tracking (call at midnight or when date changes)
   async resetDailyTracking(): Promise<void> {
-    console.log('Resetting daily tracking...');
+    console.log('🔄 Resetting daily tracking...');
     
     for (const tracker of this.appTrackers.values()) {
       tracker.totalTodayMs = 0;
@@ -434,16 +467,14 @@ export class UsageMonitoringService {
       tracker.lastCheckedMs = Date.now();
     }
     
-    console.log('Daily tracking reset completed');
+    console.log('✅ Daily tracking reset completed');
   }
 
-  // Manual trigger for testing
   async triggerManualCheck(): Promise<void> {
-    console.log('Manual usage check triggered');
+    console.log('\n🔨 MANUAL CHECK TRIGGERED\n');
     await this.checkUsageAndNotify();
   }
 
-  // Get current status
   getMonitoringStatus(): { 
     isMonitoring: boolean; 
     trackedApps: number; 
@@ -470,13 +501,13 @@ export class UsageMonitoringService {
     };
   }
 
-  // Get detailed monitoring info for debugging
   getDebugInfo(): object {
     return {
       isMonitoring: this.isMonitoring,
       trackersCount: this.appTrackers.size,
       backgroundInterval: !!this.backgroundInterval,
       nativeRealtimeActive: this.isNativeRealtimeActive,
+      checkCount: this.checkCount,
       trackers: Object.fromEntries(
         Array.from(this.appTrackers.entries()).map(([key, tracker]) => [
           key,

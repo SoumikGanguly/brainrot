@@ -44,22 +44,46 @@
     android:theme="@style/AppTheme" 
     android:supportsRtl="true">
 
-    <!-- Services - MOVED INSIDE APPLICATION TAG -->
     <service
       android:name=".BlockingOverlayService"
       android:enabled="true"
-      android:exported="false" />
+      android:exported="false"
+      android:stopWithTask="false"
+      android:foregroundServiceType="specialUse">
+      <property
+        android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+        android:value="Display app blocking overlay for digital wellness monitoring and intervention" />
+    </service>
 
-      <service
-        android:name=".FloatingScoreService"
-        android:enabled="true"
-        android:exported="false"
-        android:foregroundServiceType="specialUse">
-        <property
-          android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
-          android:value="Display floating widget" />
-      </service>
-    
+    <service
+      android:name=".FloatingScoreService"
+      android:enabled="true"
+      android:exported="false"
+      android:stopWithTask="true"
+      android:foregroundServiceType="specialUse">
+      <property
+        android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+        android:value="Display brain score floating widget during app usage" />
+    </service>
+
+    <service
+      android:name=".ForegroundMonitoringService"
+      android:enabled="true"
+      android:exported="false"
+      android:stopWithTask="false"
+      android:foregroundServiceType="dataSync" />
+
+    <receiver
+      android:name=".BootReceiver"
+      android:enabled="true"
+      android:exported="true"
+      android:permission="android.permission.RECEIVE_BOOT_COMPLETED">
+      <intent-filter>
+        <action android:name="android.intent.action.BOOT_COMPLETED" />
+        <action android:name="android.intent.action.QUICKBOOT_POWERON" />
+      </intent-filter>
+    </receiver>
+
     <!-- Existing meta-data -->
     <meta-data android:name="expo.modules.updates.ENABLED" android:value="false"/>
     <meta-data android:name="expo.modules.updates.EXPO_UPDATES_CHECK_ON_LAUNCH" android:value="ALWAYS"/>

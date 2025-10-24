@@ -62,11 +62,6 @@ interface DailySummaryRow {
   appsJson: string;
 }
 
-interface UsageAggregateRow {
-  date: string;
-  totalScreenTime: number;
-}
-
 interface AppSettingsRow {
   packageName: string;
   appName: string;
@@ -86,6 +81,8 @@ interface RawUsageRow {
 
 export class DatabaseService {
   private db: SQLite.SQLiteDatabase;
+  private monitoredPackagesCache: { packages: string[]; timestamp: number } | null = null;
+  private readonly MONITORED_CACHE_VALIDITY_MS = 300000; // 5 minutes
 
   constructor() {
     this.db = SQLite.openDatabaseSync('brainrot.db');
@@ -93,7 +90,7 @@ export class DatabaseService {
   }
 
   private initDatabase() {
-    // Daily usage tracking
+    // Daily usage tracking with UNIQUE constraint
     this.db.execSync(`
       CREATE TABLE IF NOT EXISTS daily_usage (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -104,6 +101,22 @@ export class DatabaseService {
         UNIQUE(date, packageName)
       )
     `);
+    
+    // CREATE INDEXES for faster queries
+    this.db.execSync(`
+      CREATE INDEX IF NOT EXISTS idx_daily_usage_date 
+      ON daily_usage(date)
+    `);
+    
+    this.db.execSync(`
+      CREATE INDEX IF NOT EXISTS idx_daily_usage_package 
+      ON daily_usage(packageName)
+    `);
+    
+    this.db.execSync(`
+      CREATE INDEX IF NOT EXISTS idx_daily_usage_date_package 
+      ON daily_usage(date, packageName)
+    `);
 
     // App settings
     this.db.execSync(`
@@ -113,6 +126,12 @@ export class DatabaseService {
         monitored BOOLEAN DEFAULT 1,
         dailyLimitMs INTEGER DEFAULT 7200000
       )
+    `);
+    
+    // Index for monitored apps lookup (partial index for performance)
+    this.db.execSync(`
+      CREATE INDEX IF NOT EXISTS idx_app_settings_monitored 
+      ON app_settings(monitored) WHERE monitored = 1
     `);
 
     // Meta data (trial, settings, etc.)
@@ -133,14 +152,25 @@ export class DatabaseService {
         date TEXT NOT NULL
       )
     `);
+    
+    this.db.execSync(`
+      CREATE INDEX IF NOT EXISTS idx_notification_date 
+      ON notification_history(date)
+    `);
 
+    // Daily summary table with index
     this.db.execSync(`
       CREATE TABLE IF NOT EXISTS daily_summary (
         date TEXT PRIMARY KEY,
         totalScreenTime INTEGER NOT NULL,
         brainScore INTEGER NOT NULL,
-        appsJson TEXT NOT NULL -- JSON string of apps array [{packageName, appName, totalTimeMs}, ...]
+        appsJson TEXT NOT NULL
       )
+    `);
+    
+    this.db.execSync(`
+      CREATE INDEX IF NOT EXISTS idx_daily_summary_date 
+      ON daily_summary(date DESC)
     `);
   }
 
@@ -158,7 +188,9 @@ export class DatabaseService {
           HAVING COUNT(*) > 1
         `);
         
-        console.log('Found duplicates to clean:', duplicates);
+        if (duplicates && duplicates.length > 0) {
+          console.log('Found duplicates to clean:', duplicates);
+        }
         
         // Clean duplicates - keep the one with highest totalMs
         this.db.execSync(`
@@ -186,20 +218,34 @@ export class DatabaseService {
     });
   }
 
+  // OPTIMIZED: Batch save with prepared statement
   async saveDailyUsage(date: string, usageData: UsageData[]): Promise<void> {
     return new Promise((resolve, reject) => {
       try {
+        if (!usageData || usageData.length === 0) {
+          resolve();
+          return;
+        }
+
         this.db.withTransactionSync(() => {
-          usageData.forEach(data => {
-            this.db.runSync(
-              `INSERT OR REPLACE INTO daily_usage 
-               (date, packageName, appName, totalMs) VALUES (?, ?, ?, ?)`,
-              [date, data.packageName, data.appName, data.totalTimeMs]
-            );
-          });
+          const stmt = this.db.prepareSync(
+            `INSERT OR REPLACE INTO daily_usage 
+             (date, packageName, appName, totalMs) VALUES (?, ?, ?, ?)`
+          );
+          
+          try {
+            for (const data of usageData) {
+              stmt.executeSync([date, data.packageName, data.appName, data.totalTimeMs]);
+            }
+          } finally {
+            stmt.finalizeSync();
+          }
         });
+        
+        console.log(`Saved ${usageData.length} usage entries for ${date}`);
         resolve();
       } catch (error) {
+        console.error('Error saving daily usage:', error);
         reject(error);
       }
     });
@@ -209,7 +255,10 @@ export class DatabaseService {
     return new Promise((resolve, reject) => {
       try {
         const result = this.db.getAllSync(
-          `SELECT * FROM daily_usage WHERE date = ? ORDER BY totalMs DESC`,
+          `SELECT packageName, appName, totalMs, date 
+           FROM daily_usage 
+           WHERE date = ? 
+           ORDER BY totalMs DESC`,
           [date]
         ) as DailyUsageRow[];
         
@@ -222,11 +271,14 @@ export class DatabaseService {
         
         resolve(usage);
       } catch (error) {
+        console.error('Error getting daily usage:', error);
         reject(error);
       }
     });
   }
 
+  // SIMPLIFIED: getHistoricalData - DEPRECATED, use BrainScoreService instead
+  // Kept for backward compatibility only
   async getHistoricalData(days: number = 30): Promise<DailyUsage[]> {
     return new Promise((resolve) => {
       try {
@@ -234,105 +286,25 @@ export class DatabaseService {
         startDate.setDate(startDate.getDate() - days);
         const startDateStr = startDate.toISOString().split('T')[0];
 
-        // 1) Get all summary rows in the range (if any)
+        // Get all summaries in the range (optimized with index)
         const summaries = this.db.getAllSync(
-          `SELECT date, totalScreenTime, brainScore, appsJson FROM daily_summary WHERE date >= ? ORDER BY date DESC`,
+          `SELECT date, totalScreenTime, brainScore, appsJson 
+           FROM daily_summary 
+           WHERE date >= ? 
+           ORDER BY date DESC`,
           [startDateStr]
-        ) as DailySummaryRow[] || [];
+        ) as DailySummaryRow[];
 
-        const summariesMap: Record<string, DailyUsage> = {};
-        summaries.forEach((r) => {
-          summariesMap[r.date] = {
-            date: r.date,
-            totalScreenTime: r.totalScreenTime || 0,
-            brainScore: r.brainScore || this.calculateBrainScore(r.totalScreenTime || 0),
-            apps: JSON.parse(r.appsJson || '[]')
-          };
-        });
+        const results: DailyUsage[] = summaries.map((row) => ({
+          date: row.date,
+          totalScreenTime: row.totalScreenTime || 0,
+          brainScore: row.brainScore || this.calculateBrainScore(row.totalScreenTime || 0),
+          apps: JSON.parse(row.appsJson || '[]')
+        }));
 
-        // 2) Get aggregated daily_usage rows to know which dates exist, and totals if no summary
-        const usageRows = this.db.getAllSync(
-          `SELECT date, SUM(totalMs) as totalScreenTime FROM daily_usage WHERE date >= ? GROUP BY date ORDER BY date DESC`,
-          [startDateStr]
-        ) as UsageAggregateRow[] || [];
-
-        const results: DailyUsage[] = [];
-
-        // For each date present in usageRows, prefer summary if exists else compute from daily_usage (filtered to monitored apps)
-        usageRows.forEach((row) => {
-          const date = row.date;
-          if (summariesMap[date]) {
-            results.push(summariesMap[date]);
-            return;
-          }
-
-          // No summary — compute monitored-only fallback
-          try {
-            // Load raw usage for this date
-            const raw = this.db.getAllSync(
-              `SELECT packageName, appName, totalMs FROM daily_usage WHERE date = ? ORDER BY totalMs DESC`,
-              [date]
-            ) as RawUsageRow[] || [];
-
-            // Determine monitored apps from app_settings table (preferred) or meta
-            // First try app_settings where monitored = 1
-            const monitoredRows = this.db.getAllSync(`SELECT packageName FROM app_settings WHERE monitored = 1`) as MonitoredAppRow[] || [];
-            let monitoredSet = new Set<string>(monitoredRows.map((m) => m.packageName));
-
-            // If no app_settings entries, fallback to meta('monitored_apps')
-            if (monitoredSet.size === 0) {
-              try {
-                const metaRow = this.db.getFirstSync(`SELECT value FROM meta WHERE key = ?`, ['monitored_apps']) as MetaRow | null;
-                if (metaRow && metaRow.value) {
-                  const parsed = JSON.parse(metaRow.value);
-                  if (Array.isArray(parsed)) {
-                    monitoredSet = new Set(parsed);
-                  }
-                }
-              } catch {
-                // Ignore JSON parse errors
-              }
-            }
-
-            // Exclude the app itself
-            monitoredSet.delete('com.soumikganguly.brainrot');
-
-            // Filter raw to monitoredSet
-            const filteredApps: UsageData[] = raw
-              .filter((r) => monitoredSet.has(r.packageName))
-              .map((r) => ({
-                packageName: r.packageName,
-                appName: r.appName,
-                totalTimeMs: r.totalMs,
-                date: date // Add the missing date property
-              }));
-
-            const total = filteredApps.reduce((s, a) => s + (a.totalTimeMs || 0), 0);
-            const score = this.calculateBrainScore(total);
-
-            results.push({
-              date,
-              totalScreenTime: total,
-              brainScore: score,
-              apps: filteredApps
-            });
-          } catch {
-            // fallback to aggregated total if computing fails
-            const total = row.totalScreenTime || 0;
-            results.push({
-              date,
-              totalScreenTime: total,
-              brainScore: this.calculateBrainScore(total),
-              apps: []
-            });
-          }
-        });
-
-        // Sort by date descending
-        results.sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
         resolve(results);
-      } catch {
-        console.error('Error fetching historical data (enhanced)');
+      } catch (error) {
+        console.error('Error fetching historical data:', error);
         resolve([]);
       }
     });
@@ -351,6 +323,7 @@ export class DatabaseService {
         );
         resolve();
       } catch (error) {
+        console.error('Error setting meta:', error);
         reject(error);
       }
     });
@@ -366,16 +339,20 @@ export class DatabaseService {
         
         resolve(result ? result.value : null);
       } catch (error) {
+        console.error('Error getting meta:', error);
         reject(error);
       }
     });
   }
 
+  // OPTIMIZED: Get app settings with index
   async getAppSettings(): Promise<AppSettings[]> {
     return new Promise((resolve, reject) => {
       try {
         const result = this.db.getAllSync(
-          `SELECT * FROM app_settings ORDER BY appName`
+          `SELECT packageName, appName, monitored, dailyLimitMs 
+           FROM app_settings 
+           ORDER BY appName`
         ) as AppSettingsRow[];
         
         const settings: AppSettings[] = result.map((row) => ({
@@ -387,9 +364,58 @@ export class DatabaseService {
         
         resolve(settings);
       } catch (error) {
+        console.error('Error getting app settings:', error);
         reject(error);
       }
     });
+  }
+
+  // NEW: Optimized method to get ONLY monitored packages (uses partial index)
+  async getMonitoredPackages(): Promise<string[]> {
+    return new Promise(async (resolve, reject) => {
+      try {
+        // Check cache first
+        if (this.monitoredPackagesCache && 
+            Date.now() - this.monitoredPackagesCache.timestamp < this.MONITORED_CACHE_VALIDITY_MS) {
+          resolve(this.monitoredPackagesCache.packages);
+          return;
+        }
+
+        // Query using partial index (very fast)
+        const result = this.db.getAllSync(
+          `SELECT packageName FROM app_settings WHERE monitored = 1`
+        ) as MonitoredAppRow[];
+        
+        let packages = result.map(r => r.packageName);
+
+        // Fallback to meta if no app_settings
+        if (packages.length === 0) {
+          try {
+            const meta = await this.getMeta('monitored_apps');
+            packages = meta ? JSON.parse(meta) : [];
+          } catch (error) {
+            console.warn('Failed to parse monitored_apps meta:', error);
+            packages = [];
+          }
+        }
+
+        // Cache the result
+        this.monitoredPackagesCache = {
+          packages,
+          timestamp: Date.now()
+        };
+
+        resolve(packages);
+      } catch (error) {
+        console.error('Error getting monitored packages:', error);
+        reject(error);
+      }
+    });
+  }
+
+  // NEW: Clear monitored packages cache (call when settings change)
+  clearMonitoredCache(): void {
+    this.monitoredPackagesCache = null;
   }
 
   async updateAppSettings(settings: AppSettings): Promise<void> {
@@ -400,8 +426,13 @@ export class DatabaseService {
            (packageName, appName, monitored, dailyLimitMs) VALUES (?, ?, ?, ?)`,
           [settings.packageName, settings.appName, settings.monitored ? 1 : 0, settings.dailyLimitMs]
         );
+        
+        // Clear cache when settings change
+        this.clearMonitoredCache();
+        
         resolve();
       } catch (error) {
+        console.error('Error updating app settings:', error);
         reject(error);
       }
     });
@@ -417,6 +448,7 @@ export class DatabaseService {
         );
         resolve();
       } catch (error) {
+        console.error('Error saving notification history:', error);
         reject(error);
       }
     });
@@ -431,6 +463,7 @@ export class DatabaseService {
         );
         resolve(result);
       } catch (error) {
+        console.error('Error getting notification history:', error);
         reject(error);
       }
     });
@@ -441,11 +474,14 @@ export class DatabaseService {
       try {
         const appsJson = JSON.stringify(summary.apps || []);
         this.db.runSync(
-          `INSERT OR REPLACE INTO daily_summary (date, totalScreenTime, brainScore, appsJson) VALUES (?, ?, ?, ?)`,
+          `INSERT OR REPLACE INTO daily_summary 
+           (date, totalScreenTime, brainScore, appsJson) VALUES (?, ?, ?, ?)`,
           [date, summary.totalScreenTime, summary.brainScore, appsJson]
         );
+        console.log(`Saved daily summary for ${date}: ${summary.brainScore} score`);
         resolve();
       } catch (error) {
+        console.error('Error saving daily summary:', error);
         reject(error);
       }
     });
@@ -456,11 +492,16 @@ export class DatabaseService {
     return new Promise((resolve, reject) => {
       try {
         const row = this.db.getFirstSync(
-          `SELECT date, totalScreenTime, brainScore, appsJson FROM daily_summary WHERE date = ?`,
+          `SELECT date, totalScreenTime, brainScore, appsJson 
+           FROM daily_summary 
+           WHERE date = ?`,
           [date]
         ) as DailySummaryRow | null;
         
-        if (!row) return resolve(null);
+        if (!row) {
+          resolve(null);
+          return;
+        }
 
         const apps = JSON.parse(row.appsJson || '[]');
         resolve({
@@ -470,81 +511,144 @@ export class DatabaseService {
           apps
         });
       } catch (error) {
+        console.error('Error getting daily summary:', error);
         reject(error);
       }
     });
   }
 
-  // Backfill summaries from existing daily_usage and current monitored apps
+  // OPTIMIZED: Backfill summaries - should be called rarely
   async backfillSummaries(days = 90): Promise<void> {
     return new Promise(async (resolve) => {
       try {
-        // Get distinct dates in recent range
+        console.log(`Starting backfill for last ${days} days...`);
+        
         const startDate = new Date();
         startDate.setDate(startDate.getDate() - days);
         const startDateStr = startDate.toISOString().split('T')[0];
 
-        const dates = this.db.getAllSync(
-          `SELECT DISTINCT date FROM daily_usage WHERE date >= ? ORDER BY date ASC`,
+        // Get dates that need backfilling (have usage but no summary)
+        const datesToBackfill = this.db.getAllSync(
+          `SELECT DISTINCT du.date 
+           FROM daily_usage du
+           LEFT JOIN daily_summary ds ON du.date = ds.date
+           WHERE du.date >= ? AND ds.date IS NULL
+           ORDER BY du.date ASC`,
           [startDateStr]
-        ) as { date: string }[] || [];
+        ) as { date: string }[];
 
-        for (const d of dates) {
-          const dateStr = d.date;
-          // Skip if summary already exists
-          const exists = this.db.getFirstSync(`SELECT 1 FROM daily_summary WHERE date = ?`, [dateStr]);
-          if (exists) continue;
+        console.log(`Found ${datesToBackfill.length} dates to backfill`);
 
-          // Get raw usage for the date
-          const raw = this.db.getAllSync(`SELECT packageName, appName, totalMs FROM daily_usage WHERE date = ?`, [dateStr]) as RawUsageRow[] || [];
+        // Get monitored packages once
+        const monitoredPackages = await this.getMonitoredPackages();
+        const monitoredSet = new Set(monitoredPackages);
+        monitoredSet.delete('com.soumikganguly.brainrot');
 
-          // Get monitored apps (app_settings -> monitored=1) or meta
-          const monitoredRows = this.db.getAllSync(`SELECT packageName FROM app_settings WHERE monitored = 1`) as MonitoredAppRow[] || [];
-          let monitoredSet = new Set<string>(monitoredRows.map((m) => m.packageName));
-          
-          if (monitoredSet.size === 0) {
-            const metaRow = this.db.getFirstSync(`SELECT value FROM meta WHERE key = ?`, ['monitored_apps']) as MetaRow | null;
-            if (metaRow && metaRow.value) {
-              try {
-                const parsed = JSON.parse(metaRow.value);
-                if (Array.isArray(parsed)) monitoredSet = new Set(parsed);
-              } catch {
-                // Ignore JSON parse errors
-              }
-            }
-          }
-          monitoredSet.delete('com.soumikganguly.brainrot');
+        let backfilled = 0;
 
-          const filteredApps: UsageData[] = raw
-            .filter((r) => monitoredSet.has(r.packageName))
-            .map((r) => ({
-              packageName: r.packageName,
-              appName: r.appName,
-              totalTimeMs: r.totalMs,
-              date: dateStr // Add the missing date property
-            }));
-
-          const total = filteredApps.reduce((s, a) => s + (a.totalTimeMs || 0), 0);
-          const score = this.calculateBrainScore(total);
-          const summary: DailyUsage = {
-            date: dateStr,
-            totalScreenTime: total,
-            brainScore: score,
-            apps: filteredApps
-          };
-
-          // Save summary
-          const appsJson = JSON.stringify(summary.apps || []);
-          this.db.runSync(
-            `INSERT OR REPLACE INTO daily_summary (date, totalScreenTime, brainScore, appsJson) VALUES (?, ?, ?, ?)`,
-            [dateStr, summary.totalScreenTime, summary.brainScore, appsJson]
+        this.db.withTransactionSync(() => {
+          const summaryStmt = this.db.prepareSync(
+            `INSERT OR REPLACE INTO daily_summary 
+             (date, totalScreenTime, brainScore, appsJson) VALUES (?, ?, ?, ?)`
           );
-        }
 
+          try {
+            for (const d of datesToBackfill) {
+              const dateStr = d.date;
+
+              // Get raw usage for the date
+              const raw = this.db.getAllSync(
+                `SELECT packageName, appName, totalMs 
+                 FROM daily_usage 
+                 WHERE date = ?`,
+                [dateStr]
+              ) as RawUsageRow[];
+
+              // Filter to monitored apps
+              const filteredApps: UsageData[] = raw
+                .filter((r) => monitoredSet.has(r.packageName))
+                .map((r) => ({
+                  packageName: r.packageName,
+                  appName: r.appName,
+                  totalTimeMs: r.totalMs,
+                  date: dateStr
+                }));
+
+              const total = filteredApps.reduce((s, a) => s + (a.totalTimeMs || 0), 0);
+              const score = this.calculateBrainScore(total);
+              const appsJson = JSON.stringify(filteredApps);
+
+              summaryStmt.executeSync([dateStr, total, score, appsJson]);
+              backfilled++;
+            }
+          } finally {
+            summaryStmt.finalizeSync();
+          }
+        });
+
+        console.log(`Backfill completed: ${backfilled} summaries created`);
         resolve();
-      } catch {
-        console.error('Error during backfillSummaries');
+      } catch (error) {
+        console.error('Error during backfillSummaries:', error);
         resolve();
+      }
+    });
+  }
+
+  // NEW: Vacuum database to reclaim space and optimize (call occasionally)
+  async vacuum(): Promise<void> {
+    return new Promise((resolve) => {
+      try {
+        console.log('Vacuuming database...');
+        this.db.execSync('VACUUM');
+        console.log('Database vacuumed successfully');
+        resolve();
+      } catch (error) {
+        console.error('Error vacuuming database:', error);
+        resolve();
+      }
+    });
+  }
+
+  // NEW: Get database stats for debugging
+  async getStats(): Promise<{
+    dailyUsageCount: number;
+    dailySummaryCount: number;
+    appSettingsCount: number;
+    notificationCount: number;
+  }> {
+    return new Promise((resolve) => {
+      try {
+        const dailyUsageCount = this.db.getFirstSync(
+          `SELECT COUNT(*) as count FROM daily_usage`
+        ) as { count: number };
+        
+        const dailySummaryCount = this.db.getFirstSync(
+          `SELECT COUNT(*) as count FROM daily_summary`
+        ) as { count: number };
+        
+        const appSettingsCount = this.db.getFirstSync(
+          `SELECT COUNT(*) as count FROM app_settings`
+        ) as { count: number };
+        
+        const notificationCount = this.db.getFirstSync(
+          `SELECT COUNT(*) as count FROM notification_history`
+        ) as { count: number };
+
+        resolve({
+          dailyUsageCount: dailyUsageCount?.count || 0,
+          dailySummaryCount: dailySummaryCount?.count || 0,
+          appSettingsCount: appSettingsCount?.count || 0,
+          notificationCount: notificationCount?.count || 0
+        });
+      } catch (error) {
+        console.error('Error getting database stats:', error);
+        resolve({
+          dailyUsageCount: 0,
+          dailySummaryCount: 0,
+          appSettingsCount: 0,
+          notificationCount: 0
+        });
       }
     });
   }

@@ -1,5 +1,7 @@
 package com.soumikganguly.brainrot
 
+import androidx.core.content.ContextCompat
+
 import android.app.AppOpsManager
 import android.app.usage.UsageEvents
 import android.app.usage.UsageStatsManager
@@ -48,6 +50,8 @@ class UsageStatsModule(reactContext: ReactApplicationContext) : ReactContextBase
     fun needsSpecialPermission(promise: Promise) {
         promise.resolve(permissionHelper.needsSpecialPermission())
     }
+
+
     
     @ReactMethod
     fun openManufacturerSettings(promise: Promise) {
@@ -239,6 +243,61 @@ class UsageStatsModule(reactContext: ReactApplicationContext) : ReactContextBase
         }
     }
 
+    @ReactMethod
+    fun getCurrentForegroundApp(promise: Promise) {
+        try {
+            if (!checkUsageStatsPermission()) {
+                promise.resolve(null)
+                return
+            }
+            
+            val usageStatsManager = reactApplicationContext.getSystemService(Context.USAGE_STATS_SERVICE) as UsageStatsManager
+            val currentTime = System.currentTimeMillis()
+            
+            // Query events from last 3 seconds
+            val events = usageStatsManager.queryEvents(currentTime - 3000, currentTime)
+            
+            var lastEventTime = 0L
+            var foregroundApp: String? = null
+            val event = UsageEvents.Event()
+            
+            // Find the most recent MOVE_TO_FOREGROUND event
+            while (events.hasNextEvent()) {
+                events.getNextEvent(event)
+                if (event.eventType == UsageEvents.Event.MOVE_TO_FOREGROUND && 
+                    event.timeStamp > lastEventTime) {
+                    lastEventTime = event.timeStamp
+                    foregroundApp = event.packageName
+                }
+            }
+            
+            if (foregroundApp != null) {
+                val pm = reactApplicationContext.packageManager
+                try {
+                    val ai = pm.getApplicationInfo(foregroundApp, 0)
+                    val appName = pm.getApplicationLabel(ai).toString()
+                    
+                    val result = WritableNativeMap()
+                    result.putString("packageName", foregroundApp)
+                    result.putString("appName", appName)
+                    result.putDouble("timestamp", lastEventTime.toDouble())
+                    
+                    Log.d(TAG, "Current foreground app: $appName ($foregroundApp)")
+                    promise.resolve(result)
+                } catch (e: PackageManager.NameNotFoundException) {
+                    promise.resolve(null)
+                }
+            } else {
+                Log.d(TAG, "No foreground app detected")
+                promise.resolve(null)
+            }
+            
+        } catch (e: Exception) {
+            Log.e(TAG, "Error getting current foreground app", e)
+            promise.resolve(null)
+        }
+    }
+
     // OVERLAY PERMISSION METHODS - KEEP ONLY ONE SET
     @ReactMethod
     fun hasOverlayPermission(promise: Promise) {
@@ -380,6 +439,32 @@ class UsageStatsModule(reactContext: ReactApplicationContext) : ReactContextBase
         
         realtimeHandler?.post(realtimeRunnable!!)
         Log.d(TAG, "Realtime monitoring started")
+    }
+
+    private fun hasUsageStatsPermission(): Boolean {
+        val appOps = reactApplicationContext.getSystemService(Context.APP_OPS_SERVICE) as AppOpsManager
+        val mode = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            appOps.unsafeCheckOpNoThrow(
+                AppOpsManager.OPSTR_GET_USAGE_STATS,
+                android.os.Process.myUid(),
+                reactApplicationContext.packageName
+            )
+        } else {
+            appOps.checkOpNoThrow(
+                AppOpsManager.OPSTR_GET_USAGE_STATS,
+                android.os.Process.myUid(),
+                reactApplicationContext.packageName
+            )
+        }
+        return mode == AppOpsManager.MODE_ALLOWED
+    }
+
+    private fun hasOverlayPermission(): Boolean {
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            Settings.canDrawOverlays(reactApplicationContext)
+        } else {
+            true // Permission not needed before M
+        }
     }
 
     private fun stopRealtimeMonitoring() {

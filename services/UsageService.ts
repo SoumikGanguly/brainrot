@@ -529,4 +529,18 @@ export class UsageService {
       throw error;
     }
   }
+
+  static async getCurrentForegroundApp(): Promise<{
+    packageName: string;
+    appName: string;
+    timestamp: number;
+  } | null> {
+    try {
+      const result = await UsageStatsModule.getCurrentForegroundApp();
+      return result || null;
+    } catch (error) {
+      console.error('Error getting current foreground app:', error);
+      return null;
+    }
+  }
 }

@@ -14,7 +14,6 @@ import android.os.IBinder
 import android.os.Looper
 import android.util.Log
 import android.view.Gravity
-import android.view.LayoutInflater
 import android.view.MotionEvent
 import android.view.View
 import android.view.WindowManager
@@ -49,7 +48,6 @@ class FloatingScoreService : Service() {
         private const val NOTIFICATION_ID = 2001
         private const val CHANNEL_ID = "floating_score"
         
-        // Use simple string keys that match UsageStatsModule
         const val ACTION_UPDATE_SCORE = "ACTION_UPDATE_SCORE"
         const val EXTRA_SCORE = "EXTRA_SCORE"
         const val EXTRA_APP_NAME = "EXTRA_APP_NAME"
@@ -63,6 +61,8 @@ class FloatingScoreService : Service() {
     }
     
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        Log.d(TAG, "onStartCommand called with action: ${intent?.action}")
+        
         when (intent?.action) {
             ACTION_UPDATE_SCORE -> {
                 currentScore = intent.getIntExtra(EXTRA_SCORE, 100)
@@ -77,6 +77,15 @@ class FloatingScoreService : Service() {
                 appName = intent?.getStringExtra(EXTRA_APP_NAME) ?: ""
                 timeInApp = intent?.getLongExtra(EXTRA_TIME_MS, 0) ?: 0
                 startTime = System.currentTimeMillis() - timeInApp
+                
+                // Check if we can draw overlays
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                    if (!android.provider.Settings.canDrawOverlays(this)) {
+                        Log.e(TAG, "Cannot draw overlays - permission not granted")
+                        stopSelf()
+                        return START_NOT_STICKY
+                    }
+                }
                 
                 showFloatingView()
                 startForeground(NOTIFICATION_ID, createNotification())
@@ -94,93 +103,108 @@ class FloatingScoreService : Service() {
             return
         }
         
-        windowManager = getSystemService(WINDOW_SERVICE) as WindowManager
-        
-        // Create a simple layout programmatically since we don't have XML
-        floatingView = createFloatingViewLayout()
-        
-        val params = WindowManager.LayoutParams(
-            WindowManager.LayoutParams.WRAP_CONTENT,
-            WindowManager.LayoutParams.WRAP_CONTENT,
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O)
-                WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
-            else
-                @Suppress("DEPRECATION")
-                WindowManager.LayoutParams.TYPE_PHONE,
-            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
-                    WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
-            PixelFormat.TRANSLUCENT
-        )
-        
-        params.gravity = Gravity.TOP or Gravity.END
-        params.x = 20
-        params.y = 100
-        
-        // Make it draggable
-        floatingView?.setOnTouchListener(object : View.OnTouchListener {
-            private var initialX = 0
-            private var initialY = 0
-            private var initialTouchX = 0f
-            private var initialTouchY = 0f
-            
-            override fun onTouch(v: View, event: MotionEvent): Boolean {
-                when (event.action) {
-                    MotionEvent.ACTION_DOWN -> {
-                        initialX = params.x
-                        initialY = params.y
-                        initialTouchX = event.rawX
-                        initialTouchY = event.rawY
-                        return true
-                    }
-                    MotionEvent.ACTION_MOVE -> {
-                        params.x = initialX + (initialTouchX - event.rawX).toInt()
-                        params.y = initialY + (event.rawY - initialTouchY).toInt()
-                        windowManager?.updateViewLayout(floatingView, params)
-                        return true
-                    }
-                }
-                return false
-            }
-        })
-        
         try {
+            windowManager = getSystemService(WINDOW_SERVICE) as WindowManager
+            
+            // Create floating view
+            floatingView = createFloatingViewLayout()
+            
+            val layoutFlag = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
+            } else {
+                @Suppress("DEPRECATION")
+                WindowManager.LayoutParams.TYPE_PHONE
+            }
+            
+            val params = WindowManager.LayoutParams(
+                WindowManager.LayoutParams.WRAP_CONTENT,
+                WindowManager.LayoutParams.WRAP_CONTENT,
+                layoutFlag,
+                WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                        WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
+                PixelFormat.TRANSLUCENT
+            )
+            
+            params.gravity = Gravity.TOP or Gravity.END
+            params.x = 20
+            params.y = 100
+            
+            // Make it draggable
+            floatingView?.setOnTouchListener(object : View.OnTouchListener {
+                private var initialX = 0
+                private var initialY = 0
+                private var initialTouchX = 0f
+                private var initialTouchY = 0f
+                
+                override fun onTouch(v: View, event: MotionEvent): Boolean {
+                    when (event.action) {
+                        MotionEvent.ACTION_DOWN -> {
+                            initialX = params.x
+                            initialY = params.y
+                            initialTouchX = event.rawX
+                            initialTouchY = event.rawY
+                            return true
+                        }
+                        MotionEvent.ACTION_MOVE -> {
+                            params.x = initialX + (initialTouchX - event.rawX).toInt()
+                            params.y = initialY + (event.rawY - initialTouchY).toInt()
+                            windowManager?.updateViewLayout(floatingView, params)
+                            return true
+                        }
+                    }
+                    return false
+                }
+            })
+            
             windowManager?.addView(floatingView, params)
             updateFloatingView()
-            Log.d(TAG, "Floating view added to window")
+            Log.d(TAG, "Floating view added to window successfully")
+            
         } catch (e: Exception) {
             Log.e(TAG, "Error adding floating view", e)
+            stopSelf()
         }
     }
     
     private fun createFloatingViewLayout(): View {
+        val density = resources.displayMetrics.density
+        
         val container = FrameLayout(this).apply {
             background = createRoundedBackground()
-            setPadding(24, 24, 24, 24)
+            setPadding(
+                (24 * density).toInt(),
+                (24 * density).toInt(),
+                (24 * density).toInt(),
+                (24 * density).toInt()
+            )
         }
 
-        // Create close button (X)
+        // Create close button
         val closeButton = TextView(this).apply {
             text = "×"
             textSize = 28f
             setTextColor(Color.parseColor("#9CA3AF"))
-            setPadding(8, 0, 8, 0)
+            setPadding(
+                (8 * density).toInt(),
+                0,
+                (8 * density).toInt(),
+                0
+            )
             gravity = android.view.Gravity.CENTER
             layoutParams = FrameLayout.LayoutParams(
-                (48 * resources.displayMetrics.density).toInt(),
-                (48 * resources.displayMetrics.density).toInt()
+                (48 * density).toInt(),
+                (48 * density).toInt()
             ).apply {
                 gravity = Gravity.TOP or Gravity.END
-                topMargin = (-8 * resources.displayMetrics.density).toInt()
-                rightMargin = (-8 * resources.displayMetrics.density).toInt()
+                topMargin = (-8 * density).toInt()
+                rightMargin = (-8 * density).toInt()
             }
             
-            // Make clickable with ripple effect
             isClickable = true
             isFocusable = true
             
             setOnClickListener {
                 Log.d(TAG, "Close button clicked")
-                // Stop the service (this will close the floating window)
                 stopSelf()
             }
         }
@@ -189,8 +213,8 @@ class FloatingScoreService : Service() {
         // Create circle view
         circleView = ScoreCircleView(this).apply {
             layoutParams = FrameLayout.LayoutParams(
-                (120 * resources.displayMetrics.density).toInt(),
-                (120 * resources.displayMetrics.density).toInt()
+                (120 * density).toInt(),
+                (120 * density).toInt()
             ).apply {
                 gravity = Gravity.CENTER
             }
@@ -201,7 +225,7 @@ class FloatingScoreService : Service() {
         scoreTextView = TextView(this).apply {
             textSize = 24f
             setTextColor(Color.parseColor("#1F2937"))
-            setTypeface(null, android.graphics.Typeface.BOLD)
+            setTypeface(null, Typeface.BOLD)
             layoutParams = FrameLayout.LayoutParams(
                 FrameLayout.LayoutParams.WRAP_CONTENT,
                 FrameLayout.LayoutParams.WRAP_CONTENT
@@ -220,7 +244,7 @@ class FloatingScoreService : Service() {
                 FrameLayout.LayoutParams.WRAP_CONTENT
             ).apply {
                 gravity = Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL
-                bottomMargin = (8 * resources.displayMetrics.density).toInt()
+                bottomMargin = (8 * density).toInt()
             }
         }
         container.addView(timerTextView)
@@ -307,7 +331,7 @@ class FloatingScoreService : Service() {
         return NotificationCompat.Builder(this, CHANNEL_ID)
             .setContentTitle("Monitoring: $appName")
             .setContentText("Brain Score: $currentScore")
-            .setSmallIcon(android.R.drawable.ic_dialog_info) // Fallback icon
+            .setSmallIcon(android.R.drawable.ic_dialog_info)
             .setContentIntent(pendingIntent)
             .setOngoing(true)
             .setPriority(NotificationCompat.PRIORITY_LOW)

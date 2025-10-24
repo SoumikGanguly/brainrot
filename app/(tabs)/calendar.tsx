@@ -9,6 +9,7 @@ import { Card } from '../../components/Card';
 import { Header } from '../../components/Header';
 import { database } from '../../services/database';
 
+import { BrainScoreService } from '@/services/BrainScore';
 import { calculateBrainScore, getScoreColor, getScoreLabel } from '../../utils/brainScore';
 import { formatTime, formatTimeDetailed } from '../../utils/time';
 
@@ -50,55 +51,66 @@ export default function Calendar() {
     try {
       setLoading(true);
 
-      // Try to get precomputed summaries (monitored-only) for last 90 days
-      // database.getHistoricalData should return DailyData[] where each entry is already the monitored-only summary
-      let data = await database.getHistoricalData(90);
-
-      // If a day is missing summary but raw usage exists, compute monitored-only summary as fallback.
-      // This loop is lightweight because historicalData is limited (e.g. 90 days)
-      const resolved: DailyData[] = [];
-      for (const day of data) {
-        if (day && typeof day.brainScore === 'number') {
-          // already a summary
-          resolved.push(day);
-        } else {
-          // fallback: attempt to compute from raw saved usage
-          try {
-            const raw = await database.getDailyUsage(day.date); // raw usage entries
-            // load monitored packages from meta
-            const meta = await database.getMeta('monitored_apps');
-            const monitoredPackages: string[] = meta ? JSON.parse(meta) : [];
-
-            // Note: computeBrainScoreForMonitored fetches usage via UsageService.getUsageSince.
-            // To avoid double fetching we could also compute from raw: filter raw by monitoredPackages & sum.
-            // We'll do the raw-based fallback here to keep it local and faster:
-            const filtered = (raw || []).filter((r: any) => monitoredPackages.includes(r.packageName) && r.packageName !== 'com.soumikganguly.brainrot');
-            const total = filtered.reduce((s: number, a: any) => s + (a.totalTimeMs || 0), 0);
-            const score = calculateBrainScore(total);
-
-            resolved.push({
-              date: day.date,
-              totalScreenTime: total,
-              brainScore: score,
-              apps: filtered.map((f: any) => ({ packageName: f.packageName, appName: f.appName, totalTimeMs: f.totalTimeMs })),
+      const brainScoreService = BrainScoreService.getInstance();
+      const data: DailyData[] = [];
+      
+      // Get last 90 days
+      const today = new Date();
+      for (let i = 0; i < 90; i++) {
+        const date = new Date(today);
+        date.setDate(date.getDate() - i);
+        const dateStr = date.toISOString().split('T')[0];
+        
+        try {
+          // Use SAME service as HomeScreen
+          const result = await brainScoreService.getBrainScoreForDate(dateStr);
+          
+          if (result.apps.length > 0 || result.totalUsageMs > 0) {
+            data.push({
+              date: dateStr,
+              totalScreenTime: result.totalUsageMs,
+              brainScore: result.score,
+              apps: result.apps.map(app => ({
+                packageName: app.packageName,
+                appName: app.appName,
+                totalTimeMs: app.totalTimeMs
+              }))
             });
-          } catch (err) {
-            // If anything fails, push the original day as a fallback (may be missing fields)
-            console.warn('Failed to compute fallback summary for', day.date, err);
-            resolved.push(day);
           }
+        } catch (error) {
+          console.warn(`Failed to get data for ${dateStr}:`, error);
+          // Skip this day, continue with next
         }
       }
-
-      // sort by date descending
-      resolved.sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
-
-      setHistoricalData(resolved);
+      
+      // Sort by date descending
+      data.sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
+      
+      setHistoricalData(data);
     } catch (error) {
       console.error('Error loading historical data:', error);
       setHistoricalData([]);
     } finally {
       setLoading(false);
+    }
+  };
+
+  const openDayDetail = async (dateStr: string) => {
+    try {
+      // Use SAME service - no more inconsistent fallback logic
+      const brainScoreService = BrainScoreService.getInstance();
+      const result = await brainScoreService.getBrainScoreForDate(dateStr);
+      
+      setSelectedDay({
+        date: dateStr,
+        totalScreenTime: result.totalUsageMs,
+        brainScore: result.score,
+        apps: result.apps
+      });
+      setShowModal(true);
+    } catch (error) {
+      console.error('Error loading day detail:', error);
+      Alert.alert('Error', 'Could not load day details. Please try again.');
     }
   };
 
@@ -142,40 +154,6 @@ export default function Calendar() {
     return weeks;
   };
 
-  const openDayDetail = async (dateStr: string) => {
-    try {
-      // Prefer saved summary (monitored-only)
-      const summary = await database.getDailySummary(dateStr);
-      if (summary) {
-        setSelectedDay(summary);
-        setShowModal(true);
-        return;
-      }
-
-      // Fallback: compute from raw saved usage
-      const raw = await database.getDailyUsage(dateStr); // raw entries saved earlier
-      // load monitored packages
-      const meta = await database.getMeta('monitored_apps');
-      const monitoredPackages: string[] = meta ? JSON.parse(meta) : [];
-
-      // Filter raw to only monitored apps and exclude self
-      const filtered = (raw || []).filter((r: any) => monitoredPackages.includes(r.packageName) && r.packageName !== 'com.soumikganguly.brainrot');
-
-      const totalTime = filtered.reduce((s: number, a: any) => s + (a.totalTimeMs || 0), 0);
-      const score = calculateBrainScore(totalTime);
-
-      setSelectedDay({
-        date: dateStr,
-        totalScreenTime: totalTime,
-        brainScore: score,
-        apps: filtered.sort((a: any, b: any) => b.totalTimeMs - a.totalTimeMs),
-      });
-      setShowModal(true);
-    } catch (error) {
-      console.error('Error loading day detail:', error);
-      Alert.alert('Error', 'Could not load day details. Please try again.');
-    }
-  };
 
   const exportData = async () => {
     try {

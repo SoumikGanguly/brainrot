@@ -1,6 +1,6 @@
 // utils/brainScoreRunner.ts
-import { UsageService } from '@/services/UsageService'; // adjust path
-import { calculateBrainScore } from './brainScore'; // adjust path
+import { UnifiedUsageService } from '@/services/UnifiedUsageService';
+import { calculateBrainScore } from './brainScore';
 
 export type UsageEntry = {
   packageName: string;
@@ -59,7 +59,7 @@ export async function computeBrainScoreForMonitored(
   // Fetch usage from native module
   let usageArray: UsageEntry[] = [];
   try {
-    usageArray = await UsageService.getUsageSince(startTimeMs);
+    usageArray = await UnifiedUsageService.getUsageSince(startTimeMs);
     if (debug) console.log('[brain] raw usageArray length', usageArray?.length);
   } catch (err) {
     console.error('[brain] Error fetching usage from UsageService:', err);

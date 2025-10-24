@@ -62,5 +62,6 @@
     "eslint-config-expo": "~9.2.0",
     "typescript": "~5.8.3"
   },
-  "private": true
+  "private": true,
+  "overrides": { "nativewind": { "react-native-css-interop": "0.1.22" }}
 }

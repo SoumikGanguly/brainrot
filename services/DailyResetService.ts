@@ -1,6 +1,6 @@
 import { AppBlockingService } from './AppBlockingService';
 import { HistoricalDataService } from './HistoricalDataService';
-import { UsageMonitoringService } from './UsageMonitoringService';
+import { UnifiedUsageService } from './UnifiedUsageService';
 import { UsageService } from './UsageService';
 import { database } from './database';
 
@@ -91,7 +91,7 @@ export class DailyResetService {
       
       // Step 2: Reset monitoring service tracking
       console.log('Step 2: Resetting monitoring service...');
-      const monitoringService = UsageMonitoringService.getInstance();
+      const monitoringService = UnifiedUsageService.getInstance();
       await monitoringService.resetDailyTracking();
       
       // Step 3: Reset native module daily tracking if available

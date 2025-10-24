@@ -10,16 +10,19 @@ import { Card } from '../../components/Card';
 import { database } from '../../services/database';
 
 import { TrialService } from '../../services/TrialService';
-import { UsageService } from '../../services/UsageService';
+// import { UsageService } from '../../services/UsageService';
 
 import { DailyResetService } from '@/services/DailyResetService';
 import { HistoricalDataService } from '@/services/HistoricalDataService';
 import { UsageMonitoringService } from '@/services/UsageMonitoringService';
-import { computeBrainScoreForMonitored } from '@/utils/brainScoreRunner';
-import { calculateBrainScore, getBrainScoreStatus } from '../../utils/brainScore';
+import { getBrainScoreStatus } from '../../utils/brainScore';
 import { formatTime } from '../../utils/time';
 
 import { AppBlockingService } from '@/services/AppBlockingService';
+import { BrainScoreService } from '@/services/BrainScore';
+import { DataSyncService } from '@/services/DataSyncService';
+
+import { UnifiedUsageService } from '@/services/UnifiedUsageService';
 
 
 interface AppUsage {
@@ -49,9 +52,9 @@ export default function HomeScreen() {
         console.log('=== INITIALIZING ALL SERVICES ===');
         
         // 1. Initialize monitoring service first (handles notifications)
-        const monitoringService = UsageMonitoringService.getInstance();
-        await monitoringService.initialize();
-        console.log('✓ Monitoring service initialized');
+        const unifiedService = UnifiedUsageService.getInstance();
+        await unifiedService.initialize();
+        console.log('✓ Unified usage service initialized');
         
         // 2. Initialize blocking service
         const blockingService = AppBlockingService.getInstance();
@@ -132,7 +135,7 @@ export default function HomeScreen() {
     addDebugMessage('Checking native module availability...');
     
     // Check if native module is available
-    const isModuleAvailable = UsageService.isNativeModuleAvailable();
+    const isModuleAvailable = UnifiedUsageService.isNativeModuleAvailable();
     addDebugMessage(`Native module available: ${isModuleAvailable}`);
     
     if (!isModuleAvailable) {
@@ -143,7 +146,7 @@ export default function HomeScreen() {
     // Check permissions with retry
     addDebugMessage('Checking usage access permissions...');
     try {
-      let hasPermission = await UsageService.isUsageAccessGranted();
+      let hasPermission = await UnifiedUsageService.isUsageAccessGranted();
       addDebugMessage(`Usage permission granted: ${hasPermission}`);
       
       // If permission is false but we're returning from settings, try again after a delay
@@ -151,8 +154,8 @@ export default function HomeScreen() {
         addDebugMessage('Permission denied, trying force refresh...');
         // Try the force refresh method if available
         try {
-          if (UsageService.forceRefreshPermission) {
-            hasPermission = await UsageService.forceRefreshPermission();
+          if (UnifiedUsageService.forceRefreshPermission) {
+            hasPermission = await UnifiedUsageService.forceRefreshPermission();
             addDebugMessage(`Force refresh result: ${hasPermission}`);
           }
         } catch {
@@ -174,7 +177,7 @@ export default function HomeScreen() {
               onPress: async () => {
                 try {
                   addDebugMessage('Opening usage access settings...');
-                  await UsageService.openUsageAccessSettings();
+                  await UnifiedUsageService.openUsageAccessSettings();
                 } catch (settingsError: unknown) {
                   const errorMessage = settingsError instanceof Error ? settingsError.message : 'Unknown error opening settings';
                   addDebugMessage(`Failed to open settings: ${errorMessage}`);
@@ -210,7 +213,7 @@ export default function HomeScreen() {
     addDebugMessage('Fetching today\'s usage from native module...');
     
     try {
-      const todayUsage = await UsageService.getTodayUsage();
+      const todayUsage = await UnifiedUsageService.getTodayUsage();
       addDebugMessage(`Received ${todayUsage.length} apps with usage data`);
       
       if (todayUsage.length === 0) {
@@ -246,10 +249,10 @@ export default function HomeScreen() {
   // Add this as a new function in your HomeScreen
   const saveCurrentUsageData = async () => {
     try {
-      if (UsageService.isNativeModuleAvailable()) {
-        const hasPermission = await UsageService.isUsageAccessGranted();
+      if (UnifiedUsageService.isNativeModuleAvailable()) {
+        const hasPermission = await UnifiedUsageService.isUsageAccessGranted();
         if (hasPermission) {
-          const todayUsage = await UsageService.getTodayUsage();
+          const todayUsage = await UnifiedUsageService.getTodayUsage();
           if (todayUsage.length > 0) {
             const today = new Date().toISOString().split('T')[0];
             const dbUsageData = todayUsage.map(app => ({
@@ -328,113 +331,46 @@ export default function HomeScreen() {
   const loadHomeData = async () => {
     try {
       setLoading(true);
-      
       addDebugMessage('Starting home data load...');
       
-      // Step 1: Check module and permissions
+      // Step 1: Check permissions (keep existing logic)
       const { hasModule, hasPermission } = await checkNativeModuleAndPermissions();
       
-      let usageData: AppUsage[] = [];
-      
-      // Step 2: Try to load usage data
+      // Step 2: Sync data from native to database (if we have permission)
       if (hasModule && hasPermission) {
         try {
-          let rawUsageData = await loadUsageDataFromNative();
-          // DEDUPLICATE HERE
-          usageData = deduplicateUsageData(rawUsageData);
-        } catch {
-          addDebugMessage('Native failed, trying database fallback...');
-          let rawDbData = await loadUsageDataFromDatabase();
-          // DEDUPLICATE HERE TOO
-          usageData = deduplicateUsageData(rawDbData);
+          const syncService = DataSyncService.getInstance();
+          await syncService.syncUsageData();
+          addDebugMessage('Data synced from native');
+        } catch (error) {
+          addDebugMessage(`Sync failed: ${error}`);
         }
-      } else {
-        addDebugMessage('Using database fallback (no native access)...');
-        let rawDbData = await loadUsageDataFromDatabase();
-        // DEDUPLICATE HERE AS WELL
-        usageData = deduplicateUsageData(rawDbData);
       }
-
-      // Step 3: Process the data
-      let monitoredPackages: string[] = [];
-        try {
-          const monitoredMeta = await database.getMeta('monitored_apps');
-          monitoredPackages = monitoredMeta ? JSON.parse(monitoredMeta) : [];
-          addDebugMessage(`Monitored packages loaded: ${monitoredPackages.length}`);
-        } catch {
-          addDebugMessage('Failed to load monitored packages meta, defaulting to empty');
-          monitoredPackages = [];
-        }
-
-        // 1) Save raw data to DB for calendar/backups (you already do this; keep it)
-        if (usageData.length > 0) {
-          try {
-            const today = new Date().toISOString().split('T')[0];
-            const dbUsageData = usageData.map(app => ({ ...app, date: today }));
-            await database.saveDailyUsage(today, dbUsageData);
-            addDebugMessage('Raw usage saved to DB');
-          } catch {
-            addDebugMessage('Failed saving raw usage to DB');
-          }
-        }
-
-        // 2) Compute brain score only for monitored apps (this also excludes the app itself)
-        const startOfDay = new Date();
-        startOfDay.setHours(0, 0, 0, 0);
-        let computed = { totalUsageMs: 0, score: 100, details: [] as any[] };
-        try {
-          computed = await computeBrainScoreForMonitored(monitoredPackages, startOfDay.getTime(), { debug: __DEV__ });
-          addDebugMessage(`Computed brain score from monitored apps: ${computed.score}`);
-        } catch {
-          addDebugMessage('computeBrainScoreForMonitored failed, falling back to raw sum');
-          // fallback: sum everything (but this should rarely happen)
-          const fallbackTotal = usageData.reduce((s, a) => s + (a.totalTimeMs || 0), 0);
-          computed = { totalUsageMs: fallbackTotal, score: calculateBrainScore(fallbackTotal), details: usageData };
-        }
-
-        // 3) Use computed values for UI (monitored-only lists)
-        const monitoredSorted = (computed.details || [])
-          .filter(a => a.totalTimeMs > 0)
-          .sort((a, b) => b.totalTimeMs - a.totalTimeMs);
-
-        const monitoredTopThree = monitoredSorted.slice(0, 3);
-
-        setBrainScore(computed.score);
-        setTotalScreenTime(computed.totalUsageMs);
-        setTopApps(monitoredTopThree);
-        setAllApps(monitoredSorted); // This ensures modal data consistency
-
-      // Ensure data is saved to database for calendar consistency
-      // if (monitoredTopThree.length > 0) {
-      //   const today = new Date().toISOString().split('T')[0];
-      //   const dbUsageData = monitoredTopThree.map(app => ({
-      //     ...app,
-      //     date: today
-      //   }));
-        
-      //   try {
-      //     await database.saveDailyUsage(today, dbUsageData);
-          
-      //     addDebugMessage('Data synced to database for calendar consistency');
-      //   } catch (dbError: unknown) {
-      //     const errorMessage = dbError instanceof Error ? dbError.message : 'Unknown database error';
-      //     addDebugMessage(`Database sync failed: ${errorMessage}`);
-      //   }
-      // }
-
-      // Step 4: Load trial info
+      
+      // Step 3: Get brain score using SINGLE source of truth
+      const brainScoreService = BrainScoreService.getInstance();
+      const result = await brainScoreService.getTodayScore();
+      
+      addDebugMessage(`Score computed: ${result.score}, ${result.apps.length} apps`);
+      
+      // Step 4: Update UI
+      setBrainScore(result.score);
+      setTotalScreenTime(result.totalUsageMs);
+      setTopApps(result.apps.slice(0, 3));
+      setAllApps(result.apps);
+      
+      // Step 5: Load trial info (keep existing)
       try {
         const trial = await TrialService.getTrialInfo();
         setTrialInfo(trial);
-        addDebugMessage('Trial info loaded successfully');
-      } catch (error: unknown) {
-        const errorMessage = error instanceof Error ? error.message : 'Unknown trial error';
-        addDebugMessage(`Trial info load failed: ${errorMessage}`);
+        addDebugMessage('Trial info loaded');
+      } catch (error) {
+        addDebugMessage(`Trial info failed: ${error}`);
       }
 
-    } catch (error: unknown) {
+    } catch (error) {
       const errorMessage = error instanceof Error ? error.message : 'Unknown error';
-      addDebugMessage(`Critical error in loadHomeData: ${errorMessage}`);
+      addDebugMessage(`Critical error: ${errorMessage}`);
     } finally {
       setLoading(false);
       addDebugMessage('Home data loading completed');
@@ -445,18 +381,18 @@ export default function HomeScreen() {
     addDebugMessage('Running native module test...');
     
     try {
-      const isAvailable = UsageService.isNativeModuleAvailable();
+      const isAvailable = UnifiedUsageService.isNativeModuleAvailable();
       let testResults = `Module Available: ${isAvailable}\n`;
       
       if (isAvailable) {
-        const hasAccess = await UsageService.isUsageAccessGranted();
+        const hasAccess = await UnifiedUsageService.isUsageAccessGranted();
         testResults += `Has Permission: ${hasAccess}\n`;
         
-        const apps = await UsageService.getInstalledApps();
+        const apps = await UnifiedUsageService.getInstalledApps();
         testResults += `Installed Apps: ${apps.length}\n`;
         
         if (hasAccess) {
-          const usage = await UsageService.getTodayUsage();
+          const usage = await UnifiedUsageService.getTodayUsage();
           testResults += `Today's Usage: ${usage.length} apps`;
         }
       }
@@ -611,7 +547,7 @@ export default function HomeScreen() {
               </TouchableOpacity>
             </View>
             <Text className="text-xs text-gray-600 mb-1">
-              Native Module: {UsageService.isNativeModuleAvailable() ? 'Available' : 'Not Available'}
+              Native Module: {UnifiedUsageService.isNativeModuleAvailable() ? 'Available' : 'Not Available'}
             </Text>
             <Text className="text-xs text-gray-600 mb-1">
               Permission: {hasUsagePermission ? 'Granted' : 'Not Granted'}

@@ -60,6 +60,7 @@ export class NotificationService {
     }
   }
 
+
   static async scheduleUsageAlert(
     appName: string,
     usageTime: string,

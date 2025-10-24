@@ -12,3 +12,13 @@
 -keep class com.facebook.react.turbomodule.** { *; }
 
 # Add any project specific keep options here:
+# Keep WorkManager classes
+-keep class androidx.work.** { *; }
+-keep class * extends androidx.work.Worker
+-keep class * extends androidx.work.ListenableWorker
+
+# Keep our custom services
+-keep class com.soumikganguly.brainrot.** { *; }
+
+# Keep usage stats related classes
+-keep class android.app.usage.** { *; }

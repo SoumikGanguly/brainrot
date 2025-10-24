@@ -2,7 +2,9 @@ import { Alert, AppState, AppStateStatus } from 'react-native';
 import { calculateBrainScore, getBrainScoreStatus, getScoreLabel } from '../utils/brainScore';
 import { database } from './database';
 import { UsageMonitoringService } from './UsageMonitoringService';
-import { UsageService } from './UsageService';
+// import { UsageService } from './UsageService';
+
+import { UnifiedUsageService } from './UnifiedUsageService';
 
 export type BlockingMode = 'soft' | 'hard';
 
@@ -11,7 +13,7 @@ interface BlockedApp {
   appName: string;
   blockMode: BlockingMode;
   timeLimit?: number; // minutes
-  bypassCount: number; // how many times bypassed today
+  bypassCount: number;
   lastBypassTime?: number;
 }
 
@@ -28,6 +30,8 @@ export class AppBlockingService {
   private alertShowing = false;
   private floatingWindowMonitorInterval?: ReturnType<typeof setInterval>;
   private currentFloatingAppPackage?: string;
+  private lastBlockedApp?: string;
+  private blockCooldown: Map<string, number> = new Map(); // Prevent spam
 
   static getInstance(): AppBlockingService {
     if (!this.instance) {
@@ -46,13 +50,9 @@ export class AppBlockingService {
     try {
       console.log('Initializing AppBlockingService...');
 
-      // Load blocking settings
       await this.loadBlockingSettings();
-
-      // Load blocked apps list
       await this.loadBlockedApps();
 
-      // Start monitoring if blocking is enabled
       if (this.blockingEnabled) {
         this.startMonitoring();
       }
@@ -93,14 +93,11 @@ export class AppBlockingService {
       const blockedPackages = JSON.parse(blockedAppsData) as string[];
       console.log('Loading blocked packages:', blockedPackages);
       
-      // Clear existing and reload
       this.blockedApps.clear();
       
-      // Load app names and initialize blocked apps
       for (const packageName of blockedPackages) {
-        const appName = UsageService.getAppDisplayName(packageName);
+        const appName = UnifiedUsageService.getAppDisplayName(packageName);
         
-        // Load today's bypass count
         const today = new Date().toISOString().split('T')[0];
         const bypassKey = `bypass_${packageName}_${today}`;
         const bypassCountStr = await database.getMeta(bypassKey);
@@ -124,13 +121,11 @@ export class AppBlockingService {
 
   private handleAppStateChange = async (nextAppState: AppStateStatus) => {
     if (nextAppState === 'active') {
-      // App came to foreground, restart monitoring if enabled
       if (this.blockingEnabled && !this.checkInterval) {
-        await this.loadBlockingSettings(); // Reload settings in case they changed
-        await this.loadBlockedApps(); // Reload blocked apps
+        await this.loadBlockingSettings();
+        await this.loadBlockedApps();
         this.startMonitoring();
       }
-      // Also trigger immediate check when app becomes active
       if (this.blockingEnabled) {
         setTimeout(() => this.checkCurrentApp(), 1000);
       }
@@ -142,10 +137,9 @@ export class AppBlockingService {
       clearInterval(this.checkInterval);
     }
 
-    // Initial check
     this.checkCurrentApp();
 
-    // Check every 2 seconds for foreground app changes
+    // Check every 2 seconds
     this.checkInterval = setInterval(() => {
       this.checkCurrentApp();
     }, 2000);
@@ -155,49 +149,45 @@ export class AppBlockingService {
 
   private async checkCurrentApp(): Promise<void> {
     try {
-      // Prevent too frequent checks
       const now = Date.now();
-      if (now - this.lastCheckTime < 1500) return; // Minimum 1.5 seconds between checks
+      if (now - this.lastCheckTime < 1500) return;
       this.lastCheckTime = now;
 
-      // Don't check if alert is already showing
       if (this.alertShowing) return;
-
-      // Don't check if blocking is disabled
       if (!this.blockingEnabled) return;
 
-      // Get current foreground app using recent usage
-      const recentUsage = await UsageService.getUsageSince(Date.now() - 5000); // Last 5 seconds
+      const recentUsage = await UnifiedUsageService.getUsageSince(Date.now() - 5000);
       
       if (!recentUsage || recentUsage.length === 0) {
-        console.log('No recent app usage detected');
         return;
       }
 
-      // Find the most recently used app (should be current foreground)
       const currentApp = recentUsage.sort((a, b) => 
         (b.lastTimeUsed || 0) - (a.lastTimeUsed || 0)
       )[0];
 
-      // Don't block our own app
       if (currentApp.packageName === 'com.soumikganguly.brainrot') return;
 
-      // Log current app for debugging
       console.log(`Current foreground app: ${currentApp.appName} (${currentApp.packageName})`);
 
-      // Check if this app is blocked
       if (this.blockedApps.has(currentApp.packageName)) {
-        console.log(`Blocked app detected: ${currentApp.appName}`);
+        console.log(`🚫 Blocked app detected: ${currentApp.appName}`);
         
-        // Only show alert if app changed or enough time passed
-        if (this.currentForegroundApp !== currentApp.packageName || 
-            now - this.lastCheckTime > 30000) { // 30 seconds cooldown for same app
-          
+        // Check cooldown to avoid spam
+        const cooldownTime = this.blockCooldown.get(currentApp.packageName) || 0;
+        if (now - cooldownTime < 30000) { // 30 second cooldown
+          console.log('In cooldown period, skipping block');
+          return;
+        }
+        
+        if (this.currentForegroundApp !== currentApp.packageName) {
           this.currentForegroundApp = currentApp.packageName;
           await this.handleBlockedAppDetected(currentApp.packageName, currentApp.appName);
+          
+          // Set cooldown
+          this.blockCooldown.set(currentApp.packageName, now);
         }
       } else {
-        // Reset current app if it's not blocked
         if (this.currentForegroundApp && this.blockedApps.has(this.currentForegroundApp)) {
           this.currentForegroundApp = undefined;
         }
@@ -212,83 +202,99 @@ export class AppBlockingService {
     const blockedApp = this.blockedApps.get(packageName);
     if (!blockedApp) return;
 
-    console.log(`Handling blocked app: ${appName}, mode: ${this.blockingMode}, bypasses: ${blockedApp.bypassCount}/${this.bypassLimit}`);
+    console.log(`🛑 Handling blocked app: ${appName}, mode: ${this.blockingMode}, bypasses: ${blockedApp.bypassCount}/${this.bypassLimit}`);
 
-    // Check if within scheduled blocking time
+    // Check overlay permission first
+    const hasOverlay = await UnifiedUsageService.hasOverlayPermission();
+    if (!hasOverlay) {
+      console.error('❌ No overlay permission - cannot show blocking UI');
+      Alert.alert(
+        'Permission Required',
+        'Display over other apps permission is required for blocking features.',
+        [{ text: 'OK' }]
+      );
+      return;
+    }
+
     const inSchedule = await this.isInBlockedSchedule();
-    
-    // Check if user has exceeded bypass limit
     const canBypass = blockedApp.bypassCount < this.bypassLimit;
 
-    // Check if within time limit (if set)
+    // Check time limit
     const todayUsage = await this.getTodayUsageForApp(packageName);
     
     if (blockedApp.timeLimit) {
       const usageMinutes = todayUsage / (1000 * 60);
-      
       if (usageMinutes < blockedApp.timeLimit) {
         console.log(`App within time limit: ${usageMinutes}/${blockedApp.timeLimit} minutes`);
         return;
       }
     }
 
-    // Calculate brain score
     const brainScore = await this.calculateBrainScore(todayUsage);
     const scoreStatus = getBrainScoreStatus(brainScore);
     
     console.log(`Brain score for ${appName}: ${brainScore} - ${scoreStatus.level}`);
 
-    // HARD BLOCK: Show full-screen overlay, NO floating window
+    // HARD BLOCK: Show full-screen overlay
     if (this.blockingMode === 'hard' || inSchedule) {
       try {
-        await UsageService.showBlockingOverlay(packageName, appName, 'hard');
-        this.showHardBlockAlert(appName, canBypass, brainScore);
+        console.log('🔴 Showing HARD BLOCK overlay');
+        await UnifiedUsageService.showBlockingOverlay(packageName, appName, 'hard');
+        
+        // Also show system alert for extra emphasis
+        setTimeout(() => {
+          this.showHardBlockAlert(appName, canBypass, brainScore);
+        }, 500);
       } catch (error) {
-        console.error('Error showing hard block overlay:', error);
+        console.error('❌ Error showing hard block overlay:', error);
+        // Fallback to alert only
+        this.showHardBlockAlert(appName, canBypass, brainScore);
       }
     } 
     // SOFT BLOCK: Show floating window + gentle alert
     else {
       try {
-        await UsageService.startFloatingScore(appName, brainScore, todayUsage);
+        console.log('🟡 Showing SOFT BLOCK with floating score');
         
-        console.log(`Started floating window for ${appName} with score ${brainScore}`);
+        // Start floating score window
+        const started = await UnifiedUsageService.startFloatingScore(appName, brainScore, todayUsage);
         
-        // Start monitoring when user leaves the app
-        this.startFloatingWindowMonitor(packageName);
-        
-        // Show alert with brain score context
-        this.showSoftBlockAlert(appName, canBypass, brainScore, scoreStatus);
+        if (started) {
+          console.log(`✅ Started floating window for ${appName} with score ${brainScore}`);
+          
+          // Monitor when user leaves the app
+          this.startFloatingWindowMonitor(packageName);
+          
+          // Show gentle alert
+          this.showSoftBlockAlert(appName, canBypass, brainScore, scoreStatus);
+        } else {
+          console.error('❌ Failed to start floating window');
+          // Fallback to just alert
+          this.showSoftBlockAlert(appName, canBypass, brainScore, scoreStatus);
+        }
         
       } catch (error) {
-        console.error('Error showing floating window:', error);
-        // Fallback to just alert
+        console.error('❌ Error showing soft block:', error);
         this.showSoftBlockAlert(appName, canBypass, brainScore, scoreStatus);
       }
     }
   }
 
   private async calculateBrainScore(usageMs: number): Promise<number> {
-    // Get user's allowed time setting (default 8 hours)
     const allowedTimeStr = await database.getMeta('daily_allowed_time_ms');
     const allowedMs = allowedTimeStr ? parseInt(allowedTimeStr) : undefined;
-    
-    // Use the utility function
     return calculateBrainScore(usageMs, allowedMs);
   }
 
   private startFloatingWindowMonitor(packageName: string): void {
-    // Clear any existing monitor
     this.stopFloatingWindowMonitor();
     
     this.currentFloatingAppPackage = packageName;
     
-    // Check every 3 seconds if user is still in the app
     this.floatingWindowMonitorInterval = setInterval(async () => {
       try {
         const currentApp = await this.getCurrentForegroundApp();
         
-        // User left the monitored app - close floating window
         if (currentApp !== packageName) {
           console.log(`User left ${packageName}, closing floating window`);
           await this.closeFloatingWindow();
@@ -312,7 +318,7 @@ export class AppBlockingService {
 
   private async closeFloatingWindow(): Promise<void> {
     try {
-      await UsageService.stopFloatingScore();
+      await UnifiedUsageService.stopFloatingScore();
       console.log('Floating window closed');
     } catch (error) {
       console.error('Error closing floating window:', error);
@@ -321,14 +327,12 @@ export class AppBlockingService {
 
   private async getCurrentForegroundApp(): Promise<string | null> {
     try {
-      // Get recent usage (last 3 seconds)
-      const recentUsage = await UsageService.getUsageSince(Date.now() - 3000);
+      const recentUsage = await UnifiedUsageService.getUsageSince(Date.now() - 3000);
       
       if (!recentUsage || recentUsage.length === 0) {
         return null;
       }
 
-      // Get the most recently used app
       const currentApp = recentUsage.sort((a, b) => 
         (b.lastTimeUsed || 0) - (a.lastTimeUsed || 0)
       )[0];
@@ -344,7 +348,7 @@ export class AppBlockingService {
     try {
       const startOfDay = new Date();
       startOfDay.setHours(0, 0, 0, 0);
-      return await UsageService.getAppUsage(packageName, startOfDay.getTime());
+      return await UnifiedUsageService.getAppUsage(packageName, startOfDay.getTime());
     } catch (error) {
       console.error('Error getting today usage for app:', error);
       return 0;
@@ -362,7 +366,6 @@ export class AppBlockingService {
       const now = new Date();
       const currentTime = `${now.getHours().toString().padStart(2, '0')}:${now.getMinutes().toString().padStart(2, '0')}`;
 
-      // Handle overnight schedules (e.g., 22:00 to 06:00)
       if (startTime > endTime) {
         return currentTime >= startTime || currentTime <= endTime;
       } else {
@@ -394,7 +397,8 @@ export class AppBlockingService {
     this.alertShowing = true;
 
     const scoreLabel = getScoreLabel(brainScore);
-    const usageTime = this.formatUsageTime(this.getTodayUsageForAppSync(this.currentForegroundApp!));
+    const todayUsage = this.getTodayUsageForAppSync(this.currentForegroundApp!);
+    const usageTime = this.formatUsageTime(todayUsage);
 
     const message = `⚠️ ${appName} is currently soft-blocked.\n\n🧠 Brain Score: ${brainScore}/100 (${scoreLabel})\n⏱️ Usage today: ${usageTime}\n\n${scoreStatus.text}\n\nConsider taking a break or switching to a different activity.`;
 
@@ -480,21 +484,15 @@ export class AppBlockingService {
   }
 
   private getTodayUsageForAppSync(packageName: string): number {
-    // This is a synchronous version for UI display
-    // The actual value is fetched asynchronously in handleBlockedAppDetected
-    return 0; // Placeholder - will be updated with actual implementation
+    return 0; // Placeholder
   }
 
   private closeCurrentApp = (): void => {
-    // On Android, we can't directly close other apps
-    // But we can trigger the monitoring service to send a notification
     console.log('User chose to close blocked app');
     
-    // Close floating window if open
     this.closeFloatingWindow();
     this.stopFloatingWindowMonitor();
     
-    // Optionally trigger a check in the monitoring service
     const monitoringService = UsageMonitoringService.getInstance();
     monitoringService.triggerManualCheck();
   };
@@ -504,26 +502,21 @@ export class AppBlockingService {
       const blockedApp = this.blockedApps.get(packageName);
       if (!blockedApp) return;
 
-      // Increment bypass count
       blockedApp.bypassCount += 1;
       blockedApp.lastBypassTime = Date.now();
 
-      // Save bypass count to database
       const today = new Date().toISOString().split('T')[0];
       const bypassKey = `bypass_${packageName}_${today}`;
       await database.setMeta(bypassKey, blockedApp.bypassCount.toString());
 
-      // Log bypass for analytics
       await database.saveNotificationHistory(packageName, 'bypass', today);
 
       console.log(`Bypass granted for ${blockedApp.appName}. Count: ${blockedApp.bypassCount}/${this.bypassLimit}`);
 
-      // Get current brain score
       const todayUsage = await this.getTodayUsageForApp(packageName);
       const brainScore = await this.calculateBrainScore(todayUsage);
       const scoreStatus = getBrainScoreStatus(brainScore);
 
-      // Show warning about remaining bypasses with brain score context
       const remaining = this.bypassLimit - blockedApp.bypassCount;
       if (remaining > 0) {
         setTimeout(() => {
@@ -543,11 +536,9 @@ export class AppBlockingService {
         }, 500);
       }
 
-      // Close floating window if it's open
       await this.closeFloatingWindow();
       this.stopFloatingWindowMonitor();
 
-      // Don't check this app again for 5 minutes after bypass
       setTimeout(() => {
         this.currentForegroundApp = undefined;
       }, 5 * 60 * 1000);
@@ -557,11 +548,9 @@ export class AppBlockingService {
     }
   }
 
-  // Public method to set blocking mode
   async setBlockingMode(mode: BlockingMode): Promise<void> {
     this.blockingMode = mode;
     
-    // Update all blocked apps with new mode
     for (const app of this.blockedApps.values()) {
       app.blockMode = mode;
     }
@@ -569,10 +558,9 @@ export class AppBlockingService {
     console.log(`Blocking mode set to: ${mode}`);
   }
 
-  // Public methods for managing blocked apps
   async blockApp(packageName: string): Promise<void> {
     try {
-      const appName = UsageService.getAppDisplayName(packageName);
+      const appName = UnifiedUsageService.getAppDisplayName(packageName);
       
       this.blockedApps.set(packageName, {
         packageName,
@@ -581,13 +569,11 @@ export class AppBlockingService {
         bypassCount: 0,
       });
 
-      // Update database
       const blockedPackages = Array.from(this.blockedApps.keys());
       await database.setMeta('blocked_apps', JSON.stringify(blockedPackages));
 
       console.log(`Blocked app: ${appName} (${packageName})`);
       
-      // Start monitoring if not already started
       if (this.blockingEnabled && !this.checkInterval) {
         this.startMonitoring();
       }
@@ -602,7 +588,6 @@ export class AppBlockingService {
       if (blockedApp) {
         this.blockedApps.delete(packageName);
 
-        // Update database
         const blockedPackages = Array.from(this.blockedApps.keys());
         await database.setMeta('blocked_apps', JSON.stringify(blockedPackages));
 
@@ -613,7 +598,6 @@ export class AppBlockingService {
     }
   }
 
-  // Reset daily bypass counts (called by DailyResetService)
   async resetDailyLimits(): Promise<void> {
     console.log('Resetting daily app blocking limits...');
     
@@ -622,7 +606,6 @@ export class AppBlockingService {
       blockedApp.lastBypassTime = undefined;
     }
 
-    // Clear bypass count metadata for yesterday
     const yesterday = new Date();
     yesterday.setDate(yesterday.getDate() - 1);
     const yesterdayStr = yesterday.toISOString().split('T')[0];
@@ -632,20 +615,21 @@ export class AppBlockingService {
       try {
         await database.setMeta(bypassKey, '0');
       } catch {
-        // Ignore errors clearing old data
+        // Ignore errors
       }
     }
+
+    // Clear cooldowns
+    this.blockCooldown.clear();
 
     console.log('Daily blocking limits reset completed');
   }
 
-  // Public method to force check current app
   async forceCheckCurrentApp(): Promise<void> {
     if (!this.blockingEnabled) return;
     await this.checkCurrentApp();
   }
 
-  // Get blocking status for debugging
   getBlockingStatus(): {
     enabled: boolean;
     blockedAppsCount: number;
@@ -668,20 +652,17 @@ export class AppBlockingService {
     };
   }
 
-  // Cleanup method
   async cleanup(): Promise<void> {
     if (this.checkInterval) {
       clearInterval(this.checkInterval);
       this.checkInterval = undefined;
     }
 
-    // Stop floating window monitor
     this.stopFloatingWindowMonitor();
-    
-    // Close any active floating window
     await this.closeFloatingWindow();
 
     this.blockedApps.clear();
+    this.blockCooldown.clear();
     this.blockingEnabled = false;
     this.isInitialized = false;
     this.alertShowing = false;
