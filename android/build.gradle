@@ -5,13 +5,10 @@ buildscript {
     google()
     mavenCentral()
   }
-  ext {
-    kotlinVersion = "1.9.0" // Update to latest stable
-  }
   dependencies {
-    classpath('com.android.tools.build:gradle')
+    classpath('com.android.tools.build:gradle:8.6.0')
     classpath('com.facebook.react:react-native-gradle-plugin')
-    classpath("org.jetbrains.kotlin:kotlin-gradle-plugin:$kotlinVersion")
+    classpath('org.jetbrains.kotlin:kotlin-gradle-plugin')
   }
 }
 
@@ -34,13 +31,6 @@ allprojects {
     mavenCentral()
     maven { url 'https://www.jitpack.io' }
   }
-  configurations.all {
-        resolutionStrategy {
-            // Force specific versions to avoid conflicts
-            force "androidx.work:work-runtime:2.8.1"
-            force "androidx.lifecycle:lifecycle-runtime:2.6.1"
-        }
-    }
 }
 
 apply plugin: "expo-root-project"

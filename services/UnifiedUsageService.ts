@@ -10,12 +10,12 @@ const UsageStatsModule = NativeModules.UsageStatsModule;
  */
 export class UnifiedUsageService {
   private static instance: UnifiedUsageService;
-  
+
   // Core monitoring state
   private isMonitoring = false;
   private checkInterval?: ReturnType<typeof setInterval>;
   private appTrackers: Map<string, AppUsageTracker> = new Map();
-  
+
   // Recommended apps list
   private static readonly RECOMMENDED_APPS = [
     { packageName: 'com.google.android.youtube', appName: 'YouTube', isRecommended: true },
@@ -29,7 +29,7 @@ export class UnifiedUsageService {
     { packageName: 'com.whatsapp', appName: 'WhatsApp', isRecommended: true },
     { packageName: 'com.discord', appName: 'Discord', isRecommended: true },
   ];
-  
+
   // Notification thresholds (in milliseconds)
   private static readonly THRESHOLDS: UsageThreshold[] = [
     { duration: 30 * 60 * 1000, intensity: 'mild' },     // 30 minutes
@@ -47,22 +47,22 @@ export class UnifiedUsageService {
   }
 
   // ========== NATIVE MODULE AVAILABILITY ==========
-  
+
   static isNativeModuleAvailable(): boolean {
     return Platform.OS === 'android' && !!UsageStatsModule && !!UsageStatsModule.isUsageAccessGranted;
   }
 
   // ========== CORE USAGE DATA METHODS ==========
-  
+
   static async getUsageSince(startTime: number): Promise<AppUsageData[]> {
     if (!this.isNativeModuleAvailable()) {
       return [];
     }
 
     try {
-      const endTime = Date.now();
-      const usage = await UsageStatsModule.getUsageStats(startTime, endTime);
-      
+      // const endTime = Date.now();
+      const usage = await UsageStatsModule.getUsageSince(startTime);
+
       // Filter and format the data
       const formattedUsage = usage
         .filter((app: any) => app.totalTimeInForeground > 0)
@@ -109,7 +109,7 @@ export class UnifiedUsageService {
   }
 
   // ========== INSTALLED APPS METHODS ==========
-  
+
   static async getInstalledApps(): Promise<InstalledApp[]> {
     try {
       if (!this.isNativeModuleAvailable()) {
@@ -123,13 +123,19 @@ export class UnifiedUsageService {
       }
 
       const installedApps = await UsageStatsModule.getInstalledMonitoredApps();
-      
+
       if (!installedApps || installedApps.length === 0) {
         console.warn('No apps returned from native module, using fallback');
         return this.RECOMMENDED_APPS;
       }
 
-      return installedApps;
+      // Mark recommended apps
+      const recommendedPackages = new Set(this.RECOMMENDED_APPS.map(a => a.packageName));
+
+      return installedApps.map((app: any) => ({
+        ...app,
+        isRecommended: recommendedPackages.has(app.packageName)
+      }));
     } catch (error) {
       console.error('Error getting installed apps:', error);
       return this.RECOMMENDED_APPS;
@@ -140,20 +146,20 @@ export class UnifiedUsageService {
 
   async initialize(): Promise<void> {
     console.log('Initializing UnifiedUsageService...');
-    
+
     // Initialize notification service
     const NotificationService = (await import('./NotificationService')).NotificationService;
     await NotificationService.initialize();
-    
+
     // Initialize trackers for monitored apps
     await this.initializeTodayTrackers();
-    
+
     // Check if monitoring should be started
     const monitoringEnabled = await database.getMeta('monitoring_enabled');
     if (monitoringEnabled === 'true') {
       await this.startMonitoring();
     }
-    
+
     console.log('UnifiedUsageService initialized');
   }
 
@@ -165,34 +171,34 @@ export class UnifiedUsageService {
 
     console.log('Starting usage monitoring...');
     this.isMonitoring = true;
-    
+
     // Save monitoring state
     await database.setMeta('monitoring_enabled', 'true');
-    
+
     // Start background monitoring (every 30 seconds)
     this.startBackgroundMonitoring();
-    
+
     // Start native realtime detection if available
     await this.startRealtimeDetection();
-    
+
     console.log('Usage monitoring started');
   }
 
   async stopMonitoring(): Promise<void> {
     if (!this.isMonitoring) return;
-    
+
     console.log('Stopping usage monitoring...');
     this.isMonitoring = false;
-    
+
     // Stop background monitoring
     this.stopBackgroundMonitoring();
-    
+
     // Stop native realtime detection
     await this.stopRealtimeDetection();
-    
+
     // Save state
     await database.setMeta('monitoring_enabled', 'false');
-    
+
     console.log('Usage monitoring stopped');
   }
 
@@ -209,12 +215,12 @@ export class UnifiedUsageService {
 
   private startBackgroundMonitoring(): void {
     this.stopBackgroundMonitoring();
-    
+
     // Check every 30 seconds
     this.checkInterval = setInterval(async () => {
       await this.checkUsageAndNotify();
     }, 30000);
-    
+
     // Initial check
     this.checkUsageAndNotify();
   }
@@ -229,7 +235,7 @@ export class UnifiedUsageService {
   private async startRealtimeDetection(): Promise<void> {
     try {
       if (!UnifiedUsageService.isNativeModuleAvailable()) return;
-      
+
       await UsageStatsModule.startRealtimeAppDetection();
       console.log('Native realtime detection started');
     } catch (error) {
@@ -240,7 +246,7 @@ export class UnifiedUsageService {
   private async stopRealtimeDetection(): Promise<void> {
     try {
       if (!UnifiedUsageService.isNativeModuleAvailable()) return;
-      
+
       await UsageStatsModule.stopRealtimeAppDetection();
       console.log('Native realtime detection stopped');
     } catch (error) {
@@ -261,17 +267,17 @@ export class UnifiedUsageService {
 
       // Get current usage data
       const todayUsage = await UnifiedUsageService.getTodayUsage();
-      
+
       // Check each tracked app
       for (const [packageName, tracker] of this.appTrackers) {
         const currentUsage = todayUsage.find(u => u.packageName === packageName);
         const currentTotalMs = currentUsage?.totalTimeMs || 0;
-        
+
         // Only check if usage has increased
         if (currentTotalMs > tracker.totalTodayMs) {
           tracker.totalTodayMs = currentTotalMs;
           tracker.lastCheckedMs = Date.now();
-          
+
           // Check thresholds and send notifications
           await this.checkThresholdsForApp(tracker);
         }
@@ -283,14 +289,14 @@ export class UnifiedUsageService {
 
   private async checkThresholdsForApp(tracker: AppUsageTracker): Promise<boolean> {
     const NotificationService = (await import('./NotificationService')).NotificationService;
-    
+
     for (const threshold of UnifiedUsageService.THRESHOLDS) {
-      if (tracker.totalTodayMs >= threshold.duration && 
-          !tracker.notificationsSent.has(threshold.duration)) {
-        
+      if (tracker.totalTodayMs >= threshold.duration &&
+        !tracker.notificationsSent.has(threshold.duration)) {
+
         // Mark as sent
         tracker.notificationsSent.add(threshold.duration);
-        
+
         // Send notification using the CORRECT method from NotificationService
         const minutes = Math.round(threshold.duration / 60000);
         await NotificationService.scheduleUsageAlert(
@@ -298,12 +304,12 @@ export class UnifiedUsageService {
           `${minutes} minutes`,
           threshold.intensity
         );
-        
+
         console.log(`Sent ${threshold.intensity} notification for ${tracker.appName} at ${minutes} minutes`);
         return true;
       }
     }
-    
+
     return false;
   }
 
@@ -313,23 +319,23 @@ export class UnifiedUsageService {
     try {
       const monitoredAppsData = await database.getMeta('monitored_apps');
       if (!monitoredAppsData) return;
-      
+
       const monitoredPackages = JSON.parse(monitoredAppsData) as string[];
-      
+
       // Remove trackers for apps no longer monitored
       for (const packageName of this.appTrackers.keys()) {
         if (!monitoredPackages.includes(packageName)) {
           this.appTrackers.delete(packageName);
         }
       }
-      
+
       // Add new trackers
       const todayUsage = await UnifiedUsageService.getTodayUsage();
       for (const packageName of monitoredPackages) {
         if (!this.appTrackers.has(packageName)) {
           const usageData = todayUsage.find(u => u.packageName === packageName);
           const appName = UnifiedUsageService.getAppDisplayName(packageName);
-          
+
           this.appTrackers.set(packageName, {
             packageName,
             appName,
@@ -339,7 +345,7 @@ export class UnifiedUsageService {
           });
         }
       }
-      
+
       console.log(`Tracking ${this.appTrackers.size} apps`);
     } catch (error) {
       console.error('Error refreshing monitored apps:', error);
@@ -359,27 +365,27 @@ export class UnifiedUsageService {
 
       // Get fresh usage data for this specific app
       const currentTotalMs = await UnifiedUsageService.getAppUsage(packageName);
-      
+
       if (currentTotalMs > tracker.totalTodayMs) {
         tracker.totalTodayMs = currentTotalMs;
         tracker.lastCheckedMs = Date.now();
-        
+
         await this.checkThresholdsForApp(tracker);
       }
-      
+
       // Trigger blocking check via coordinator
       const ServiceCoordinator = (await import('./ServiceCoordinator')).ServiceCoordinator;
       const coordinator = ServiceCoordinator.getInstance();
       // Call the public method instead of private
       await coordinator.triggerManualCheck(packageName);
-      
+
     } catch (error) {
       console.error('Error checking specific app usage:', error);
     }
   }
 
   // ========== MANUAL TRIGGERS ==========
-  
+
   async triggerManualCheck(): Promise<void> {
     console.log('Manual usage check triggered');
     await this.checkUsageAndNotify();
@@ -395,7 +401,7 @@ export class UnifiedUsageService {
     if (!this.isNativeModuleAvailable()) {
       throw new Error('Blocking overlay only available on Android');
     }
-    
+
     await UsageStatsModule.showBlockingOverlay(packageName, appName, blockMode);
   }
 
@@ -407,7 +413,7 @@ export class UnifiedUsageService {
     if (!this.isNativeModuleAvailable()) {
       return false;
     }
-    
+
     return await UsageStatsModule.startFloatingScore(appName, initialScore, timeMs);
   }
 
@@ -415,7 +421,7 @@ export class UnifiedUsageService {
     if (!this.isNativeModuleAvailable()) {
       return false;
     }
-    
+
     return await UsageStatsModule.stopFloatingScore();
   }
 
@@ -425,7 +431,7 @@ export class UnifiedUsageService {
     if (!this.isNativeModuleAvailable()) {
       return false;
     }
-    
+
     return await UsageStatsModule.isUsageAccessGranted();
   }
 
@@ -433,7 +439,7 @@ export class UnifiedUsageService {
     if (!this.isNativeModuleAvailable()) {
       throw new Error('Usage access only available on Android');
     }
-    
+
     await UsageStatsModule.requestUsageAccess();
   }
 
@@ -441,7 +447,7 @@ export class UnifiedUsageService {
     if (!this.isNativeModuleAvailable()) {
       throw new Error('Usage access settings only available on Android');
     }
-    
+
     await UsageStatsModule.openUsageAccessSettings();
   }
 
@@ -449,16 +455,16 @@ export class UnifiedUsageService {
     if (!this.isNativeModuleAvailable()) {
       return false;
     }
-    
+
     try {
       // Try to refresh by checking permission again
       const hasPermission = await UsageStatsModule.isUsageAccessGranted();
-      
+
       // If still no permission, try a force check if available
       if (!hasPermission && UsageStatsModule.forceRefreshPermission) {
         return await UsageStatsModule.forceRefreshPermission();
       }
-      
+
       return hasPermission;
     } catch (error) {
       console.error('Error refreshing permission:', error);
@@ -470,7 +476,7 @@ export class UnifiedUsageService {
     if (!this.isNativeModuleAvailable()) {
       return false;
     }
-    
+
     return await UsageStatsModule.hasOverlayPermission();
   }
 
@@ -478,7 +484,7 @@ export class UnifiedUsageService {
     if (!this.isNativeModuleAvailable()) {
       return;
     }
-    
+
     await UsageStatsModule.requestOverlayPermission();
   }
 
@@ -498,22 +504,22 @@ export class UnifiedUsageService {
       'com.discord': 'Discord',
     };
 
-    return appNameMap[packageName] || 
-           (packageName.split('.').pop()?.charAt(0).toUpperCase() || '') + 
-           (packageName.split('.').pop()?.slice(1) || packageName);
+    return appNameMap[packageName] ||
+      (packageName.split('.').pop()?.charAt(0).toUpperCase() || '') +
+      (packageName.split('.').pop()?.slice(1) || packageName);
   }
 
   // ========== DAILY RESET ==========
 
   async resetDailyTracking(): Promise<void> {
     console.log('Resetting daily tracking...');
-    
+
     for (const tracker of this.appTrackers.values()) {
       tracker.totalTodayMs = 0;
       tracker.notificationsSent.clear();
       tracker.lastCheckedMs = Date.now();
     }
-    
+
     console.log('Daily tracking reset completed');
   }
 

@@ -125,18 +125,11 @@ class UsageStatsModule(reactContext: ReactApplicationContext) : ReactContextBase
             val resolveInfos = pm.queryIntentActivities(mainIntent, 0)
             Log.d(TAG, "Found ${resolveInfos.size} launchable apps")
 
-            val monitoredApps = setOf(
-                "com.google.android.youtube",
-                "com.instagram.android",
-                "com.whatsapp",
-                "com.facebook.katana",
-                "com.ss.android.ugc.tiktok",
-                "com.zhiliaoapp.musically",
-                "com.twitter.android",
-                "com.snapchat.android",
-                "com.reddit.frontpage",
-                "com.discord"
-            )
+            // No hardcoded list anymore - we let the JS side decide what to filter
+            // But for getInstalledMonitoredApps, we can still return "recommended" ones or all
+            // For now, let's keep the concept of recommended apps in the JS side, 
+            // and have this return all launchable apps.
+
 
             val result = WritableNativeArray()
             val seen = HashSet<String>()
@@ -150,7 +143,7 @@ class UsageStatsModule(reactContext: ReactApplicationContext) : ReactContextBase
                 val map = WritableNativeMap()
                 map.putString("packageName", pkg)
                 map.putString("appName", label)
-                map.putBoolean("isRecommended", monitoredApps.contains(pkg))
+                map.putBoolean("isRecommended", false) // Deprecated flag, handled in JS
                 result.pushMap(map)
             }
 
@@ -495,10 +488,9 @@ class UsageStatsModule(reactContext: ReactApplicationContext) : ReactContextBase
 
             if (foregroundApp != null && 
                 foregroundApp != lastForegroundApp && 
-                foregroundApp != reactApplicationContext.packageName &&
-                isMonitoredApp(foregroundApp)) {
+                foregroundApp != reactApplicationContext.packageName) {
                 
-                Log.d(TAG, "Detected monitored app in foreground: $foregroundApp")
+                Log.d(TAG, "Detected app change: $foregroundApp")
                 lastForegroundApp = foregroundApp
                 usageChecker.checkRealtimeAppUsage(foregroundApp)
             }
@@ -507,21 +499,7 @@ class UsageStatsModule(reactContext: ReactApplicationContext) : ReactContextBase
         }
     }
 
-    private fun isMonitoredApp(packageName: String): Boolean {
-        val monitoredApps = setOf(
-            "com.google.android.youtube",
-            "com.instagram.android",
-            "com.whatsapp",
-            "com.facebook.katana",
-            "com.ss.android.ugc.tiktok",
-            "com.zhiliaoapp.musically",
-            "com.twitter.android",
-            "com.snapchat.android",
-            "com.reddit.frontpage",
-            "com.discord"
-        )
-        return monitoredApps.contains(packageName)
-    }
+    // isMonitoredApp removed - allow all apps
 
     private fun getUsageDataSince(startTimeMs: Long): WritableNativeArray {
         val usageStatsManager = reactApplicationContext.getSystemService(Context.USAGE_STATS_SERVICE) as UsageStatsManager

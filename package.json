@@ -20,7 +20,7 @@
     "@react-navigation/elements": "^2.3.8",
     "@react-navigation/native": "^7.1.6",
     "@sentry/react-native": "~6.14.0",
-    "expo": "~53.0.22",
+    "expo": "~53.0.26",
     "expo-blur": "~14.1.5",
     "expo-build-properties": "~0.14.8",
     "expo-constants": "~17.1.7",
@@ -29,8 +29,8 @@
     "expo-haptics": "~14.1.4",
     "expo-image": "~2.4.0",
     "expo-linking": "~7.1.7",
-    "expo-notifications": "~0.31.4",
-    "expo-router": "~5.1.5",
+    "expo-notifications": "~0.31.5",
+    "expo-router": "~5.1.11",
     "expo-splash-screen": "~0.30.10",
     "expo-sqlite": "~15.2.14",
     "expo-status-bar": "~2.2.3",
@@ -42,14 +42,14 @@
     "prettier-plugin-tailwindcss": "^0.5.11",
     "react": "19.0.0",
     "react-dom": "19.0.0",
-    "react-native": "0.79.5",
+    "react-native": "0.79.6",
     "react-native-gesture-handler": "~2.24.0",
     "react-native-purchases": "^9.4.0",
     "react-native-reanimated": "~3.17.4",
     "react-native-safe-area-context": "5.4.0",
     "react-native-screens": "~4.11.1",
     "react-native-svg": "15.11.2",
-    "react-native-vector-image": "github:oblador/react-native-vector-image",
+    "react-native-vector-image": "^0.6.0",
     "react-native-web": "~0.20.0",
     "react-native-webview": "13.13.5",
     "react-native-worklets-core": "^1.6.2",
@@ -63,5 +63,9 @@
     "typescript": "~5.8.3"
   },
   "private": true,
-  "overrides": { "nativewind": { "react-native-css-interop": "0.1.22" }}
+  "overrides": {
+    "nativewind": {
+      "react-native-css-interop": "0.1.22"
+    }
+  }
 }

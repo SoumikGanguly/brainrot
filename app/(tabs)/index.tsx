@@ -196,57 +196,58 @@ export default function HomeScreen() {
     }
   };
 
-  const deduplicateUsageData = (data: AppUsage[]): AppUsage[] => {
-    const seen = new Map<string, AppUsage>();
+  // const deduplicateUsageData = (data: AppUsage[]): AppUsage[] => {
+  //   const seen = new Map<string, AppUsage>();
     
-    data.forEach(app => {
-      const existing = seen.get(app.packageName);
-      if (!existing || app.totalTimeMs > existing.totalTimeMs) {
-        seen.set(app.packageName, app);
-      }
-    });
+  //   data.forEach(app => {
+  //     const existing = seen.get(app.packageName);
+  //     if (!existing || app.totalTimeMs > existing.totalTimeMs) {
+  //       seen.set(app.packageName, app);
+  //     }
+  //   });
     
-    return Array.from(seen.values());
-  };
+  //   return Array.from(seen.values());
+  // };
 
-  const loadUsageDataFromNative = async () => {
-    addDebugMessage('Fetching today\'s usage from native module...');
+  // const loadUsageDataFromNative = async () => {
+  //   addDebugMessage('Fetching today\'s usage from native module...');
     
-    try {
-      const todayUsage = await UnifiedUsageService.getTodayUsage();
-      addDebugMessage(`Received ${todayUsage.length} apps with usage data`);
+  //   try {
+  //     const todayUsage = await UnifiedUsageService.getTodayUsage();
+  //     addDebugMessage(`Received ${todayUsage.length} apps with usage data`);
       
-      if (todayUsage.length === 0) {
-        return [];
-      }
+  //     if (todayUsage.length === 0) {
+  //       return [];
+  //     }
 
-      // Deduplicate native data first
-      const deduplicatedUsage = deduplicateUsageData(todayUsage);
+  //     // Deduplicate native data first
+  //     const deduplicatedUsage = deduplicateUsageData(todayUsage);
       
-      // Save to database (this will replace existing entries due to UNIQUE constraint)
-      const today = new Date().toISOString().split('T')[0];
-      const dbUsageData = deduplicatedUsage.map(app => ({
-        ...app,
-        date: today
-      }));
+  //     // Save to database (this will replace existing entries due to UNIQUE constraint)
+  //     const today = new Date().toISOString().split('T')[0];
+  //     const dbUsageData = deduplicatedUsage.map(app => ({
+  //       ...app,
+  //       date: today
+  //     }));
       
-      try {
-        await database.saveDailyUsage(today, dbUsageData);
-        addDebugMessage(`Saved ${deduplicatedUsage.length} deduplicated apps to database`);
-      } catch (dbError: unknown) {
-        const errorMessage = dbError instanceof Error ? dbError.message : 'Unknown database error';
-        addDebugMessage(`Database save failed: ${errorMessage}`);
-      }
+  //     try {
+  //       await database.saveDailyUsage(today, dbUsageData);
+  //       addDebugMessage(`Saved ${deduplicatedUsage.length} deduplicated apps to database`);
+  //     } catch (dbError: unknown) {
+  //       const errorMessage = dbError instanceof Error ? dbError.message : 'Unknown database error';
+  //       addDebugMessage(`Database save failed: ${errorMessage}`);
+  //     }
 
-      return deduplicatedUsage;
-    } catch (error: unknown) {
-      const errorMessage = error instanceof Error ? error.message : 'Unknown native fetch error';
-      addDebugMessage(`Native fetch failed: ${errorMessage}`);
-      throw error;
-    }
-  };
+  //     return deduplicatedUsage;
+  //   } catch (error: unknown) {
+  //     const errorMessage = error instanceof Error ? error.message : 'Unknown native fetch error';
+  //     addDebugMessage(`Native fetch failed: ${errorMessage}`);
+  //     throw error;
+  //   }
+  // };
 
   // Add this as a new function in your HomeScreen
+  
   const saveCurrentUsageData = async () => {
     try {
       if (UnifiedUsageService.isNativeModuleAvailable()) {
@@ -278,23 +279,24 @@ export default function HomeScreen() {
   const dailyResetService = DailyResetService.getInstance();
   dailyResetService.initialize();
   
-  const loadUsageDataFromDatabase = async () => {
-    addDebugMessage('Loading data from local database...');
+  // const loadUsageDataFromDatabase = async () => {
+  //   addDebugMessage('Loading data from local database...');
     
-    try {
-      const today = new Date().toISOString().split('T')[0];
-      const dbUsage = await database.getDailyUsage(today);
-      addDebugMessage(`Database returned ${dbUsage.length} apps`);
-      // Convert database format to component format (remove date field)
-      return dbUsage.map(({ date, ...rest }) => rest);
-    } catch (error: unknown) {
-      const errorMessage = error instanceof Error ? error.message : 'Unknown database error';
-      addDebugMessage(`Database load failed: ${errorMessage}`);
-      return [];
-    }
-  };
+  //   try {
+  //     const today = new Date().toISOString().split('T')[0];
+  //     const dbUsage = await database.getDailyUsage(today);
+  //     addDebugMessage(`Database returned ${dbUsage.length} apps`);
+  //     // Convert database format to component format (remove date field)
+  //     return dbUsage.map(({ date, ...rest }) => rest);
+  //   } catch (error: unknown) {
+  //     const errorMessage = error instanceof Error ? error.message : 'Unknown database error';
+  //     addDebugMessage(`Database load failed: ${errorMessage}`);
+  //     return [];
+  //   }
+  // };
 
   // Add this debug method to HomeScreen.tsx
+  
   const debugDuplicateIssue = async () => {
     const today = new Date().toISOString().split('T')[0];
     
