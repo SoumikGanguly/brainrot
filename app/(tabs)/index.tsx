@@ -1,8 +1,8 @@
 import { Ionicons } from '@expo/vector-icons';
 import { useFocusEffect } from '@react-navigation/native';
 import LottieView from 'lottie-react-native';
-import React, { useEffect, useState } from 'react';
-import { Alert, AppState, Modal, Pressable, ScrollView, Text, TouchableOpacity, View } from 'react-native';
+import React, { useEffect, useRef, useState } from 'react';
+import { Alert, AppState, AppStateStatus, Modal, Pressable, ScrollView, Text, TouchableOpacity, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
 import { PrimaryButton } from '../../components/Buttons';
@@ -41,6 +41,8 @@ export default function HomeScreen() {
   const [hasUsagePermission, setHasUsagePermission] = useState(false);
   const [debugMessages, setDebugMessages] = useState<string[]>([]);
   const [showAllAppsModal, setShowAllAppsModal] = useState(false);
+  const pendingPermissionCheck = useRef(false);
+  const appStateRef = useRef<AppStateStatus>(AppState.currentState);
 
   useEffect(() => {
     let isInitialized = false;
@@ -82,7 +84,19 @@ export default function HomeScreen() {
         dailyResetService.initialize();
         console.log('✓ Daily reset service initialized');
         
-        // 5. Clean up duplicates once
+        // 5. Sync monitored apps to native for background services
+        try {
+          const monitoredAppsData = await database.getMeta('monitored_apps');
+          if (monitoredAppsData) {
+            const monitoredPackages = JSON.parse(monitoredAppsData) as string[];
+            await UnifiedUsageService.syncMonitoredAppsToNative(monitoredPackages);
+            console.log('✓ Monitored apps synced to native');
+          }
+        } catch (syncError) {
+          console.warn('Failed to sync monitored apps to native:', syncError);
+        }
+        
+        // 6. Clean up duplicates once
         await database.cleanupDuplicateEntries();
         console.log('✓ Database cleanup completed');
         
@@ -99,9 +113,31 @@ export default function HomeScreen() {
 
     
     // Handle app state changes
-    const handleAppStateChange = async (nextAppState: string) => {
-      if (nextAppState === 'active') {
+    const handleAppStateChange = async (nextAppState: AppStateStatus) => {
+      if (appStateRef.current.match(/inactive|background/) && nextAppState === 'active') {
         console.log('App became active, refreshing services...');
+        
+        // Check if we were waiting for permission after opening settings
+        if (pendingPermissionCheck.current) {
+          pendingPermissionCheck.current = false;
+          console.log('Checking permission after returning from settings...');
+          
+          // Small delay to let the system update permission state
+          setTimeout(async () => {
+            try {
+              const hasPermission = await UnifiedUsageService.isUsageAccessGranted();
+              console.log('Permission after settings:', hasPermission);
+              setHasUsagePermission(hasPermission);
+              
+              if (hasPermission) {
+                addDebugMessage('Permission granted! Refreshing data...');
+                loadHomeData();
+              }
+            } catch (error) {
+              console.error('Error checking permission after settings:', error);
+            }
+          }, 500);
+        }
         
         // Refresh monitoring when app comes to foreground
         const monitoringService = UsageMonitoringService.getInstance();
@@ -116,6 +152,8 @@ export default function HomeScreen() {
           monitoringService.triggerManualCheck();
         }, 1000);
       }
+      
+      appStateRef.current = nextAppState;
     };
 
     const subscription = AppState.addEventListener('change', handleAppStateChange);
@@ -393,10 +431,31 @@ export default function HomeScreen() {
         const apps = await UnifiedUsageService.getInstalledApps();
         testResults += `Installed Apps: ${apps.length}\n`;
         
+        // Check monitored apps in database
+        const monitoredAppsData = await database.getMeta('monitored_apps');
+        const monitoredPackages = monitoredAppsData ? JSON.parse(monitoredAppsData) : [];
+        testResults += `Monitored Apps (DB): ${monitoredPackages.length}\n`;
+        
+        // Check synced monitored apps in native
+        const syncedApps = await UnifiedUsageService.getSyncedMonitoredApps();
+        testResults += `Synced to Native: ${syncedApps.length}\n`;
+        
         if (hasAccess) {
           const usage = await UnifiedUsageService.getTodayUsage();
-          testResults += `Today's Usage: ${usage.length} apps`;
+          testResults += `Today's Usage: ${usage.length} apps\n`;
+          
+          if (usage.length > 0) {
+            testResults += `\nTop 3 Apps:\n`;
+            usage.slice(0, 3).forEach((app, i) => {
+              const mins = Math.round(app.totalTimeMs / 60000);
+              testResults += `${i + 1}. ${app.appName}: ${mins}m\n`;
+            });
+          }
+        } else {
+          testResults += `\n⚠️ Grant usage permission to see app data`;
         }
+      } else {
+        testResults += `\n❌ Native module not available.\nThis may indicate a build issue.`;
       }
       
       Alert.alert('Native Module Test', testResults, [{ text: 'OK' }]);
@@ -595,6 +654,38 @@ export default function HomeScreen() {
             <Text className="text-base text-muted mt-xs">{getBrainStatusText()}</Text>
           </View>
         </View>
+
+        {/* Permission Warning - Show prominently when not granted */}
+        {!hasUsagePermission && (
+          <Card className="mx-md mb-md bg-yellow-50 border border-yellow-200">
+            <View className="flex-row items-start">
+              <Ionicons name="warning" size={24} color="#D97706" style={{ marginRight: 12, marginTop: 2 }} />
+              <View className="flex-1">
+                <Text className="text-base font-semibold text-yellow-800 mb-1">
+                  Usage Access Required
+                </Text>
+                <Text className="text-sm text-yellow-700 mb-3">
+                  Grant usage access permission to track your screen time and protect your brain health.
+                </Text>
+                <TouchableOpacity
+                  onPress={async () => {
+                    try {
+                      pendingPermissionCheck.current = true;
+                      addDebugMessage('Opening usage settings...');
+                      await UnifiedUsageService.openUsageAccessSettings();
+                    } catch (error) {
+                      console.error('Failed to open settings:', error);
+                      pendingPermissionCheck.current = false;
+                    }
+                  }}
+                  className="bg-yellow-600 px-4 py-2 rounded-lg self-start"
+                >
+                  <Text className="text-white font-medium">Grant Permission</Text>
+                </TouchableOpacity>
+              </View>
+            </View>
+          </Card>
+        )}
 
         {/* Trial/Purchase CTA */}
         {trialInfo.isActive && !trialInfo.expired && (

@@ -46,13 +46,22 @@ export class DataSyncService {
       // 6. Save raw data (for calendar/backups)
       await database.saveDailyUsage(today, dbFormatted);
       
-      // 7. Compute monitored-only summary
-      const monitoredOnly = dbFormatted.filter(app => 
-        monitoredPackages.includes(app.packageName) && 
-        app.packageName !== 'com.soumikganguly.brainrot'
-      );
+      // 7. Compute monitored-only summary (or all apps if no monitored apps configured)
+      let appsForSummary: DatabaseUsageData[];
+      if (monitoredPackages.length === 0) {
+        // No monitored apps configured - use all apps except self
+        console.warn('No monitored apps configured, using all apps for summary');
+        appsForSummary = dbFormatted.filter(app => 
+          app.packageName !== 'com.soumikganguly.brainrot'
+        );
+      } else {
+        appsForSummary = dbFormatted.filter(app => 
+          monitoredPackages.includes(app.packageName) && 
+          app.packageName !== 'com.soumikganguly.brainrot'
+        );
+      }
       
-      const totalMs = monitoredOnly.reduce((sum, app) => sum + app.totalTimeMs, 0);
+      const totalMs = appsForSummary.reduce((sum, app) => sum + app.totalTimeMs, 0);
       const score = calculateBrainScore(totalMs);
       
       // 8. Save summary
@@ -60,10 +69,10 @@ export class DataSyncService {
         date: today,
         totalScreenTime: totalMs,
         brainScore: score,
-        apps: monitoredOnly
+        apps: appsForSummary
       });
       
-      console.log(`Synced: ${dbFormatted.length} total, ${monitoredOnly.length} monitored`);
+      console.log(`Synced: ${dbFormatted.length} total, ${appsForSummary.length} for summary`);
     } catch (error) {
       console.error('Error syncing usage data:', error);
     }

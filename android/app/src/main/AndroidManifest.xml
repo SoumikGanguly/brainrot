@@ -30,9 +30,22 @@
       <category android:name="android.intent.category.LAUNCHER" />
     </intent>
 
-    <!-- Optional: list known packages you interact with -->
+    <!-- Common social/entertainment apps we monitor -->
     <package android:name="com.google.android.youtube" />
     <package android:name="com.instagram.android" />
+    <package android:name="com.zhiliaoapp.musically" />
+    <package android:name="com.ss.android.ugc.tiktok" />
+    <package android:name="com.facebook.katana" />
+    <package android:name="com.twitter.android" />
+    <package android:name="com.reddit.frontpage" />
+    <package android:name="com.snapchat.android" />
+    <package android:name="com.netflix.mediaclient" />
+    <package android:name="com.whatsapp" />
+    <package android:name="com.discord" />
+    <package android:name="com.spotify.music" />
+    <package android:name="com.pinterest" />
+    <package android:name="com.linkedin.android" />
+    <package android:name="tv.twitch.android.app" />
   </queries>
 
   <application 

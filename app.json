@@ -42,6 +42,7 @@
         }
       ],
       "expo-sqlite",
+      "./plugins/withAndroidDeps",
       [
         "expo-build-properties",
         {

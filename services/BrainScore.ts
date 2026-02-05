@@ -1,5 +1,6 @@
 import { calculateBrainScore } from '../utils/brainScore';
 import { database } from './database';
+import { UnifiedUsageService } from './UnifiedUsageService';
 
 interface BrainScoreResult {
   totalUsageMs: number;
@@ -82,20 +83,50 @@ export class BrainScoreService {
   /**
    * Internal: compute from daily_usage table
    * ALWAYS uses the same filtering logic
+   * Falls back to native UsageStats if database is empty for recent dates
    */
   private async computeFromRawUsage(dateStr: string): Promise<BrainScoreResult> {
-    // Get raw usage
-    const rawUsage = await database.getDailyUsage(dateStr);
+    // Get raw usage from database
+    let rawUsage = await database.getDailyUsage(dateStr);
+    
+    // If database is empty for this date, try fetching from native Android UsageStats
+    // Only works for recent dates (Android keeps ~7-14 days of data)
+    if (rawUsage.length === 0) {
+      const nativeUsage = await this.tryFetchFromNative(dateStr);
+      if (nativeUsage.length > 0) {
+        rawUsage = nativeUsage;
+        
+        // Save to database for future use
+        try {
+          await database.saveDailyUsage(dateStr, rawUsage.map(app => ({
+            ...app,
+            date: dateStr
+          })));
+          console.log(`Saved ${rawUsage.length} apps from native to database for ${dateStr}`);
+        } catch (saveError) {
+          console.warn('Failed to save native data to database:', saveError);
+        }
+      }
+    }
     
     // Get monitored apps (try app_settings first, then meta)
-    let monitoredPackages = await this.getMonitoredPackages();
+    const monitoredPackages = await this.getMonitoredPackages();
     
     // Create Set for O(1) lookup
     const monitoredSet = new Set(monitoredPackages);
     monitoredSet.delete(BrainScoreService.SELF_PACKAGE);
     
-    // Filter: monitored only, exclude self
-    const filtered = rawUsage.filter(app => monitoredSet.has(app.packageName));
+    let filtered;
+    
+    // If no monitored apps configured, use all apps (excluding self)
+    // This handles the case where onboarding wasn't completed or monitored_apps not set
+    if (monitoredSet.size === 0) {
+      console.warn('No monitored apps configured, using all apps for brain score calculation');
+      filtered = rawUsage.filter(app => app.packageName !== BrainScoreService.SELF_PACKAGE);
+    } else {
+      // Filter: monitored only, exclude self
+      filtered = rawUsage.filter(app => monitoredSet.has(app.packageName));
+    }
     
     // Deduplicate (in case of DB issues)
     const deduped = this.deduplicateApps(filtered);
@@ -109,6 +140,52 @@ export class BrainScoreService {
       score,
       apps: deduped.sort((a, b) => b.totalTimeMs - a.totalTimeMs)
     };
+  }
+  
+  /**
+   * Try to fetch usage data from native Android UsageStats
+   * Only works for TODAY - Android's UsageStats API returns cumulative data
+   * from startTime to now, so we can't reliably get data for past dates.
+   */
+  private async tryFetchFromNative(dateStr: string): Promise<{
+    packageName: string;
+    appName: string;
+    totalTimeMs: number;
+  }[]> {
+    try {
+      // Only works for today - past dates would return incorrect cumulative data
+      const today = new Date().toISOString().split('T')[0];
+      if (dateStr !== today) {
+        return [];
+      }
+      
+      // Check if native module is available
+      if (!UnifiedUsageService.isNativeModuleAvailable()) {
+        return [];
+      }
+      
+      // Check permission
+      const hasPermission = await UnifiedUsageService.isUsageAccessGranted();
+      if (!hasPermission) {
+        return [];
+      }
+      
+      console.log(`Attempting native fallback for today (${dateStr})...`);
+      const nativeUsage = await UnifiedUsageService.getUsageForDate(dateStr);
+      
+      if (nativeUsage.length > 0) {
+        console.log(`Native fallback returned ${nativeUsage.length} apps for today`);
+      }
+      
+      return nativeUsage.map(app => ({
+        packageName: app.packageName,
+        appName: app.appName,
+        totalTimeMs: app.totalTimeMs
+      }));
+    } catch (error) {
+      console.warn(`Native fallback failed for ${dateStr}:`, error);
+      return [];
+    }
   }
   
   /**

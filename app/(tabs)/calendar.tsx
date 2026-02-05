@@ -1,6 +1,6 @@
 import { Ionicons } from '@expo/vector-icons';
-import React, { useEffect, useState } from 'react';
-import { Alert, Dimensions, Modal, ScrollView, Share, Text, TouchableOpacity, View } from 'react-native';
+import React, { useEffect, useRef, useState } from 'react';
+import { Alert, AppState, AppStateStatus, Dimensions, Modal, ScrollView, Share, Text, TouchableOpacity, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import Svg, { Rect, Text as SvgText } from 'react-native-svg';
 
@@ -10,6 +10,9 @@ import { Header } from '../../components/Header';
 import { database } from '../../services/database';
 
 import { BrainScoreService } from '@/services/BrainScore';
+import { DataSyncService } from '@/services/DataSyncService';
+import { HistoricalDataService } from '@/services/HistoricalDataService';
+import { UnifiedUsageService } from '@/services/UnifiedUsageService';
 import { calculateBrainScore, getScoreColor, getScoreLabel } from '../../utils/brainScore';
 import { formatTime, formatTimeDetailed } from '../../utils/time';
 
@@ -42,14 +45,83 @@ export default function Calendar() {
   const [loading, setLoading] = useState(true);
   const [currentMonth, setCurrentMonth] = useState(new Date());
   const [viewMode, setViewMode] = useState<'heatmap' | 'list'>('heatmap');
+  const [hasUsagePermission, setHasUsagePermission] = useState(false);
+  const pendingPermissionCheck = useRef(false);
+  const appStateRef = useRef<AppStateStatus>(AppState.currentState);
 
   useEffect(() => {
-    loadHistoricalData();
+    checkPermissionAndLoadData();
+    
+    // Handle app state changes for permission refresh
+    const handleAppStateChange = async (nextAppState: AppStateStatus) => {
+      if (appStateRef.current.match(/inactive|background/) && nextAppState === 'active') {
+        // Check if we were waiting for permission after opening settings
+        if (pendingPermissionCheck.current) {
+          pendingPermissionCheck.current = false;
+          console.log('Calendar: Checking permission after returning from settings...');
+          
+          setTimeout(async () => {
+            try {
+              const hasPermission = await UnifiedUsageService.isUsageAccessGranted();
+              setHasUsagePermission(hasPermission);
+              
+              if (hasPermission) {
+                loadHistoricalData();
+              }
+            } catch (error) {
+              console.error('Error checking permission after settings:', error);
+            }
+          }, 500);
+        }
+      }
+      
+      appStateRef.current = nextAppState;
+    };
+    
+    const subscription = AppState.addEventListener('change', handleAppStateChange);
+    
+    return () => {
+      subscription.remove();
+    };
   }, []);
+
+  const checkPermissionAndLoadData = async () => {
+    try {
+      // Check if native module is available and permission is granted
+      if (UnifiedUsageService.isNativeModuleAvailable()) {
+        const hasPermission = await UnifiedUsageService.isUsageAccessGranted();
+        setHasUsagePermission(hasPermission);
+      }
+    } catch (error) {
+      console.error('Error checking permission:', error);
+    }
+    
+    loadHistoricalData();
+  };
 
   const loadHistoricalData = async () => {
     try {
       setLoading(true);
+      
+      // First, sync today's data from native to database
+      if (UnifiedUsageService.isNativeModuleAvailable()) {
+        const hasPermission = await UnifiedUsageService.isUsageAccessGranted();
+        if (hasPermission) {
+          try {
+            // Sync latest usage data
+            const syncService = DataSyncService.getInstance();
+            await syncService.syncUsageData();
+            
+            // Also save today's summary immediately
+            const historicalService = HistoricalDataService.getInstance();
+            await historicalService.saveTodaySummary();
+            
+            console.log('Calendar: Synced today\'s data from native');
+          } catch (syncError) {
+            console.warn('Calendar: Failed to sync data:', syncError);
+          }
+        }
+      }
 
       const brainScoreService = BrainScoreService.getInstance();
       const data: DailyData[] = [];
@@ -62,7 +134,7 @@ export default function Calendar() {
         const dateStr = date.toISOString().split('T')[0];
         
         try {
-          // Use SAME service as HomeScreen
+          // Use SAME service as HomeScreen (now with native fallback)
           const result = await brainScoreService.getBrainScoreForDate(dateStr);
           
           if (result.apps.length > 0 || result.totalUsageMs > 0) {
@@ -459,6 +531,37 @@ export default function Calendar() {
     <SafeAreaView className="flex-1 bg-bg">
       <ScrollView className="flex-1" showsVerticalScrollIndicator={false}>
         <Header title="Calendar" />
+
+        {/* Permission Warning - Show prominently when not granted */}
+        {!hasUsagePermission && (
+          <Card className="mx-md mb-md bg-yellow-50 border border-yellow-200">
+            <View className="flex-row items-start">
+              <Ionicons name="warning" size={24} color="#D97706" style={{ marginRight: 12, marginTop: 2 }} />
+              <View className="flex-1">
+                <Text className="text-base font-semibold text-yellow-800 mb-1">
+                  Usage Access Required
+                </Text>
+                <Text className="text-sm text-yellow-700 mb-3">
+                  Grant usage access permission to see your historical screen time data.
+                </Text>
+                <TouchableOpacity
+                  onPress={async () => {
+                    try {
+                      pendingPermissionCheck.current = true;
+                      await UnifiedUsageService.openUsageAccessSettings();
+                    } catch (error) {
+                      console.error('Failed to open settings:', error);
+                      pendingPermissionCheck.current = false;
+                    }
+                  }}
+                  className="bg-yellow-600 px-4 py-2 rounded-lg self-start"
+                >
+                  <Text className="text-white font-medium">Grant Permission</Text>
+                </TouchableOpacity>
+              </View>
+            </View>
+          </Card>
+        )}
 
         {viewMode === 'heatmap' ? renderHeatmapView() : renderListView()}
       </ScrollView>

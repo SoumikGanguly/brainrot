@@ -75,9 +75,14 @@ class BackgroundUsageWorker(
             val prefs = applicationContext.getSharedPreferences("brainrot_prefs", Context.MODE_PRIVATE)
             val blockedAppsJson = prefs.getString("blocked_apps", "[]")
             
+            // Log monitored apps for debugging
+            val monitoredAppsJson = prefs.getString("monitored_apps", "[]")
+            Log.d(TAG, "Monitored apps from prefs: $monitoredAppsJson")
+            Log.d(TAG, "Blocked apps from prefs: $blockedAppsJson")
+            
             // TODO: Parse JSON and check if any blocked apps are currently in use
             // This would integrate with your blocking service
-            Log.d(TAG, "Checking blocking violations...")
+            Log.d(TAG, "Checking blocking violations completed")
         } catch (e: Exception) {
             Log.e(TAG, "Error checking blocking violations", e)
         }

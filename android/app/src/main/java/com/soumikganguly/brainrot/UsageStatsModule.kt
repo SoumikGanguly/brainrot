@@ -403,6 +403,34 @@ class UsageStatsModule(reactContext: ReactApplicationContext) : ReactContextBase
         }
     }
 
+    // SYNC MONITORED APPS TO NATIVE
+    @ReactMethod
+    fun syncMonitoredApps(monitoredAppsJson: String, promise: Promise) {
+        Log.d(TAG, "syncMonitoredApps() called with: $monitoredAppsJson")
+        try {
+            val prefs = reactApplicationContext.getSharedPreferences("brainrot_prefs", Context.MODE_PRIVATE)
+            prefs.edit().putString("monitored_apps", monitoredAppsJson).apply()
+            Log.d(TAG, "Monitored apps synced to SharedPreferences")
+            promise.resolve(true)
+        } catch (e: Exception) {
+            Log.e(TAG, "Error syncing monitored apps", e)
+            promise.reject("SYNC_ERROR", e.message)
+        }
+    }
+
+    // GET SYNCED MONITORED APPS (for debugging)
+    @ReactMethod
+    fun getSyncedMonitoredApps(promise: Promise) {
+        try {
+            val prefs = reactApplicationContext.getSharedPreferences("brainrot_prefs", Context.MODE_PRIVATE)
+            val monitoredAppsJson = prefs.getString("monitored_apps", "[]")
+            promise.resolve(monitoredAppsJson)
+        } catch (e: Exception) {
+            Log.e(TAG, "Error getting synced monitored apps", e)
+            promise.reject("GET_SYNCED_ERROR", e.message)
+        }
+    }
+
     // TEST METHOD
     @ReactMethod
     fun testModule(promise: Promise) {

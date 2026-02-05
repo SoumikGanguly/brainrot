@@ -153,12 +153,33 @@ class UsageChecker(private val context: Context) {
     }
     
     private fun getMonitoredApps(): List<String> {
-        // In a real app, you'd get this from your database/preferences
-        // For now, return default monitored apps
+        try {
+            // Read monitored apps from SharedPreferences (synced from React Native)
+            val prefs = context.getSharedPreferences("brainrot_prefs", Context.MODE_PRIVATE)
+            val monitoredAppsJson = prefs.getString("monitored_apps", null)
+            
+            if (monitoredAppsJson != null && monitoredAppsJson.isNotEmpty()) {
+                val jsonArray = JSONArray(monitoredAppsJson)
+                val apps = mutableListOf<String>()
+                for (i in 0 until jsonArray.length()) {
+                    apps.add(jsonArray.getString(i))
+                }
+                if (apps.isNotEmpty()) {
+                    Log.d(TAG, "Loaded ${apps.size} monitored apps from SharedPreferences")
+                    return apps
+                }
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Error reading monitored apps from SharedPreferences", e)
+        }
+        
+        // Fallback to default monitored apps if nothing configured
+        Log.d(TAG, "Using default monitored apps list")
         return listOf(
             "com.google.android.youtube",
             "com.instagram.android",
-            "com.ss.android.ugc.tiktok",
+            "com.zhiliaoapp.musically",  // TikTok international
+            "com.ss.android.ugc.tiktok", // TikTok/Douyin Chinese
             "com.whatsapp",
             "com.facebook.katana",
             "com.twitter.android",

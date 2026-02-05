@@ -5,13 +5,14 @@ interface ButtonProps extends TouchableOpacityProps {
   title: string;
 }
 
-export function PrimaryButton({ title, className, ...props }: ButtonProps) {
+export function PrimaryButton({ title, className, disabled, ...props }: ButtonProps) {
   return (
     <TouchableOpacity
-      className={`bg-accent py-sm px-md rounded-lg items-center justify-center ${className || ''}`}
+      className={`py-sm px-md rounded-lg items-center justify-center ${disabled ? 'bg-gray-300' : 'bg-accent'} ${className || ''}`}
+      disabled={disabled}
       {...props}
     >
-      <Text className="text-base font-semibold text-white">{title}</Text>
+      <Text className={`text-base font-semibold ${disabled ? 'text-gray-500' : 'text-white'}`}>{title}</Text>
     </TouchableOpacity>
   );
 }

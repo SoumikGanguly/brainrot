@@ -1,0 +1,3 @@
+# Force EAS Build to run prebuild by excluding native projects
+android/
+ios/

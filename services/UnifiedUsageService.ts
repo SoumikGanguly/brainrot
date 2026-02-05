@@ -21,6 +21,7 @@ export class UnifiedUsageService {
     { packageName: 'com.google.android.youtube', appName: 'YouTube', isRecommended: true },
     { packageName: 'com.instagram.android', appName: 'Instagram', isRecommended: true },
     { packageName: 'com.zhiliaoapp.musically', appName: 'TikTok', isRecommended: true },
+    { packageName: 'com.ss.android.ugc.tiktok', appName: 'TikTok/Douyin', isRecommended: true },
     { packageName: 'com.facebook.katana', appName: 'Facebook', isRecommended: true },
     { packageName: 'com.twitter.android', appName: 'Twitter (X)', isRecommended: true },
     { packageName: 'com.reddit.frontpage', appName: 'Reddit', isRecommended: true },
@@ -64,12 +65,13 @@ export class UnifiedUsageService {
       const usage = await UsageStatsModule.getUsageSince(startTime);
 
       // Filter and format the data
+      // Note: Native module returns 'totalTimeMs', not 'totalTimeInForeground'
       const formattedUsage = usage
-        .filter((app: any) => app.totalTimeInForeground > 0)
+        .filter((app: any) => app.totalTimeMs > 0)
         .map((app: any) => ({
           packageName: app.packageName,
-          appName: this.getAppDisplayName(app.packageName),
-          totalTimeMs: app.totalTimeInForeground,
+          appName: app.appName || this.getAppDisplayName(app.packageName),
+          totalTimeMs: app.totalTimeMs,
           lastTimeUsed: app.lastTimeUsed,
           firstTimeStamp: app.firstTimeStamp,
           lastTimeStamp: app.lastTimeStamp,
@@ -86,6 +88,99 @@ export class UnifiedUsageService {
     const startOfDay = new Date();
     startOfDay.setHours(0, 0, 0, 0);
     return this.getUsageSince(startOfDay.getTime());
+  }
+
+  /**
+   * Get usage data for a specific date (useful for historical data recovery)
+   * Note: This only works reliably for TODAY. For past dates, Android's UsageStats
+   * API returns cumulative data from startTime to now, not just for that day.
+   * Use this primarily for syncing today's data to the database.
+   */
+  static async getUsageForDate(dateStr: string): Promise<AppUsageData[]> {
+    if (!this.isNativeModuleAvailable()) {
+      return [];
+    }
+
+    try {
+      const today = new Date().toISOString().split('T')[0];
+      
+      // Only reliably works for today - for past dates, the native API
+      // returns cumulative data which would be incorrect
+      if (dateStr !== today) {
+        console.log(`getUsageForDate: Skipping ${dateStr} - only today is supported`);
+        return [];
+      }
+      
+      const startOfDay = new Date();
+      startOfDay.setHours(0, 0, 0, 0);
+      
+      // Get usage for today
+      const usage = await UsageStatsModule.getUsageSince(startOfDay.getTime());
+      
+      // Filter to only include apps with usage and format
+      const formattedUsage = usage
+        .filter((app: any) => app.totalTimeMs > 0)
+        .map((app: any) => ({
+          packageName: app.packageName,
+          appName: app.appName || this.getAppDisplayName(app.packageName),
+          totalTimeMs: app.totalTimeMs,
+          lastTimeUsed: app.lastTimeUsed,
+          firstTimeStamp: app.firstTimeStamp,
+          lastTimeStamp: app.lastTimeStamp,
+        }));
+
+      return formattedUsage;
+    } catch (error) {
+      console.error(`Error getting usage for date ${dateStr}:`, error);
+      return [];
+    }
+  }
+
+  /**
+   * Get all installed apps on the device (not just recommended ones)
+   * Returns all launchable apps with isRecommended flag for suggested apps
+   */
+  static async getAllInstalledApps(): Promise<InstalledApp[]> {
+    try {
+      if (!this.isNativeModuleAvailable()) {
+        console.warn('Native module not available, returning recommended apps');
+        return this.RECOMMENDED_APPS;
+      }
+
+      if (!UsageStatsModule.getInstalledMonitoredApps) {
+        console.warn('getInstalledMonitoredApps not available, returning recommended apps');
+        return this.RECOMMENDED_APPS;
+      }
+
+      const installedApps = await UsageStatsModule.getInstalledMonitoredApps();
+
+      if (!installedApps || installedApps.length === 0) {
+        console.warn('No apps returned from native module, using fallback');
+        return this.RECOMMENDED_APPS;
+      }
+
+      // Create a set of recommended package names for quick lookup
+      const recommendedPackages = new Set(this.RECOMMENDED_APPS.map(a => a.packageName));
+
+      // Mark recommended apps and sort: recommended first, then alphabetically
+      const appsWithRecommended: InstalledApp[] = installedApps.map((app: any) => ({
+        packageName: app.packageName,
+        appName: app.appName,
+        isRecommended: recommendedPackages.has(app.packageName)
+      }));
+
+      // Sort: recommended first, then alphabetically by app name
+      appsWithRecommended.sort((a, b) => {
+        if (a.isRecommended && !b.isRecommended) return -1;
+        if (!a.isRecommended && b.isRecommended) return 1;
+        return a.appName.localeCompare(b.appName);
+      });
+
+      return appsWithRecommended;
+    } catch (error) {
+      console.error('Error getting all installed apps:', error);
+      return this.RECOMMENDED_APPS;
+    }
   }
 
   static async getAppUsage(packageName: string, startTime?: number): Promise<number> {
@@ -322,6 +417,9 @@ export class UnifiedUsageService {
 
       const monitoredPackages = JSON.parse(monitoredAppsData) as string[];
 
+      // Sync to native SharedPreferences for background services
+      await UnifiedUsageService.syncMonitoredAppsToNative(monitoredPackages);
+
       // Remove trackers for apps no longer monitored
       for (const packageName of this.appTrackers.keys()) {
         if (!monitoredPackages.includes(packageName)) {
@@ -486,6 +584,39 @@ export class UnifiedUsageService {
     }
 
     await UsageStatsModule.requestOverlayPermission();
+  }
+
+  // Sync monitored apps to native SharedPreferences for background services
+  static async syncMonitoredAppsToNative(monitoredPackages: string[]): Promise<boolean> {
+    if (!this.isNativeModuleAvailable()) {
+      console.warn('Native module not available, cannot sync monitored apps');
+      return false;
+    }
+
+    try {
+      const jsonString = JSON.stringify(monitoredPackages);
+      await UsageStatsModule.syncMonitoredApps(jsonString);
+      console.log(`Synced ${monitoredPackages.length} monitored apps to native`);
+      return true;
+    } catch (error) {
+      console.error('Error syncing monitored apps to native:', error);
+      return false;
+    }
+  }
+
+  // Get synced monitored apps from native (for debugging)
+  static async getSyncedMonitoredApps(): Promise<string[]> {
+    if (!this.isNativeModuleAvailable()) {
+      return [];
+    }
+
+    try {
+      const jsonString = await UsageStatsModule.getSyncedMonitoredApps();
+      return JSON.parse(jsonString) as string[];
+    } catch (error) {
+      console.error('Error getting synced monitored apps:', error);
+      return [];
+    }
   }
 
   // ========== UTILITY METHODS ==========

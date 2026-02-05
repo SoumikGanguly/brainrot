@@ -52,22 +52,33 @@ export class HistoricalDataService {
         }
       }
       
-      if (monitoredPackages.length === 0) {
-        console.log('No monitored apps found, skipping summary save');
-        return;
-      }
-
       // Get today's raw usage data
       const todayRawUsage = await database.getDailyUsage(today);
       console.log(`Found ${todayRawUsage.length} raw usage entries for ${today}`);
+      
+      if (todayRawUsage.length === 0) {
+        console.log('No raw usage data for today, skipping summary save');
+        return;
+      }
       
       // Filter to monitored apps only and exclude the app itself
       const monitoredSet = new Set(monitoredPackages);
       monitoredSet.delete('com.soumikganguly.brainrot');
       
-      const monitoredUsage = todayRawUsage.filter(app => 
-        monitoredSet.has(app.packageName)
-      );
+      let monitoredUsage;
+      
+      // If no monitored apps configured, use all apps (excluding self)
+      // This handles the case where onboarding wasn't completed
+      if (monitoredSet.size === 0) {
+        console.warn('No monitored apps configured, using all apps for summary');
+        monitoredUsage = todayRawUsage.filter(app => 
+          app.packageName !== 'com.soumikganguly.brainrot'
+        );
+      } else {
+        monitoredUsage = todayRawUsage.filter(app => 
+          monitoredSet.has(app.packageName)
+        );
+      }
 
       console.log(`Filtered to ${monitoredUsage.length} monitored app entries`);
 
@@ -149,20 +160,25 @@ export class HistoricalDataService {
           }
         }
         
-        if (monitoredPackages.length === 0) {
-          console.log(`No monitored apps found for ${dateStr}, skipping`);
-          continue;
-        }
-
         const monitoredSet = new Set(monitoredPackages);
         monitoredSet.delete('com.soumikganguly.brainrot');
 
-        const monitoredUsage = rawUsage.filter(app => 
-          monitoredSet.has(app.packageName)
-        );
+        let monitoredUsage;
+        
+        // If no monitored apps configured, use all apps (excluding self)
+        if (monitoredSet.size === 0) {
+          console.warn(`No monitored apps configured for ${dateStr}, using all apps`);
+          monitoredUsage = rawUsage.filter(app => 
+            app.packageName !== 'com.soumikganguly.brainrot'
+          );
+        } else {
+          monitoredUsage = rawUsage.filter(app => 
+            monitoredSet.has(app.packageName)
+          );
+        }
 
         if (monitoredUsage.length === 0) {
-          console.log(`No monitored app usage for ${dateStr}, skipping`);
+          console.log(`No app usage for ${dateStr}, skipping`);
           continue;
         }
 
@@ -237,9 +253,19 @@ export class HistoricalDataService {
         const monitoredSet = new Set(monitoredPackages);
         monitoredSet.delete('com.soumikganguly.brainrot');
 
-        const monitoredUsage = rawUsage.filter(app => 
-          monitoredSet.has(app.packageName)
-        );
+        let monitoredUsage;
+        
+        // If no monitored apps configured, use all apps (excluding self)
+        if (monitoredSet.size === 0) {
+          console.warn('No monitored apps configured, using all apps for refresh');
+          monitoredUsage = rawUsage.filter(app => 
+            app.packageName !== 'com.soumikganguly.brainrot'
+          );
+        } else {
+          monitoredUsage = rawUsage.filter(app => 
+            monitoredSet.has(app.packageName)
+          );
+        }
 
         const totalScreenTime = monitoredUsage.reduce((sum, app) => sum + app.totalTimeMs, 0);
         const brainScore = calculateBrainScore(totalScreenTime);
