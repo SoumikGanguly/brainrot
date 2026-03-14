@@ -14,7 +14,7 @@ import { PurchaseService } from '../../services/PurchaseService';
 import { TrialService } from '../../services/TrialService';
 // import { UsageService } from '../../services/UsageService';
 
-import { UnifiedUsageService } from '@/services/UnifiedUsageService';
+import { ManufacturerPermissionInfo, UnifiedUsageService } from '@/services/UnifiedUsageService';
 
 import { AppBlockingService, BlockingMode } from '@/services/AppBlockingService';
 import { UsageMonitoringService } from '@/services/UsageMonitoringService';
@@ -95,9 +95,25 @@ export default function Settings() {
   const [showAppSelection, setShowAppSelection] = useState(false);
   const [modalKey, setModalKey] = useState(0);
   const [hasOverlayPermission, setHasOverlayPermission] = useState(false);
+  const [manufacturerInfo, setManufacturerInfo] = useState<ManufacturerPermissionInfo | null>(null);
 
   useEffect(() => {
     loadSettings();
+  }, []);
+
+  useEffect(() => {
+    const loadManufacturerInfo = async () => {
+      try {
+        const info = await UnifiedUsageService.getManufacturerInfo();
+        if (info?.needsSpecialPermission) {
+          setManufacturerInfo(info);
+        }
+      } catch (error) {
+        console.warn('Failed to load manufacturer info:', error);
+      }
+    };
+
+    loadManufacturerInfo();
   }, []);
 
   const loadSettings = async () => {
@@ -832,6 +848,31 @@ export default function Settings() {
                     </TouchableOpacity>
                   )}
                 </View>
+
+                {manufacturerInfo?.needsSpecialPermission && (
+                  <View className="mt-3 p-3 bg-yellow-50 border border-yellow-200 rounded-lg">
+                    <Text className="text-sm font-semibold text-yellow-900 mb-1">
+                      {manufacturerInfo.title}
+                    </Text>
+                    <Text className="text-xs text-yellow-800 mb-2">
+                      {manufacturerInfo.instructions}
+                    </Text>
+                    {manufacturerInfo.canOpenDirectly && (
+                      <TouchableOpacity
+                        onPress={async () => {
+                          try {
+                            await UnifiedUsageService.openManufacturerSettings();
+                          } catch (oemError) {
+                            console.warn('Failed to open OEM settings:', oemError);
+                          }
+                        }}
+                        className="bg-yellow-700 px-3 py-2 rounded-lg self-start"
+                      >
+                        <Text className="text-white text-xs font-medium">Open OEM Settings</Text>
+                      </TouchableOpacity>
+                    )}
+                  </View>
+                )}
               </Card>
             
               {/* Blocking Mode Selection */}

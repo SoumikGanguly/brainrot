@@ -7,7 +7,7 @@ import { PrimaryButton, SecondaryButton } from '../../components/Buttons';
 import { Card } from '../../components/Card';
 import { Toggle } from '../../components/Toggle';
 import { TrialService } from '../../services/TrialService';
-import { UnifiedUsageService } from '../../services/UnifiedUsageService';
+import { ManufacturerPermissionInfo, UnifiedUsageService } from '../../services/UnifiedUsageService';
 import { UsageService } from '../../services/UsageService';
 import { database } from '../../services/database';
 
@@ -40,6 +40,22 @@ export default function OnboardingScreen() {
   const [loadingApps, setLoadingApps] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
   const [showAllApps, setShowAllApps] = useState(false);
+  const [manufacturerInfo, setManufacturerInfo] = useState<ManufacturerPermissionInfo | null>(null);
+
+  useEffect(() => {
+    const loadManufacturerInfo = async () => {
+      try {
+        const info = await UnifiedUsageService.getManufacturerInfo();
+        if (info?.needsSpecialPermission) {
+          setManufacturerInfo(info);
+        }
+      } catch (error) {
+        console.warn('Failed to load manufacturer info:', error);
+      }
+    };
+
+    loadManufacturerInfo();
+  }, []);
 
   const checkUsageAccess = async () => {
     const hasAccess = await UsageService.isUsageAccessGranted();
@@ -204,6 +220,30 @@ export default function OnboardingScreen() {
                 onPress={openUsageSettings}
                 className="mb-sm"
               />
+              {manufacturerInfo?.needsSpecialPermission && (
+                <View className="bg-yellow-50 border border-yellow-200 p-sm rounded-lg mb-sm">
+                  <Text className="text-sm font-semibold text-yellow-900 mb-1">
+                    {manufacturerInfo.title}
+                  </Text>
+                  <Text className="text-xs text-yellow-800 mb-2">
+                    {manufacturerInfo.instructions}
+                  </Text>
+                  {manufacturerInfo.canOpenDirectly && (
+                    <TouchableOpacity
+                      onPress={async () => {
+                        try {
+                          await UnifiedUsageService.openManufacturerSettings();
+                        } catch (oemError) {
+                          console.warn('Failed to open OEM settings:', oemError);
+                        }
+                      }}
+                      className="bg-yellow-700 px-3 py-2 rounded-lg self-start"
+                    >
+                      <Text className="text-white text-xs font-medium">Open OEM Settings</Text>
+                    </TouchableOpacity>
+                  )}
+                </View>
+              )}
               {hasUsageAccess && (
                 <SecondaryButton 
                   title="Continue" 

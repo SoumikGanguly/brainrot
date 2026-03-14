@@ -22,7 +22,7 @@ import { AppBlockingService } from '@/services/AppBlockingService';
 import { BrainScoreService } from '@/services/BrainScore';
 import { DataSyncService } from '@/services/DataSyncService';
 
-import { UnifiedUsageService } from '@/services/UnifiedUsageService';
+import { ManufacturerPermissionInfo, UnifiedUsageService } from '@/services/UnifiedUsageService';
 
 
 interface AppUsage {
@@ -41,6 +41,7 @@ export default function HomeScreen() {
   const [hasUsagePermission, setHasUsagePermission] = useState(false);
   const [debugMessages, setDebugMessages] = useState<string[]>([]);
   const [showAllAppsModal, setShowAllAppsModal] = useState(false);
+  const [manufacturerInfo, setManufacturerInfo] = useState<ManufacturerPermissionInfo | null>(null);
   const pendingPermissionCheck = useRef(false);
   const appStateRef = useRef<AppStateStatus>(AppState.currentState);
 
@@ -108,8 +109,20 @@ export default function HomeScreen() {
       }
     };
 
+    const loadManufacturerInfo = async () => {
+      try {
+        const info = await UnifiedUsageService.getManufacturerInfo();
+        if (info?.needsSpecialPermission) {
+          setManufacturerInfo(info);
+        }
+      } catch (error) {
+        console.warn('Failed to load manufacturer info:', error);
+      }
+    };
+
     // Initialize once
     initializeAllServices();
+    loadManufacturerInfo();
 
     
     // Handle app state changes
@@ -214,11 +227,13 @@ export default function HomeScreen() {
               text: 'Grant Permission', 
               onPress: async () => {
                 try {
+                  pendingPermissionCheck.current = true;
                   addDebugMessage('Opening usage access settings...');
                   await UnifiedUsageService.openUsageAccessSettings();
                 } catch (settingsError: unknown) {
                   const errorMessage = settingsError instanceof Error ? settingsError.message : 'Unknown error opening settings';
                   addDebugMessage(`Failed to open settings: ${errorMessage}`);
+                  pendingPermissionCheck.current = false;
                 }
               }
             }
@@ -682,6 +697,31 @@ export default function HomeScreen() {
                 >
                   <Text className="text-white font-medium">Grant Permission</Text>
                 </TouchableOpacity>
+
+                {manufacturerInfo?.needsSpecialPermission && (
+                  <View className="mt-3 p-3 bg-yellow-100 rounded-lg border border-yellow-200">
+                    <Text className="text-sm font-semibold text-yellow-900 mb-1">
+                      {manufacturerInfo.title}
+                    </Text>
+                    <Text className="text-xs text-yellow-800 mb-2">
+                      {manufacturerInfo.instructions}
+                    </Text>
+                    {manufacturerInfo.canOpenDirectly && (
+                      <TouchableOpacity
+                        onPress={async () => {
+                          try {
+                            await UnifiedUsageService.openManufacturerSettings();
+                          } catch (oemError) {
+                            console.warn('Failed to open OEM settings:', oemError);
+                          }
+                        }}
+                        className="bg-yellow-700 px-3 py-2 rounded-lg self-start"
+                      >
+                        <Text className="text-white text-xs font-medium">Open OEM Settings</Text>
+                      </TouchableOpacity>
+                    )}
+                  </View>
+                )}
               </View>
             </View>
           </Card>

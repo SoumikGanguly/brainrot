@@ -533,14 +533,6 @@ export class UnifiedUsageService {
     return await UsageStatsModule.isUsageAccessGranted();
   }
 
-  static async requestUsageAccess(): Promise<void> {
-    if (!this.isNativeModuleAvailable()) {
-      throw new Error('Usage access only available on Android');
-    }
-
-    await UsageStatsModule.requestUsageAccess();
-  }
-
   static async openUsageAccessSettings(): Promise<void> {
     if (!this.isNativeModuleAvailable()) {
       throw new Error('Usage access settings only available on Android');
@@ -584,6 +576,59 @@ export class UnifiedUsageService {
     }
 
     await UsageStatsModule.requestOverlayPermission();
+  }
+
+  // ========== OEM/MANUFACTURER PERMISSION HELPERS ==========
+
+  static async getManufacturerInfo(): Promise<ManufacturerPermissionInfo | null> {
+    if (!this.isNativeModuleAvailable()) {
+      return null;
+    }
+
+    if (!UsageStatsModule.getManufacturerInfo) {
+      return null;
+    }
+
+    try {
+      return await UsageStatsModule.getManufacturerInfo();
+    } catch (error) {
+      console.error('Error getting manufacturer info:', error);
+      return null;
+    }
+  }
+
+  static async needsSpecialPermission(): Promise<boolean> {
+    if (!this.isNativeModuleAvailable()) {
+      return false;
+    }
+
+    if (!UsageStatsModule.needsSpecialPermission) {
+      return false;
+    }
+
+    try {
+      return await UsageStatsModule.needsSpecialPermission();
+    } catch (error) {
+      console.error('Error checking special permission:', error);
+      return false;
+    }
+  }
+
+  static async openManufacturerSettings(): Promise<boolean> {
+    if (!this.isNativeModuleAvailable()) {
+      return false;
+    }
+
+    if (!UsageStatsModule.openManufacturerSettings) {
+      return false;
+    }
+
+    try {
+      return await UsageStatsModule.openManufacturerSettings();
+    } catch (error) {
+      console.error('Error opening manufacturer settings:', error);
+      return false;
+    }
   }
 
   // Sync monitored apps to native SharedPreferences for background services
@@ -729,4 +774,12 @@ interface InstalledApp {
   packageName: string;
   appName: string;
   isRecommended: boolean;
+}
+
+export interface ManufacturerPermissionInfo {
+  manufacturer: string;
+  needsSpecialPermission: boolean;
+  title: string;
+  instructions: string;
+  canOpenDirectly: boolean;
 }

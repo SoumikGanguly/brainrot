@@ -1,3 +1,5 @@
-# Force EAS Build to run prebuild by excluding native projects
-android/
-ios/
+# NOTE:
+# Do not exclude native projects. This app relies on custom native modules
+# and AndroidManifest entries (UsageStatsModule, overlay services, etc.).
+# Excluding `android/` causes EAS to prebuild a generic project and drop
+# those custom integrations, breaking permission flows.

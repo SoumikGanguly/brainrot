@@ -1,24 +1,27 @@
 {
-  "cli": {
-    "version": ">= 16.18.0",
-    "appVersionSource": "remote"
-  },
-  "build": {
-    "development": {
-      "developmentClient": true,
-      "distribution": "internal"
-    },
-    "preview": {
-      "distribution": "internal",
-      "android": {
-        "image": "latest"
-      }
-    },
-    "production": {
-      "autoIncrement": true
-    }
-  },
-  "submit": {
-    "production": {}
-  }
+	"cli": {
+		"version": ">= 16.18.0",
+		"appVersionSource": "remote"
+	},
+	"build": {
+		"development": {
+			"developmentClient": true,
+			"distribution": "internal",
+			"env": {
+				"EXPO_USE_COMMUNITY_AUTOLINKING": "1"
+			}
+		},
+		"preview": {
+			"distribution": "internal",
+			"android": {
+				"image": "latest"
+			}
+		},
+		"production": {
+			"autoIncrement": true
+		}
+	},
+	"submit": {
+		"production": {}
+	}
 }
