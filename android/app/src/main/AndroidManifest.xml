@@ -86,16 +86,18 @@
       android:stopWithTask="false"
       android:foregroundServiceType="dataSync" />
 
-    <receiver
-      android:name=".BootReceiver"
+    <service
+      android:name=".BrainrotAccessibilityService"
       android:enabled="true"
-      android:exported="true"
-      android:permission="android.permission.RECEIVE_BOOT_COMPLETED">
+      android:exported="false"
+      android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
       <intent-filter>
-        <action android:name="android.intent.action.BOOT_COMPLETED" />
-        <action android:name="android.intent.action.QUICKBOOT_POWERON" />
+        <action android:name="android.accessibilityservice.AccessibilityService" />
       </intent-filter>
-    </receiver>
+      <meta-data
+        android:name="android.accessibilityservice"
+        android:resource="@xml/brainrot_accessibility_service" />
+    </service>
 
     <!-- Existing meta-data -->
     <meta-data android:name="expo.modules.updates.ENABLED" android:value="false"/>

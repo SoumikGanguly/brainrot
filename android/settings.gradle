@@ -22,21 +22,8 @@ plugins {
   id("expo-autolinking-settings")
 }
 
-def useCommunityAutolinking = (
-  System.getenv('EXPO_USE_COMMUNITY_AUTOLINKING')
-    ?: settings.findProperty('EXPO_USE_COMMUNITY_AUTOLINKING')
-    ?: System.getProperty('EXPO_USE_COMMUNITY_AUTOLINKING')
-    ?: '1'
-) == '1'
-
 extensions.configure(com.facebook.react.ReactSettingsExtension) { ex ->
-  // Prefer community autolinking for React Native libraries.
-  // Expo modules are still handled by expoAutolinking.useExpoModules() below.
-  if (useCommunityAutolinking) {
-    ex.autolinkLibrariesFromCommand()
-  } else {
-    ex.autolinkLibrariesFromCommand(expoAutolinking.rnConfigCommand)
-  }
+  ex.autolinkLibrariesFromCommand(expoAutolinking.rnConfigCommand)
 }
 expoAutolinking.useExpoModules()
 

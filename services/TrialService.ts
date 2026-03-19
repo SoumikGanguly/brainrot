@@ -1,4 +1,5 @@
 import { database } from './database';
+import { PurchaseService } from './PurchaseService';
 
 interface TrialInfo {
   isActive: boolean;

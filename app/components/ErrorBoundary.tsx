@@ -1,6 +1,7 @@
 // Create ErrorBoundary.tsx
 import React from 'react';
 import { Text, TouchableOpacity, View } from 'react-native';
+import { TelemetryService } from '../../services/TelemetryService';
 
 interface Props {
   children: React.ReactNode;
@@ -24,7 +25,9 @@ export class ErrorBoundary extends React.Component<Props, State> {
 
   componentDidCatch(error: Error, errorInfo: React.ErrorInfo) {
     console.error('Error caught by boundary:', error, errorInfo);
-    // Log to analytics service
+    TelemetryService.captureException(error, {
+      componentStack: errorInfo.componentStack || 'unknown',
+    });
   }
 
   handleReset = () => {

@@ -9,6 +9,10 @@ import android.os.IBinder
 import android.view.*
 import android.widget.*
 import androidx.core.app.NotificationCompat
+import org.json.JSONObject
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 
 class BlockingOverlayService : Service() {
     private var windowManager: WindowManager? = null
@@ -228,8 +232,7 @@ class BlockingOverlayService : Service() {
                 
                 setOnClickListener {
                     // Open the BrainRot app
-                    val launchIntent = packageManager.getLaunchIntentForPackage(packageName)
-                        ?: packageManager.getLaunchIntentForPackage("com.soumikganguly.brainrot")
+                    val launchIntent = packageManager.getLaunchIntentForPackage(applicationContext.packageName)
                     
                     launchIntent?.let {
                         it.flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
@@ -240,6 +243,28 @@ class BlockingOverlayService : Service() {
                 }
             }
             contentLayout.addView(openAppButton)
+
+            val remainingBypasses = getRemainingBypasses(packageName)
+            if (remainingBypasses > 0) {
+                val bypassButton = Button(this).apply {
+                    text = "Use Bypass ($remainingBypasses left)"
+                    setBackgroundColor(Color.parseColor("#F59E0B"))
+                    setTextColor(Color.WHITE)
+                    layoutParams = LinearLayout.LayoutParams(
+                        LinearLayout.LayoutParams.WRAP_CONTENT,
+                        LinearLayout.LayoutParams.WRAP_CONTENT
+                    ).apply {
+                        topMargin = 8
+                    }
+
+                    setOnClickListener {
+                        grantBypass(packageName)
+                        removeOverlay()
+                        stopSelf()
+                    }
+                }
+                contentLayout.addView(bypassButton)
+            }
             
         } else {
             // For soft block, add dismiss button
@@ -269,6 +294,26 @@ class BlockingOverlayService : Service() {
         })
         
         return frameLayout
+    }
+
+    private fun getRemainingBypasses(packageName: String): Int {
+        val prefs = getSharedPreferences("brainrot_prefs", MODE_PRIVATE)
+        val configString = prefs.getString("blocking_config", "{}") ?: "{}"
+        val bypassLimit = runCatching { JSONObject(configString).optInt("bypassLimit", 0) }.getOrDefault(0)
+        val today = SimpleDateFormat("yyyy-MM-dd", Locale.US).format(Date())
+        val currentCount = prefs.getInt("bypass_count_${packageName}_$today", 0)
+        return (bypassLimit - currentCount).coerceAtLeast(0)
+    }
+
+    private fun grantBypass(packageName: String) {
+        val prefs = getSharedPreferences("brainrot_prefs", MODE_PRIVATE)
+        val today = SimpleDateFormat("yyyy-MM-dd", Locale.US).format(Date())
+        val key = "bypass_count_${packageName}_$today"
+        val currentCount = prefs.getInt(key, 0)
+        prefs.edit()
+            .putInt(key, currentCount + 1)
+            .putLong("bypass_until_$packageName", System.currentTimeMillis() + 5 * 60 * 1000)
+            .apply()
     }
     
     private fun removeOverlay() {

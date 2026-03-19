@@ -320,6 +320,36 @@ class UsageStatsModule(reactContext: ReactApplicationContext) : ReactContextBase
         }
     }
 
+    @ReactMethod
+    fun hasAccessibilityPermission(promise: Promise) {
+        try {
+            val enabled = Settings.Secure.getInt(
+                reactApplicationContext.contentResolver,
+                Settings.Secure.ACCESSIBILITY_ENABLED,
+                0
+            ) == 1
+            val expected = "${reactApplicationContext.packageName}/${BrainrotAccessibilityService::class.java.name}"
+            val services = Settings.Secure.getString(
+                reactApplicationContext.contentResolver,
+                Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES
+            ) ?: ""
+            promise.resolve(enabled && services.contains(expected, ignoreCase = true))
+        } catch (e: Exception) {
+            promise.resolve(false)
+        }
+    }
+
+    @ReactMethod
+    fun openAccessibilitySettings() {
+        try {
+            val intent = Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)
+            intent.flags = Intent.FLAG_ACTIVITY_NEW_TASK
+            reactApplicationContext.startActivity(intent)
+        } catch (e: Exception) {
+            Log.e(TAG, "Error opening accessibility settings", e)
+        }
+    }
+
     // BLOCKING OVERLAY METHODS
     @ReactMethod
     fun showBlockingOverlay(packageName: String, appName: String, blockMode: String, promise: Promise) {
@@ -334,6 +364,7 @@ class UsageStatsModule(reactContext: ReactApplicationContext) : ReactContextBase
             val intent = Intent(reactApplicationContext, BlockingOverlayService::class.java)
             intent.putExtra("blocked_app", appName)
             intent.putExtra("block_mode", blockMode)
+            intent.putExtra("package_name", packageName)
             
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                 reactApplicationContext.startForegroundService(intent)
@@ -415,6 +446,17 @@ class UsageStatsModule(reactContext: ReactApplicationContext) : ReactContextBase
         } catch (e: Exception) {
             Log.e(TAG, "Error syncing monitored apps", e)
             promise.reject("SYNC_ERROR", e.message)
+        }
+    }
+
+    @ReactMethod
+    fun syncBlockingConfig(blockingConfigJson: String, promise: Promise) {
+        try {
+            val prefs = reactApplicationContext.getSharedPreferences("brainrot_prefs", Context.MODE_PRIVATE)
+            prefs.edit().putString("blocking_config", blockingConfigJson).apply()
+            promise.resolve(true)
+        } catch (e: Exception) {
+            promise.reject("SYNC_BLOCKING_ERROR", e.message)
         }
     }
 

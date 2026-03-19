@@ -17,32 +17,37 @@ import com.facebook.react.soloader.OpenSourceMergedSoMapping
 import com.facebook.soloader.SoLoader
 
 import expo.modules.ApplicationLifecycleDispatcher
-import expo.modules.ReactNativeHostWrapper
+import expo.modules.ExpoReactHostFactory
 
 class MainApplication : Application(), ReactApplication, WorkConfiguration.Provider {
+  private val appPackageList: List<ReactPackage> by lazy {
+    PackageList(this).packages.apply {
+      add(UsageStatsPackage())
+    }
+  }
+  private val jsEntryPath = ".expo/.virtual-metro-entry"
 
-  override val reactNativeHost: ReactNativeHost = ReactNativeHostWrapper(
-        this,
-        object : DefaultReactNativeHost(this) {
-          override fun getPackages(): List<ReactPackage> {
-            val packages = PackageList(this).packages
-            // Packages that cannot be autolinked yet can be added manually here, for example:
-            // packages.add(MyReactNativePackage())
-            packages.add(UsageStatsPackage())
-            return packages
-          }
-
-          override fun getJSMainModuleName(): String = ".expo/.virtual-metro-entry"
-
-          override fun getUseDeveloperSupport(): Boolean = BuildConfig.DEBUG
-
-          override val isNewArchEnabled: Boolean = BuildConfig.IS_NEW_ARCHITECTURE_ENABLED
-          override val isHermesEnabled: Boolean = BuildConfig.IS_HERMES_ENABLED
+  override val reactNativeHost: ReactNativeHost =
+    object : DefaultReactNativeHost(this) {
+      override fun getPackages(): List<ReactPackage> {
+        return appPackageList
       }
-  )
+
+      override fun getJSMainModuleName(): String = jsEntryPath
+
+      override fun getUseDeveloperSupport(): Boolean = BuildConfig.DEBUG
+
+      override val isNewArchEnabled: Boolean = BuildConfig.IS_NEW_ARCHITECTURE_ENABLED
+      override val isHermesEnabled: Boolean = BuildConfig.IS_HERMES_ENABLED
+    }
 
   override val reactHost: ReactHost
-    get() = ReactNativeHostWrapper.createReactHost(applicationContext, reactNativeHost)
+    get() = ExpoReactHostFactory.getDefaultReactHost(
+      context = applicationContext,
+      packageList = appPackageList,
+      jsMainModulePath = jsEntryPath,
+      useDevSupport = BuildConfig.DEBUG
+    )
 
   // WorkManager configuration
   override fun getWorkManagerConfiguration(): WorkConfiguration {

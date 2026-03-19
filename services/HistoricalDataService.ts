@@ -11,196 +11,85 @@ export class HistoricalDataService {
     return this.instance;
   }
 
-  // Save today's monitored summary at end of day
-  async saveTodaySummary(): Promise<void> {
+  async rebuildSummaryForDate(
+    dateStr: string,
+    options: { force?: boolean } = {}
+  ): Promise<boolean> {
     try {
-      const today = new Date().toISOString().split('T')[0];
-      console.log(`Saving daily summary for ${today}`);
-      
-      // Check if summary already exists
-      const existingSummary = await database.getDailySummary(today);
-      if (existingSummary) {
-        console.log('Daily summary already exists for', today);
-        return;
+      const { force = false } = options;
+      console.log(`Rebuilding daily summary for ${dateStr}`);
+
+      if (!force) {
+        const existingSummary = await database.getDailySummary(dateStr);
+        if (existingSummary) {
+          return true;
+        }
       }
 
-      // Get monitored apps from app_settings first, then fallback to meta
-      let monitoredPackages: string[] = [];
-      
-      try {
-        const appSettings = await database.getAppSettings();
-        const monitoredFromSettings = appSettings
-          .filter(setting => setting.monitored)
-          .map(setting => setting.packageName);
-        
-        if (monitoredFromSettings.length > 0) {
-          monitoredPackages = monitoredFromSettings;
-          console.log(`Using ${monitoredPackages.length} monitored apps from app_settings`);
-        }
-      } catch  {
-        console.log('Could not load from app_settings, trying meta');
+      const monitoredPackages = await database.getMonitoredPackages();
+      const rawUsage = await database.getDailyUsage(dateStr);
+
+      if (rawUsage.length === 0) {
+        console.log(`No raw usage data for ${dateStr}, skipping summary rebuild`);
+        return false;
       }
-      
-      // Fallback to meta if app_settings is empty
-      if (monitoredPackages.length === 0) {
-        try {
-          const monitoredMeta = await database.getMeta('monitored_apps');
-          monitoredPackages = monitoredMeta ? JSON.parse(monitoredMeta) : [];
-          console.log(`Using ${monitoredPackages.length} monitored apps from meta`);
-        } catch  {
-          console.log('Could not load monitored apps from meta either');
-        }
-      }
-      
-      // Get today's raw usage data
-      const todayRawUsage = await database.getDailyUsage(today);
-      console.log(`Found ${todayRawUsage.length} raw usage entries for ${today}`);
-      
-      if (todayRawUsage.length === 0) {
-        console.log('No raw usage data for today, skipping summary save');
-        return;
-      }
-      
-      // Filter to monitored apps only and exclude the app itself
+
       const monitoredSet = new Set(monitoredPackages);
       monitoredSet.delete('com.soumikganguly.brainrot');
-      
-      let monitoredUsage;
-      
-      // If no monitored apps configured, use all apps (excluding self)
-      // This handles the case where onboarding wasn't completed
-      if (monitoredSet.size === 0) {
-        console.warn('No monitored apps configured, using all apps for summary');
-        monitoredUsage = todayRawUsage.filter(app => 
-          app.packageName !== 'com.soumikganguly.brainrot'
-        );
-      } else {
-        monitoredUsage = todayRawUsage.filter(app => 
-          monitoredSet.has(app.packageName)
-        );
-      }
-
-      console.log(`Filtered to ${monitoredUsage.length} monitored app entries`);
-
+      const monitoredUsage = (monitoredSet.size === 0
+        ? rawUsage.filter(app => app.packageName !== 'com.soumikganguly.brainrot')
+        : rawUsage.filter(app => monitoredSet.has(app.packageName))
+      ).map(app => ({
+        packageName: app.packageName,
+        appName: app.appName,
+        totalTimeMs: app.totalTimeMs,
+        date: dateStr,
+      }));
       const totalScreenTime = monitoredUsage.reduce((sum, app) => sum + app.totalTimeMs, 0);
       const brainScore = calculateBrainScore(totalScreenTime);
 
       const summary = {
-        date: today,
+        date: dateStr,
         totalScreenTime,
         brainScore,
-        apps: monitoredUsage.map(app => ({
-          packageName: app.packageName,
-          appName: app.appName,
-          totalTimeMs: app.totalTimeMs,
-          date: today // Fix: Ensure date is set correctly
-        }))
+        apps: monitoredUsage
       };
 
-      await database.saveDailySummary(today, summary);
-      console.log(`Saved daily summary for ${today}: ${Math.round(totalScreenTime/60000)}min, score ${brainScore}`);
-      
+      await database.saveDailySummary(dateStr, summary);
+      return true;
     } catch (error) {
-      console.error('Error saving daily summary:', error);
+      console.error(`Error rebuilding summary for ${dateStr}:`, error);
+      return false;
     }
   }
 
-  // Backfill missing historical summaries
+  async saveTodaySummary(): Promise<void> {
+    const today = new Date().toISOString().split('T')[0];
+    await this.rebuildSummaryForDate(today);
+  }
+
   async backfillHistoricalData(days: number = 30): Promise<void> {
     console.log(`Starting backfill for last ${days} days...`);
-    
     let summariesCreated = 0;
     let summariesSkipped = 0;
     let errors = 0;
-    
+
     for (let i = 0; i < days; i++) {
       const date = new Date();
       date.setDate(date.getDate() - i);
       const dateStr = date.toISOString().split('T')[0];
-      
+
       try {
-        // Check if summary exists
         const existingSummary = await database.getDailySummary(dateStr);
         if (existingSummary) {
           summariesSkipped++;
           continue;
         }
 
-        // Get raw data for this date
-        const rawUsage = await database.getDailyUsage(dateStr);
-        if (rawUsage.length === 0) {
-          console.log(`No raw usage data for ${dateStr}, skipping`);
-          continue;
+        const rebuilt = await this.rebuildSummaryForDate(dateStr, { force: true });
+        if (rebuilt) {
+          summariesCreated++;
         }
-
-        // Get monitored apps (current list - limitation of backfill)
-        let monitoredPackages: string[] = [];
-        
-        // Try app_settings first
-        try {
-          const appSettings = await database.getAppSettings();
-          const monitoredFromSettings = appSettings
-            .filter(setting => setting.monitored)
-            .map(setting => setting.packageName);
-          
-          if (monitoredFromSettings.length > 0) {
-            monitoredPackages = monitoredFromSettings;
-          }
-        } catch  {
-          console.log(`Could not load app_settings for ${dateStr}`);
-        }
-        
-        // Fallback to meta
-        if (monitoredPackages.length === 0) {
-          try {
-            const monitoredMeta = await database.getMeta('monitored_apps');
-            monitoredPackages = monitoredMeta ? JSON.parse(monitoredMeta) : [];
-          } catch  {
-            console.log(`Could not load meta for ${dateStr}`);
-          }
-        }
-        
-        const monitoredSet = new Set(monitoredPackages);
-        monitoredSet.delete('com.soumikganguly.brainrot');
-
-        let monitoredUsage;
-        
-        // If no monitored apps configured, use all apps (excluding self)
-        if (monitoredSet.size === 0) {
-          console.warn(`No monitored apps configured for ${dateStr}, using all apps`);
-          monitoredUsage = rawUsage.filter(app => 
-            app.packageName !== 'com.soumikganguly.brainrot'
-          );
-        } else {
-          monitoredUsage = rawUsage.filter(app => 
-            monitoredSet.has(app.packageName)
-          );
-        }
-
-        if (monitoredUsage.length === 0) {
-          console.log(`No app usage for ${dateStr}, skipping`);
-          continue;
-        }
-
-        const totalScreenTime = monitoredUsage.reduce((sum, app) => sum + app.totalTimeMs, 0);
-        const brainScore = calculateBrainScore(totalScreenTime);
-
-        const summary = {
-          date: dateStr,
-          totalScreenTime,
-          brainScore,
-          apps: monitoredUsage.map(app => ({
-            packageName: app.packageName,
-            appName: app.appName,
-            totalTimeMs: app.totalTimeMs,
-            date: dateStr // Fix: Use the correct date for each entry
-          }))
-        };
-
-        await database.saveDailySummary(dateStr, summary);
-        summariesCreated++;
-        console.log(`Backfilled summary for ${dateStr} - ${Math.round(totalScreenTime/60000)}min, score ${brainScore}`);
-        
       } catch (error) {
         console.error(`Error backfilling ${dateStr}:`, error);
         errors++;
@@ -213,81 +102,7 @@ export class HistoricalDataService {
   // Method to force refresh a specific date's summary
   async refreshDailySummary(dateStr: string): Promise<boolean> {
     try {
-      console.log(`Force refreshing summary for ${dateStr}`);
-      
-      // Delete existing summary if it exists
-      await database.setMeta(`daily_summary_${dateStr}`, ''); // Clear it
-      
-      // Get current date for reference
-      const currentDateStr = new Date().toISOString().split('T')[0];
-      
-      if (dateStr === currentDateStr) {
-        // For today, use the standard save method
-        await this.saveTodaySummary();
-      } else {
-        // For past dates, use backfill logic for that specific date
-        const rawUsage = await database.getDailyUsage(dateStr);
-        
-        if (rawUsage.length === 0) {
-          console.log(`No raw usage data for ${dateStr}`);
-          return false;
-        }
-
-        // Get current monitored apps
-        let monitoredPackages: string[] = [];
-        
-        try {
-          const appSettings = await database.getAppSettings();
-          const monitoredFromSettings = appSettings
-            .filter(setting => setting.monitored)
-            .map(setting => setting.packageName);
-          
-          if (monitoredFromSettings.length > 0) {
-            monitoredPackages = monitoredFromSettings;
-          }
-        } catch {
-          const monitoredMeta = await database.getMeta('monitored_apps');
-          monitoredPackages = monitoredMeta ? JSON.parse(monitoredMeta) : [];
-        }
-
-        const monitoredSet = new Set(monitoredPackages);
-        monitoredSet.delete('com.soumikganguly.brainrot');
-
-        let monitoredUsage;
-        
-        // If no monitored apps configured, use all apps (excluding self)
-        if (monitoredSet.size === 0) {
-          console.warn('No monitored apps configured, using all apps for refresh');
-          monitoredUsage = rawUsage.filter(app => 
-            app.packageName !== 'com.soumikganguly.brainrot'
-          );
-        } else {
-          monitoredUsage = rawUsage.filter(app => 
-            monitoredSet.has(app.packageName)
-          );
-        }
-
-        const totalScreenTime = monitoredUsage.reduce((sum, app) => sum + app.totalTimeMs, 0);
-        const brainScore = calculateBrainScore(totalScreenTime);
-
-        const summary = {
-          date: dateStr,
-          totalScreenTime,
-          brainScore,
-          apps: monitoredUsage.map(app => ({
-            packageName: app.packageName,
-            appName: app.appName,
-            totalTimeMs: app.totalTimeMs,
-            date: dateStr
-          }))
-        };
-
-        await database.saveDailySummary(dateStr, summary);
-      }
-      
-      console.log(`Successfully refreshed summary for ${dateStr}`);
-      return true;
-      
+      return await this.rebuildSummaryForDate(dateStr, { force: true });
     } catch (error) {
       console.error(`Error refreshing summary for ${dateStr}:`, error);
       return false;

@@ -11,7 +11,6 @@ import { database } from '../../services/database';
 
 import { BrainScoreService } from '@/services/BrainScore';
 import { DataSyncService } from '@/services/DataSyncService';
-import { HistoricalDataService } from '@/services/HistoricalDataService';
 import { ManufacturerPermissionInfo, UnifiedUsageService } from '@/services/UnifiedUsageService';
 import { calculateBrainScore, getScoreColor, getScoreLabel } from '../../utils/brainScore';
 import { formatTime, formatTimeDetailed } from '../../utils/time';
@@ -121,14 +120,9 @@ export default function Calendar() {
         const hasPermission = await UnifiedUsageService.isUsageAccessGranted();
         if (hasPermission) {
           try {
-            // Sync latest usage data
             const syncService = DataSyncService.getInstance();
             await syncService.syncUsageData();
-            
-            // Also save today's summary immediately
-            const historicalService = HistoricalDataService.getInstance();
-            await historicalService.saveTodaySummary();
-            
+
             console.log('Calendar: Synced today\'s data from native');
           } catch (syncError) {
             console.warn('Calendar: Failed to sync data:', syncError);
@@ -314,12 +308,16 @@ export default function Calendar() {
             <TouchableOpacity 
               onPress={() => navigateMonth('next')}
               className="p-sm"
-              disabled={currentMonth.getMonth() >= new Date().getMonth()}
+              disabled={currentMonth >= new Date(new Date().getFullYear(), new Date().getMonth(), 1)}
             >
               <Ionicons 
                 name="chevron-forward" 
                 size={24} 
-                color={currentMonth.getMonth() >= new Date().getMonth() ? "#9CA3AF" : "#4F46E5"} 
+                color={
+                  currentMonth >= new Date(new Date().getFullYear(), new Date().getMonth(), 1)
+                    ? "#9CA3AF"
+                    : "#4F46E5"
+                } 
               />
             </TouchableOpacity>
           </View>

@@ -261,6 +261,7 @@ export class UnifiedUsageService {
   async startMonitoring(): Promise<void> {
     if (this.isMonitoring) {
       console.log('Monitoring already active');
+      await this.applyMonitoringSettings();
       return;
     }
 
@@ -270,11 +271,7 @@ export class UnifiedUsageService {
     // Save monitoring state
     await database.setMeta('monitoring_enabled', 'true');
 
-    // Start background monitoring (every 30 seconds)
-    this.startBackgroundMonitoring();
-
-    // Start native realtime detection if available
-    await this.startRealtimeDetection();
+    await this.applyMonitoringSettings();
 
     console.log('Usage monitoring started');
   }
@@ -295,6 +292,23 @@ export class UnifiedUsageService {
     await database.setMeta('monitoring_enabled', 'false');
 
     console.log('Usage monitoring stopped');
+  }
+
+  async applyMonitoringSettings(): Promise<void> {
+    const backgroundChecksEnabled = (await database.getMeta('background_checks_enabled')) !== 'false';
+    const realtimeMonitoringEnabled = (await database.getMeta('realtime_monitoring_enabled')) === 'true';
+
+    if (this.isMonitoring && backgroundChecksEnabled) {
+      this.startBackgroundMonitoring();
+    } else {
+      this.stopBackgroundMonitoring();
+    }
+
+    if (this.isMonitoring && realtimeMonitoringEnabled) {
+      await this.startRealtimeDetection();
+    } else {
+      await this.stopRealtimeDetection();
+    }
   }
 
   // Comprehensive monitoring methods for compatibility
@@ -354,7 +368,7 @@ export class UnifiedUsageService {
   private async checkUsageAndNotify(): Promise<void> {
     try {
       // Check if notifications are snoozed
-      const snoozeUntilStr = await database.getMeta('notifications_snoozed_until');
+      const snoozeUntilStr = await database.getMeta('notifications_snooze_until');
       const snoozeUntil = snoozeUntilStr ? parseInt(snoozeUntilStr) : 0;
       if (Date.now() < snoozeUntil) {
         return;
@@ -471,12 +485,6 @@ export class UnifiedUsageService {
         await this.checkThresholdsForApp(tracker);
       }
 
-      // Trigger blocking check via coordinator
-      const ServiceCoordinator = (await import('./ServiceCoordinator')).ServiceCoordinator;
-      const coordinator = ServiceCoordinator.getInstance();
-      // Call the public method instead of private
-      await coordinator.triggerManualCheck(packageName);
-
     } catch (error) {
       console.error('Error checking specific app usage:', error);
     }
@@ -578,6 +586,22 @@ export class UnifiedUsageService {
     await UsageStatsModule.requestOverlayPermission();
   }
 
+  static async hasAccessibilityPermission(): Promise<boolean> {
+    if (!this.isNativeModuleAvailable() || !UsageStatsModule.hasAccessibilityPermission) {
+      return false;
+    }
+
+    return await UsageStatsModule.hasAccessibilityPermission();
+  }
+
+  static async openAccessibilitySettings(): Promise<void> {
+    if (!this.isNativeModuleAvailable() || !UsageStatsModule.openAccessibilitySettings) {
+      throw new Error('Accessibility settings only available on Android');
+    }
+
+    await UsageStatsModule.openAccessibilitySettings();
+  }
+
   // ========== OEM/MANUFACTURER PERMISSION HELPERS ==========
 
   static async getManufacturerInfo(): Promise<ManufacturerPermissionInfo | null> {
@@ -645,6 +669,20 @@ export class UnifiedUsageService {
       return true;
     } catch (error) {
       console.error('Error syncing monitored apps to native:', error);
+      return false;
+    }
+  }
+
+  static async syncBlockingConfigToNative(config: BlockingConfigPayload): Promise<boolean> {
+    if (!this.isNativeModuleAvailable() || !UsageStatsModule.syncBlockingConfig) {
+      return false;
+    }
+
+    try {
+      await UsageStatsModule.syncBlockingConfig(JSON.stringify(config));
+      return true;
+    } catch (error) {
+      console.error('Error syncing blocking config to native:', error);
       return false;
     }
   }
@@ -782,4 +820,15 @@ export interface ManufacturerPermissionInfo {
   title: string;
   instructions: string;
   canOpenDirectly: boolean;
+}
+
+export interface BlockingConfigPayload {
+  monitoredApps: string[];
+  blockedApps: string[];
+  blockingEnabled: boolean;
+  blockingMode: 'soft' | 'hard';
+  bypassLimit: number;
+  scheduleEnabled: boolean;
+  scheduleStart: string;
+  scheduleEnd: string;
 }

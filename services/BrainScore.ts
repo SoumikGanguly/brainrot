@@ -1,5 +1,5 @@
 import { calculateBrainScore } from '../utils/brainScore';
-import { database } from './database';
+import { database, type UsageData } from './database';
 import { UnifiedUsageService } from './UnifiedUsageService';
 
 interface BrainScoreResult {
@@ -19,10 +19,6 @@ export class BrainScoreService {
   // In-memory cache
   private cache = new Map<string, { data: BrainScoreResult; timestamp: number }>();
   private cacheValidityMs = 60000; // 1 minute
-  
-  // Monitored packages cache
-  private monitoredPackagesCache: { packages: string[]; timestamp: number } | null = null;
-  private monitoredCacheValidityMs = 300000; // 5 minutes
   
   static getInstance(): BrainScoreService {
     if (!this.instance) {
@@ -110,7 +106,7 @@ export class BrainScoreService {
     }
     
     // Get monitored apps (try app_settings first, then meta)
-    const monitoredPackages = await this.getMonitoredPackages();
+    const monitoredPackages = await database.getMonitoredPackages();
     
     // Create Set for O(1) lookup
     const monitoredSet = new Set(monitoredPackages);
@@ -147,11 +143,7 @@ export class BrainScoreService {
    * Only works for TODAY - Android's UsageStats API returns cumulative data
    * from startTime to now, so we can't reliably get data for past dates.
    */
-  private async tryFetchFromNative(dateStr: string): Promise<{
-    packageName: string;
-    appName: string;
-    totalTimeMs: number;
-  }[]> {
+  private async tryFetchFromNative(dateStr: string): Promise<UsageData[]> {
     try {
       // Only works for today - past dates would return incorrect cumulative data
       const today = new Date().toISOString().split('T')[0];
@@ -180,38 +172,11 @@ export class BrainScoreService {
       return nativeUsage.map(app => ({
         packageName: app.packageName,
         appName: app.appName,
-        totalTimeMs: app.totalTimeMs
+        totalTimeMs: app.totalTimeMs,
+        date: dateStr
       }));
     } catch (error) {
       console.warn(`Native fallback failed for ${dateStr}:`, error);
-      return [];
-    }
-  }
-  
-  /**
-   * Get monitored packages - consistent lookup order
-   */
-  private async getMonitoredPackages(): Promise<string[]> {
-    // Try app_settings first
-    try {
-      const settings = await database.getAppSettings();
-      const monitored = settings
-        .filter(s => s.monitored)
-        .map(s => s.packageName);
-      
-      if (monitored.length > 0) {
-        return monitored;
-      }
-    } catch (error) {
-      console.warn('Failed to load from app_settings:', error);
-    }
-    
-    // Fallback to meta
-    try {
-      const meta = await database.getMeta('monitored_apps');
-      return meta ? JSON.parse(meta) : [];
-    } catch (error) {
-      console.warn('Failed to load from meta:', error);
       return [];
     }
   }

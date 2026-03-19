@@ -87,7 +87,12 @@ export class DailyResetService {
       // Step 1: Save yesterday's summary before resetting
       console.log('Step 1: Saving yesterday\'s summary...');
       const historicalService = HistoricalDataService.getInstance();
-      await historicalService.saveTodaySummary();
+      const yesterday = new Date();
+      yesterday.setDate(yesterday.getDate() - 1);
+      await historicalService.rebuildSummaryForDate(
+        yesterday.toISOString().split('T')[0],
+        { force: true }
+      );
       
       // Step 2: Reset monitoring service tracking
       console.log('Step 2: Resetting monitoring service...');

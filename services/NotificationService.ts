@@ -3,6 +3,7 @@ import { Platform } from 'react-native';
 import { database } from './database';
 
 export class NotificationService {
+  private static initialized = false;
   private static notificationTemplates = {
     mild: [
       "Heads up — you've used {app} for {timeToday}. Consider a break.",
@@ -24,16 +25,7 @@ export class NotificationService {
 
   static async initialize(): Promise<void> {
     try {
-      const { status: existingStatus } = await Notifications.getPermissionsAsync();
-      let finalStatus = existingStatus;
-
-      if (existingStatus !== 'granted') {
-        const { status } = await Notifications.requestPermissionsAsync();
-        finalStatus = status;
-      }
-
-      if (finalStatus !== 'granted') {
-        console.warn('Notification permissions not granted');
+      if (this.initialized) {
         return;
       }
 
@@ -48,18 +40,29 @@ export class NotificationService {
 
       Notifications.setNotificationHandler({
         handleNotification: async () => ({
-            shouldShowBanner: true,
-            shouldShowList: true,
-            shouldSetBadge: true,
-            shouldPlaySound: true,
+          shouldShowBanner: true,
+          shouldShowList: true,
+          shouldSetBadge: true,
+          shouldPlaySound: true,
         }),
       });
 
+      this.initialized = true;
     } catch (error) {
       console.error('Error initializing notifications:', error);
     }
   }
 
+  static async hasPermission(): Promise<boolean> {
+    const { status } = await Notifications.getPermissionsAsync();
+    return status === 'granted';
+  }
+
+  static async requestPermission(): Promise<boolean> {
+    await this.initialize();
+    const { status } = await Notifications.requestPermissionsAsync();
+    return status === 'granted';
+  }
 
   static async scheduleUsageAlert(
     appName: string,
@@ -70,6 +73,10 @@ export class NotificationService {
       // Check if notifications are enabled
       const notificationsEnabled = await database.getMeta('notifications_enabled');
       if (notificationsEnabled === 'false') return;
+
+      if (!(await this.hasPermission())) {
+        return;
+      }
 
       // Check cooldown
       const lastNotificationKey = `last_notification_${appName}_${intensity}`;

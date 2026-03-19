@@ -1,4 +1,5 @@
-import { calculateBrainScore } from '../utils/brainScore';
+import { BrainScoreService } from './BrainScore';
+import { HistoricalDataService } from './HistoricalDataService';
 import { UsageService } from './UsageService';
 import { database, UsageData as DatabaseUsageData } from './database';
 
@@ -22,57 +23,22 @@ export class DataSyncService {
   
   async syncUsageData(): Promise<void> {
     try {
-      // 1. Fetch raw usage from native
       const rawUsage = await UsageService.getTodayUsage();
-      
-      // 2. Get monitored apps list
-      const monitoredMeta = await database.getMeta('monitored_apps');
-      const monitoredPackages: string[] = monitoredMeta ? JSON.parse(monitoredMeta) : [];
-      
-      // 3. Process and deduplicate
       const deduped = this.deduplicateUsage(rawUsage);
-      
-      // 4. Get today's date
       const today = new Date().toISOString().split('T')[0];
-      
-      // 5. Convert to database format (add date property)
       const dbFormatted: DatabaseUsageData[] = deduped.map(app => ({
         packageName: app.packageName,
         appName: app.appName,
         totalTimeMs: app.totalTimeMs,
         date: today
       }));
-      
-      // 6. Save raw data (for calendar/backups)
+
       await database.saveDailyUsage(today, dbFormatted);
-      
-      // 7. Compute monitored-only summary (or all apps if no monitored apps configured)
-      let appsForSummary: DatabaseUsageData[];
-      if (monitoredPackages.length === 0) {
-        // No monitored apps configured - use all apps except self
-        console.warn('No monitored apps configured, using all apps for summary');
-        appsForSummary = dbFormatted.filter(app => 
-          app.packageName !== 'com.soumikganguly.brainrot'
-        );
-      } else {
-        appsForSummary = dbFormatted.filter(app => 
-          monitoredPackages.includes(app.packageName) && 
-          app.packageName !== 'com.soumikganguly.brainrot'
-        );
-      }
-      
-      const totalMs = appsForSummary.reduce((sum, app) => sum + app.totalTimeMs, 0);
-      const score = calculateBrainScore(totalMs);
-      
-      // 8. Save summary
-      await database.saveDailySummary(today, {
-        date: today,
-        totalScreenTime: totalMs,
-        brainScore: score,
-        apps: appsForSummary
-      });
-      
-      console.log(`Synced: ${dbFormatted.length} total, ${appsForSummary.length} for summary`);
+
+      await HistoricalDataService.getInstance().rebuildSummaryForDate(today, { force: true });
+      BrainScoreService.getInstance().invalidateCache(today);
+
+      console.log(`Synced ${dbFormatted.length} total app entries for ${today}`);
     } catch (error) {
       console.error('Error syncing usage data:', error);
     }

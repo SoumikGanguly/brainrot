@@ -7,6 +7,7 @@ import { PrimaryButton, SecondaryButton } from '../../components/Buttons';
 import { Card } from '../../components/Card';
 import { Toggle } from '../../components/Toggle';
 import { TrialService } from '../../services/TrialService';
+import { MonitoredAppsService } from '../../services/MonitoredAppsService';
 import { ManufacturerPermissionInfo, UnifiedUsageService } from '../../services/UnifiedUsageService';
 import { UsageService } from '../../services/UsageService';
 import { database } from '../../services/database';
@@ -136,36 +137,20 @@ export default function OnboardingScreen() {
 
   const finishOnboarding = async () => {
     try {
-      // Get list of monitored package names
-      const monitoredPackageNames = monitoredApps
-        .filter(app => app.monitored)
-        .map(app => app.packageName);
-
-      // Save monitored apps as JSON array (this is what services expect)
-      await database.setMeta('monitored_apps', JSON.stringify(monitoredPackageNames));
-
-      // Sync monitored apps to native SharedPreferences for background services
-      await UnifiedUsageService.syncMonitoredAppsToNative(monitoredPackageNames);
-
-      // Also save individual app settings for backward compatibility
-      for (const app of monitoredApps) {
-        await database.setMeta(`app_monitored_${app.packageName}`, app.monitored.toString());
-        
-        // Save to app_settings table as well
-        await database.updateAppSettings({
+      await MonitoredAppsService.getInstance().replaceMonitoredApps(
+        monitoredApps.map((app) => ({
           packageName: app.packageName,
           appName: app.appName,
           monitored: app.monitored,
-          dailyLimitMs: 2 * 60 * 60 * 1000 // 2 hours default
-        });
-      }
+        }))
+      );
 
       // Start trial
       await TrialService.startTrial();
 
       // Enable monitoring by default
       await database.setMeta('monitoring_enabled', 'true');
-      await database.setMeta('notifications_enabled', 'true');
+      await database.setMeta('notifications_enabled', 'false');
 
       // Mark onboarding as complete
       await database.setMeta('onboarding_completed', 'true');
@@ -187,8 +172,8 @@ export default function OnboardingScreen() {
               <Text className="text-4xl mb-md">🧠</Text>
               <Text className="text-2xl font-bold text-text mb-sm">Welcome to Brainrot</Text>
               <Text className="text-base text-muted text-center leading-6">
-                Brainrot helps you see how apps affect your focus. We keep data on your device. 
-                No servers. No judgement.
+                Brainrot helps you see how apps affect your focus. Your usage history stays on your device,
+                and optional diagnostics can be controlled later in Settings.
               </Text>
             </View>
             <PrimaryButton 

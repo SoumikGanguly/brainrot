@@ -1,44 +1,82 @@
 import * as Sentry from '@sentry/react-native';
 import { useFonts } from 'expo-font';
-import { Stack } from 'expo-router';
+import { Redirect, Stack, useSegments } from 'expo-router';
 import { StatusBar } from 'expo-status-bar';
+import { useEffect, useRef, useState } from 'react';
 import 'react-native-reanimated';
 import "../global.css";
-
-
-Sentry.init({
-  dsn: 'https://9b34110d63c83e3c44cf92f42fd015fa@o4507884823445504.ingest.de.sentry.io/4510183511818320',
-
-  // Adds more context data to events (IP address, cookies, user, etc.)
-  // For more information, visit: https://docs.sentry.io/platforms/react-native/data-management/data-collected/
-  sendDefaultPii: true,
-
-  // Enable Logs
-  enableLogs: true,
-
-  // Configure Session Replay
-  replaysSessionSampleRate: 0.1,
-  replaysOnErrorSampleRate: 1,
-  integrations: [Sentry.mobileReplayIntegration(), Sentry.feedbackIntegration()],
-
-  // uncomment the line below to enable Spotlight (https://spotlightjs.com)
-  // spotlight: __DEV__,
-});
+import { database } from '../services/database';
+import { TelemetryService } from '../services/TelemetryService';
 
 export default Sentry.wrap(function RootLayout() {
   const [loaded] = useFonts({
     SpaceMono: require('../assets/fonts/SpaceMono-Regular.ttf'),
   });
+  const [onboardingComplete, setOnboardingComplete] = useState<boolean | null>(null);
+  const segments = useSegments();
+  const lastTrackedScreenRef = useRef<string | null>(null);
 
-  if (!loaded) {
-    // Async font loading only occurs in development.
+  useEffect(() => {
+    let isMounted = true;
+
+    TelemetryService.initialize().catch((error) => {
+      console.warn('Failed to initialize telemetry:', error);
+    });
+
+    database
+      .getMeta('onboarding_completed')
+      .then((value) => {
+        if (isMounted) {
+          setOnboardingComplete(value === 'true');
+        }
+      })
+      .catch(() => {
+        if (isMounted) {
+          setOnboardingComplete(false);
+        }
+      });
+
+    return () => {
+      isMounted = false;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!loaded || onboardingComplete === null) {
+      return;
+    }
+
+    const routeName = segments.length > 0 ? `/${segments.join('/')}` : '/';
+    if (lastTrackedScreenRef.current === routeName) {
+      return;
+    }
+
+    lastTrackedScreenRef.current = routeName;
+    void TelemetryService.screen(routeName, {
+      route_segments: segments,
+    });
+  }, [loaded, onboardingComplete, segments]);
+
+  if (!loaded || onboardingComplete === null) {
     return null;
+  }
+
+  const inOnboarding = segments[0] === 'onboarding';
+  if (!onboardingComplete && !inOnboarding) {
+    return <Redirect href="/onboarding" />;
+  }
+
+  if (onboardingComplete && inOnboarding) {
+    return <Redirect href="/" />;
   }
 
   return (
     <>
       <Stack>
         <Stack.Screen name="(tabs)" options={{ headerShown: false }} />
+        <Stack.Screen name="onboarding" options={{ headerShown: false }} />
+        <Stack.Screen name="privacy-policy" options={{ title: 'Privacy Policy' }} />
+        <Stack.Screen name="terms" options={{ title: 'Terms of Service' }} />
         <Stack.Screen name="+not-found" />
       </Stack>
       <StatusBar style="auto" />

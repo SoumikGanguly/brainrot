@@ -14,7 +14,6 @@ import { TrialService } from '../../services/TrialService';
 
 import { DailyResetService } from '@/services/DailyResetService';
 import { HistoricalDataService } from '@/services/HistoricalDataService';
-import { UsageMonitoringService } from '@/services/UsageMonitoringService';
 import { getBrainScoreStatus } from '../../utils/brainScore';
 import { formatTime } from '../../utils/time';
 
@@ -75,12 +74,7 @@ export default function HomeScreen() {
           console.log('✓ Historical data backfilled');
         }
         
-        // 4. Initialize service coordinator (connects monitoring and blocking)
-        const coordinator = (await import('@/services/ServiceCoordinator')).ServiceCoordinator.getInstance();
-        await coordinator.initialize();
-        console.log('✓ Service coordinator initialized');
-        
-        // 5. Initialize daily reset service
+        // 4. Initialize daily reset service
         const dailyResetService = DailyResetService.getInstance();
         dailyResetService.initialize();
         console.log('✓ Daily reset service initialized');
@@ -97,7 +91,7 @@ export default function HomeScreen() {
           console.warn('Failed to sync monitored apps to native:', syncError);
         }
         
-        // 6. Clean up duplicates once
+        // 5. Clean up duplicates once
         await database.cleanupDuplicateEntries();
         console.log('✓ Database cleanup completed');
         
@@ -153,12 +147,12 @@ export default function HomeScreen() {
         }
         
         // Refresh monitoring when app comes to foreground
-        const monitoringService = UsageMonitoringService.getInstance();
+        const monitoringService = UnifiedUsageService.getInstance();
         await monitoringService.startMonitoring();
         
         // Refresh blocking service
         const blockingService = AppBlockingService.getInstance();
-        await blockingService.initialize(); // This will reload settings and blocked apps
+        await blockingService.initialize();
         
         // Trigger immediate usage check
         setTimeout(() => {
@@ -300,37 +294,6 @@ export default function HomeScreen() {
   // };
 
   // Add this as a new function in your HomeScreen
-  
-  const saveCurrentUsageData = async () => {
-    try {
-      if (UnifiedUsageService.isNativeModuleAvailable()) {
-        const hasPermission = await UnifiedUsageService.isUsageAccessGranted();
-        if (hasPermission) {
-          const todayUsage = await UnifiedUsageService.getTodayUsage();
-          if (todayUsage.length > 0) {
-            const today = new Date().toISOString().split('T')[0];
-            const dbUsageData = todayUsage.map(app => ({
-              ...app,
-              date: today
-            }));
-            await database.saveDailyUsage(today, dbUsageData);
-            addDebugMessage('Background save completed');
-          }
-        }
-      }
-    } catch (error) {
-      console.log('Background save failed:', error);
-    }
-  };
-
-  // Add this useEffect to periodically save data
-  useEffect(() => {
-    const interval = setInterval(saveCurrentUsageData, 5 * 60 * 1000); // Save every 5 minutes
-    return () => clearInterval(interval);
-  }, []);
-
-  const dailyResetService = DailyResetService.getInstance();
-  dailyResetService.initialize();
   
   // const loadUsageDataFromDatabase = async () => {
   //   addDebugMessage('Loading data from local database...');
@@ -490,8 +453,6 @@ export default function HomeScreen() {
   useFocusEffect(
     React.useCallback(() => {
       loadHomeData();
-      // Also save current data when screen comes into focus
-      setTimeout(saveCurrentUsageData, 1000); // Delay to avoid conflicts
     }, [])
   );
 

@@ -381,22 +381,19 @@ export class DatabaseService {
           return;
         }
 
-        // Query using partial index (very fast)
-        const result = this.db.getAllSync(
-          `SELECT packageName FROM app_settings WHERE monitored = 1`
-        ) as MonitoredAppRow[];
-        
-        let packages = result.map(r => r.packageName);
+        let packages: string[] = [];
+        try {
+          const meta = await this.getMeta('monitored_apps');
+          packages = meta ? JSON.parse(meta) : [];
+        } catch (error) {
+          console.warn('Failed to parse monitored_apps meta:', error);
+        }
 
-        // Fallback to meta if no app_settings
         if (packages.length === 0) {
-          try {
-            const meta = await this.getMeta('monitored_apps');
-            packages = meta ? JSON.parse(meta) : [];
-          } catch (error) {
-            console.warn('Failed to parse monitored_apps meta:', error);
-            packages = [];
-          }
+          const result = this.db.getAllSync(
+            `SELECT packageName FROM app_settings WHERE monitored = 1`
+          ) as MonitoredAppRow[];
+          packages = result.map(r => r.packageName);
         }
 
         // Cache the result
