@@ -18,7 +18,14 @@
 			}
 		},
 		"production": {
-			"autoIncrement": true
+			"autoIncrement": true,
+			"env": {
+				"EXPO_USE_COMMUNITY_AUTOLINKING": "1",
+				"SENTRY_DISABLE_AUTO_UPLOAD": "true"
+			},
+			"android": {
+				"image": "latest"
+			}
 		}
 	},
 	"submit": {

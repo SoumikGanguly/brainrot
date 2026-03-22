@@ -1,20 +1,16 @@
-<manifest xmlns:android="http://schemas.android.com/apk/res/android"
-    xmlns:tools="http://schemas.android.com/tools">
-  
-  <!-- Permissions -->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android" xmlns:tools="http://schemas.android.com/tools">
   <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>
-  <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+  <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE"/>
   <uses-permission android:name="android.permission.INTERNET"/>
   <uses-permission android:name="android.permission.PACKAGE_USAGE_STATS" tools:ignore="ProtectedPermissions"/>
   <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
-  <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE"/>
+  <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="32" tools:replace="android:maxSdkVersion"/>
+  <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED"/>
+  <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS"/>
   <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW"/>
   <uses-permission android:name="android.permission.VIBRATE"/>
   <uses-permission android:name="android.permission.WAKE_LOCK"/>
-  <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE"/>
-  <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED"/>
-  <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS"/>
-  
+  <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="32" tools:replace="android:maxSdkVersion"/>
   <queries>
     <intent>
       <action android:name="android.intent.action.VIEW"/>
@@ -22,109 +18,46 @@
       <data android:scheme="https"/>
     </intent>
     <intent>
-      <action android:name="android.settings.USAGE_ACCESS_SETTINGS" />
+      <action android:name="android.settings.USAGE_ACCESS_SETTINGS"/>
     </intent>
-    <!-- Allow querying launchable apps -->
     <intent>
-      <action android:name="android.intent.action.MAIN" />
-      <category android:name="android.intent.category.LAUNCHER" />
+      <action android:name="android.intent.action.MAIN"/>
+      <category android:name="android.intent.category.LAUNCHER"/>
     </intent>
-
-    <!-- Common social/entertainment apps we monitor -->
-    <package android:name="com.google.android.youtube" />
-    <package android:name="com.instagram.android" />
-    <package android:name="com.zhiliaoapp.musically" />
-    <package android:name="com.ss.android.ugc.tiktok" />
-    <package android:name="com.facebook.katana" />
-    <package android:name="com.twitter.android" />
-    <package android:name="com.reddit.frontpage" />
-    <package android:name="com.snapchat.android" />
-    <package android:name="com.netflix.mediaclient" />
-    <package android:name="com.whatsapp" />
-    <package android:name="com.discord" />
-    <package android:name="com.spotify.music" />
-    <package android:name="com.pinterest" />
-    <package android:name="com.linkedin.android" />
-    <package android:name="tv.twitch.android.app" />
+    <package android:name="com.google.android.youtube"/>
+    <package android:name="com.instagram.android"/>
+    <package android:name="com.zhiliaoapp.musically"/>
+    <package android:name="com.ss.android.ugc.tiktok"/>
+    <package android:name="com.facebook.katana"/>
+    <package android:name="com.twitter.android"/>
+    <package android:name="com.reddit.frontpage"/>
+    <package android:name="com.snapchat.android"/>
+    <package android:name="com.netflix.mediaclient"/>
+    <package android:name="com.whatsapp"/>
+    <package android:name="com.discord"/>
+    <package android:name="com.spotify.music"/>
+    <package android:name="com.pinterest"/>
+    <package android:name="com.linkedin.android"/>
+    <package android:name="tv.twitch.android.app"/>
   </queries>
-
-  <application 
-    android:name=".MainApplication" 
-    android:label="@string/app_name" 
-    android:icon="@mipmap/ic_launcher" 
-    android:roundIcon="@mipmap/ic_launcher_round" 
-    android:allowBackup="true" 
-    android:theme="@style/AppTheme" 
-    android:supportsRtl="true">
-
-    <service
-      android:name=".BlockingOverlayService"
-      android:enabled="true"
-      android:exported="false"
-      android:stopWithTask="false"
-      android:foregroundServiceType="specialUse">
-      <property
-        android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
-        android:value="Display app blocking overlay for digital wellness monitoring and intervention" />
-    </service>
-
-    <service
-      android:name=".FloatingScoreService"
-      android:enabled="true"
-      android:exported="false"
-      android:stopWithTask="true"
-      android:foregroundServiceType="specialUse">
-      <property
-        android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
-        android:value="Display brain score floating widget during app usage" />
-    </service>
-
-    <service
-      android:name=".ForegroundMonitoringService"
-      android:enabled="true"
-      android:exported="false"
-      android:stopWithTask="false"
-      android:foregroundServiceType="dataSync" />
-
-    <service
-      android:name=".BrainrotAccessibilityService"
-      android:enabled="true"
-      android:exported="false"
-      android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
-      <intent-filter>
-        <action android:name="android.accessibilityservice.AccessibilityService" />
-      </intent-filter>
-      <meta-data
-        android:name="android.accessibilityservice"
-        android:resource="@xml/brainrot_accessibility_service" />
-    </service>
-
-    <!-- Existing meta-data -->
+  <application android:name=".MainApplication" android:label="@string/app_name" android:icon="@mipmap/ic_launcher" android:roundIcon="@mipmap/ic_launcher_round" android:allowBackup="true" android:theme="@style/AppTheme" android:supportsRtl="true" android:enableOnBackInvokedCallback="false">
     <meta-data android:name="expo.modules.updates.ENABLED" android:value="false"/>
     <meta-data android:name="expo.modules.updates.EXPO_UPDATES_CHECK_ON_LAUNCH" android:value="ALWAYS"/>
     <meta-data android:name="expo.modules.updates.EXPO_UPDATES_LAUNCH_WAIT_MS" android:value="0"/>
-    
-    <!-- WorkManager initialization -->
-    <provider
-      android:name="androidx.startup.InitializationProvider"
-      android:authorities="${applicationId}.androidx-startup"
-      android:exported="false"
-      tools:node="merge">
-      <meta-data
-        android:name="androidx.work.WorkManagerInitializer"
-        android:value="androidx.startup"
-        tools:node="remove" />
-    </provider>
-    
-    <!-- Main Activity -->
-    <activity 
-      android:name=".MainActivity" 
-      android:configChanges="keyboard|keyboardHidden|orientation|screenSize|screenLayout|uiMode" 
-      android:launchMode="singleTask" 
-      android:windowSoftInputMode="adjustResize" 
-      android:theme="@style/Theme.App.SplashScreen" 
-      android:exported="true" 
-      android:screenOrientation="portrait">
+    <service android:name=".BlockingOverlayService" android:enabled="true" android:exported="false" android:stopWithTask="false" android:foregroundServiceType="specialUse">
+      <property android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE" android:value="Display app blocking overlay for digital wellness monitoring and intervention"/>
+    </service>
+    <service android:name=".FloatingScoreService" android:enabled="true" android:exported="false" android:stopWithTask="true" android:foregroundServiceType="specialUse">
+      <property android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE" android:value="Display brain score floating widget during app usage"/>
+    </service>
+    <service android:name=".ForegroundMonitoringService" android:enabled="true" android:exported="false" android:stopWithTask="false" android:foregroundServiceType="dataSync"/>
+    <service android:name=".BrainrotAccessibilityService" android:enabled="true" android:exported="false" android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
+      <intent-filter>
+        <action android:name="android.accessibilityservice.AccessibilityService"/>
+      </intent-filter>
+      <meta-data android:name="android.accessibilityservice" android:resource="@xml/brainrot_accessibility_service"/>
+    </service>
+    <activity android:name=".MainActivity" android:configChanges="keyboard|keyboardHidden|orientation|screenSize|screenLayout|uiMode|smallestScreenSize" android:launchMode="singleTask" android:windowSoftInputMode="adjustResize" android:theme="@style/Theme.App.SplashScreen" android:exported="true" android:screenOrientation="portrait">
       <intent-filter>
         <action android:name="android.intent.action.MAIN"/>
         <category android:name="android.intent.category.LAUNCHER"/>
@@ -137,7 +70,8 @@
         <data android:scheme="exp+brainrot"/>
       </intent-filter>
     </activity>
-    
+    <provider android:name="androidx.startup.InitializationProvider" android:authorities="${applicationId}.androidx-startup" android:exported="false" tools:node="merge">
+      <meta-data android:name="androidx.work.WorkManagerInitializer" android:value="androidx.startup" tools:node="remove"/>
+    </provider>
   </application>
-  
 </manifest>

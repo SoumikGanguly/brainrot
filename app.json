@@ -16,12 +16,16 @@
         "foregroundImage": "./assets/images/adaptive-icon.png",
         "backgroundColor": "#ffffff"
       },
-      "edgeToEdgeEnabled": true,
       "package": "com.soumikganguly.brainrot",
       "permissions": [
         "android.permission.PACKAGE_USAGE_STATS",
         "android.permission.FOREGROUND_SERVICE",
+        "android.permission.FOREGROUND_SERVICE_SPECIAL_USE",
         "android.permission.POST_NOTIFICATIONS",
+        "android.permission.RECEIVE_BOOT_COMPLETED",
+        "android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS",
+        "android.permission.SYSTEM_ALERT_WINDOW",
+        "android.permission.VIBRATE",
         "android.permission.WAKE_LOCK"
       ]
     },
@@ -42,7 +46,7 @@
         }
       ],
       "expo-sqlite",
-      "./plugins/withAndroidDeps",
+      "./plugins/withBrainrotAndroid",
       [
         "expo-build-properties",
         {
