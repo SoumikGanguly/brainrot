@@ -7,7 +7,6 @@
     "icon": "./assets/images/icon.png",
     "scheme": "brainrot",
     "userInterfaceStyle": "automatic",
-    "newArchEnabled": true,
     "ios": {
       "supportsTablet": true
     },
@@ -64,7 +63,11 @@
           "project": "brainrot",
           "organization": "twine-rf"
         }
-      ]
+      ],
+      "expo-font",
+      "expo-image",
+      "expo-status-bar",
+      "expo-web-browser"
     ],
     "experiments": {
       "typedRoutes": true
