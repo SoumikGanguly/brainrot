@@ -2,8 +2,8 @@ package com.soumikganguly.brainrot
 
 import android.app.NotificationChannel
 import android.app.NotificationManager
+import android.app.Notification
 import android.app.usage.UsageEvents
-import android.app.usage.UsageStats
 import android.app.usage.UsageStatsManager
 import android.content.Context
 import android.content.pm.PackageManager
@@ -56,12 +56,17 @@ class UsageChecker(private val context: Context) {
     }
 
     fun getCurrentBrainState(forceRefresh: Boolean = false): BrainState {
+        getSyncedDailySummaryState()?.let { syncedState ->
+            return syncedState
+        }
+
         val prefs = context.getSharedPreferences("brainrot_prefs", Context.MODE_PRIVATE)
         if (!forceRefresh) {
             val cachedScore = prefs.getInt("brain_score_value", -1)
             val cachedStatus = prefs.getString("brain_score_status", null)
+            val cachedTotalUsageMs = prefs.getLong("brain_score_total_usage_ms", 0L)
             if (cachedScore >= 0 && !cachedStatus.isNullOrBlank()) {
-                return BrainState(cachedScore, cachedStatus)
+                return BrainState(cachedScore, cachedStatus, cachedTotalUsageMs)
             }
         }
 
@@ -89,19 +94,8 @@ class UsageChecker(private val context: Context) {
         cal.set(Calendar.MILLISECOND, 0)
         val startTime = cal.timeInMillis
         val endTime = System.currentTimeMillis()
-        
-        val stats = usageStatsManager.queryUsageStats(
-            UsageStatsManager.INTERVAL_DAILY,
-            startTime,
-            endTime
-        )
-        
-        val usageMap = mutableMapOf<String, Long>()
-        stats?.forEach { stat ->
-            usageMap[stat.packageName] = stat.totalTimeInForeground
-        }
-        
-        return usageMap
+
+        return getUsageStatsFromEvents(startTime, endTime)
     }
     
     private fun getTodayUsageForApp(packageName: String): Long {
@@ -252,8 +246,29 @@ class UsageChecker(private val context: Context) {
             .edit()
             .putInt("brain_score_value", score)
             .putString("brain_score_status", status)
+            .putLong("brain_score_total_usage_ms", totalUsageMs)
             .putLong("brain_score_updated_at", System.currentTimeMillis())
             .apply()
+        BrainScoreWidgetUpdater.updateAll(context)
+
+        return BrainState(score, status, totalUsageMs)
+    }
+
+    private fun getSyncedDailySummaryState(): BrainState? {
+        val prefs = context.getSharedPreferences("brainrot_prefs", Context.MODE_PRIVATE)
+        val summaryDate = prefs.getString("daily_summary_date", null) ?: return null
+        val today = SimpleDateFormat("yyyy-MM-dd", Locale.US).format(Date())
+        if (summaryDate != today) {
+            return null
+        }
+
+        val score = prefs.getInt("daily_summary_brain_score", -1)
+        val status = prefs.getString("daily_summary_brain_status", null)
+        val totalUsageMs = prefs.getLong("daily_summary_total_screen_time_ms", -1L)
+
+        if (score < 0 || status.isNullOrBlank() || totalUsageMs < 0L) {
+            return null
+        }
 
         return BrainState(score, status, totalUsageMs)
     }
@@ -316,6 +331,41 @@ class UsageChecker(private val context: Context) {
         )
     }
 
+    private fun getUsageStatsFromEvents(startTime: Long, endTime: Long): Map<String, Long> {
+        val events = usageStatsManager.queryEvents(startTime, endTime)
+        val event = UsageEvents.Event()
+        val usageMap = mutableMapOf<String, Long>()
+        val sessionStartTimes = HashMap<String, Long>()
+
+        while (events.hasNextEvent()) {
+            events.getNextEvent(event)
+            val packageName = event.packageName ?: continue
+            if (packageName == context.packageName) {
+                continue
+            }
+
+            when (event.eventType) {
+                UsageEvents.Event.MOVE_TO_FOREGROUND -> {
+                    sessionStartTimes[packageName] = event.timeStamp
+                }
+                UsageEvents.Event.MOVE_TO_BACKGROUND -> {
+                    val startTs = sessionStartTimes.remove(packageName) ?: continue
+                    if (event.timeStamp > startTs) {
+                        usageMap[packageName] = (usageMap[packageName] ?: 0L) + (event.timeStamp - startTs)
+                    }
+                }
+            }
+        }
+
+        sessionStartTimes.forEach { (packageName, startTs) ->
+            if (endTime > startTs) {
+                usageMap[packageName] = (usageMap[packageName] ?: 0L) + (endTime - startTs)
+            }
+        }
+
+        return usageMap
+    }
+
     private fun calculateBrainScore(
         totalDistractingMinutes: Double,
         totalMonitoredOpens: Int,
@@ -355,6 +405,7 @@ class UsageChecker(private val context: Context) {
             val notificationManager = context.getSystemService(NotificationManager::class.java)
             channels.forEach { channel ->
                 channel.description = "Brain health notifications - ${channel.name}"
+                channel.lockscreenVisibility = Notification.VISIBILITY_PUBLIC
                 if (channel.id == "brainrot_critical") {
                     channel.enableVibration(true)
                     channel.vibrationPattern = longArrayOf(0, 500, 200, 500)

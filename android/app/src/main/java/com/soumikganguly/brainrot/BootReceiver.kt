@@ -16,15 +16,17 @@ class BootReceiver : BroadcastReceiver() {
         }
 
         try {
+            BrainScoreWidgetUpdater.updateAll(context)
             val prefs = context.getSharedPreferences("brainrot_prefs", Context.MODE_PRIVATE)
             val monitoringEnabled = prefs.getBoolean("monitoring_enabled", false)
             val backgroundChecksEnabled = prefs.getBoolean("background_checks_enabled", true)
 
             if (!monitoringEnabled) {
+                Log.d("BootReceiver", "Skipping monitoring restore after $action because monitoring is disabled")
                 return
             }
 
-            ForegroundMonitoringService.start(context)
+            ForegroundMonitoringService.start(context, "BootReceiver:$action")
             if (backgroundChecksEnabled) {
                 BackgroundUsageWorker.startPeriodicWork(context, 15)
             }

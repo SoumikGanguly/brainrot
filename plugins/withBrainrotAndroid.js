@@ -153,6 +153,46 @@ const SERVICES = [
   },
 ];
 
+const RECEIVERS = [
+  {
+    $: {
+      "android:name": ".BootReceiver",
+      "android:enabled": "true",
+      "android:exported": "true",
+    },
+    "intent-filter": [
+      {
+        action: [
+          { $: { "android:name": "android.intent.action.BOOT_COMPLETED" } },
+          { $: { "android:name": "android.intent.action.MY_PACKAGE_REPLACED" } },
+        ],
+      },
+    ],
+  },
+  {
+    $: {
+      "android:name": ".BrainScoreWidgetProvider",
+      "android:enabled": "true",
+      "android:exported": "true",
+    },
+    "intent-filter": [
+      {
+        action: [
+          { $: { "android:name": "android.appwidget.action.APPWIDGET_UPDATE" } },
+        ],
+      },
+    ],
+    "meta-data": [
+      {
+        $: {
+          "android:name": "android.appwidget.provider",
+          "android:resource": "@xml/brain_score_widget_info",
+        },
+      },
+    ],
+  },
+];
+
 const PROVIDER = {
   $: {
     "android:name": "androidx.startup.InitializationProvider",
@@ -324,6 +364,11 @@ function withBrainrotManifest(config) {
       mainApplication.service = ensureNamedItem(mainApplication.service, service);
     }
 
+    mainApplication.receiver = mainApplication.receiver ?? [];
+    for (const receiver of RECEIVERS) {
+      mainApplication.receiver = ensureNamedItem(mainApplication.receiver, receiver);
+    }
+
     mainApplication.provider = ensureNamedItem(mainApplication.provider, PROVIDER);
 
     config.modResults = manifest;
@@ -376,7 +421,7 @@ function withBrainrotNativeSources(config) {
         packageName
       );
 
-      for (const resourceDir of ["xml", "layout", "drawable"]) {
+      for (const resourceDir of ["xml", "layout", "drawable", "drawable-nodpi"]) {
         await copyDirectory(
           path.join(NATIVE_TEMPLATE_ROOT, "res", resourceDir),
           path.join(sourceRoot, "res", resourceDir),

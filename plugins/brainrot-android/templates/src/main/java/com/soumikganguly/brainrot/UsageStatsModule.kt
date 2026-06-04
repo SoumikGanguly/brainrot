@@ -520,6 +520,33 @@ class UsageStatsModule(reactContext: ReactApplicationContext) : ReactContextBase
     }
 
     @ReactMethod
+    fun syncDailySummary(
+        date: String,
+        brainScore: Int,
+        brainStatus: String,
+        totalScreenTimeMs: Double,
+        summarySource: String,
+        promise: Promise
+    ) {
+        try {
+            val prefs = reactApplicationContext.getSharedPreferences("brainrot_prefs", Context.MODE_PRIVATE)
+            prefs.edit()
+                .putString("daily_summary_date", date)
+                .putInt("daily_summary_brain_score", brainScore)
+                .putString("daily_summary_brain_status", brainStatus)
+                .putLong("daily_summary_total_screen_time_ms", totalScreenTimeMs.toLong())
+                .putString("daily_summary_source", summarySource)
+                .putLong("daily_summary_updated_at", System.currentTimeMillis())
+                .apply()
+            BrainScoreWidgetUpdater.updateAll(reactApplicationContext)
+            promise.resolve(true)
+        } catch (e: Exception) {
+            Log.e(TAG, "Error syncing daily summary", e)
+            promise.reject("SYNC_DAILY_SUMMARY_ERROR", e.message)
+        }
+    }
+
+    @ReactMethod
     fun getPendingBlockEvents(promise: Promise) {
         try {
             val prefs = reactApplicationContext.getSharedPreferences("brainrot_prefs", Context.MODE_PRIVATE)

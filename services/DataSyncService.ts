@@ -70,6 +70,8 @@ export class DataSyncService {
       }
 
       await HistoricalDataService.getInstance().rebuildSummaryForDate(today, { force: true });
+      const summary = await database.getDailySummary(today);
+      await UsageService.syncDailySummaryToNative(summary);
       BrainScoreService.getInstance().invalidateCache(today);
 
       console.log(

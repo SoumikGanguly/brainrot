@@ -27,7 +27,7 @@ export function Toggle({ value, onValueChange }: ToggleProps) {
 
   const backgroundColor = animatedValue.interpolate({
     inputRange: [0, 1],
-    outputRange: ['#E5E7EB', '#5B4CF0'],
+    outputRange: ['#E5E7EB', '#5D3DF0'],
   });
 
   return (

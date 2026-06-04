@@ -18,7 +18,7 @@ function TabsLayoutContent() {
   return (
     <Tabs
       screenOptions={{
-        tabBarActiveTintColor: '#5B4CF0',
+        tabBarActiveTintColor: '#5D3DF0',
         tabBarInactiveTintColor: '#64748B',
         tabBarStyle: {
           backgroundColor: '#FFFFFF',

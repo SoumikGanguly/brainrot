@@ -1,5 +1,6 @@
 import { NativeModules, Platform } from 'react-native';
 import { database } from './database';
+import type { DailyUsage } from './database';
 
 const { UsageStatsModule } = NativeModules;
 
@@ -193,6 +194,26 @@ export class UsageService {
     } catch (error) {
       console.error('Error getting pending block events:', error);
       return [];
+    }
+  }
+
+  static async syncDailySummaryToNative(summary: DailyUsage | null): Promise<boolean> {
+    try {
+      if (Platform.OS !== 'android' || !UsageStatsModule?.syncDailySummary || !summary) {
+        return false;
+      }
+
+      await UsageStatsModule.syncDailySummary(
+        summary.date,
+        summary.brainScore,
+        summary.brainHealthStatus || 'Focused',
+        summary.totalScreenTime,
+        summary.summarySource || 'missing'
+      );
+      return true;
+    } catch (error) {
+      console.error('Error syncing daily summary to native:', error);
+      return false;
     }
   }
 

@@ -254,6 +254,7 @@ class UsageChecker(private val context: Context) {
             .putString("brain_score_status", status)
             .putLong("brain_score_updated_at", System.currentTimeMillis())
             .apply()
+        BrainScoreWidgetUpdater.updateAll(context)
 
         return BrainState(score, status, totalUsageMs)
     }

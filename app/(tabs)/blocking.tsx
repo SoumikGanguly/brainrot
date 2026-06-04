@@ -311,7 +311,7 @@ export default function BlockingScreen() {
               <Switch
                 value={state.blockScheduleEnabled}
                 onValueChange={(value) => AppBlockingService.getInstance().updateSchedule(value, state.blockScheduleStart, state.blockScheduleEnd).then(() => void refresh())}
-                trackColor={{ false: '#E5E7EB', true: '#5B4CF0' }}
+                trackColor={{ false: '#E5E7EB', true: '#5D3DF0' }}
                 thumbColor={state.blockScheduleEnabled ? '#FFFFFF' : '#9CA3AF'}
               />
             </View>
@@ -387,7 +387,7 @@ function PermissionRow({ label, granted, onPress }: { label: string; granted: bo
 }
 
 function ToggleRow({ label, value, onValueChange }: { label: string; value: boolean; onValueChange: (value: boolean) => void }) {
-  return <View className="py-sm border-b border-gray-100 last:border-b-0"><View className="flex-row items-center justify-between"><Text className="font-heading-semibold text-card-title text-text">{label}</Text><Switch value={value} onValueChange={onValueChange} trackColor={{ false: '#E5E7EB', true: '#5B4CF0' }} thumbColor={value ? '#FFFFFF' : '#9CA3AF'} /></View></View>;
+  return <View className="py-sm border-b border-gray-100 last:border-b-0"><View className="flex-row items-center justify-between"><Text className="font-heading-semibold text-card-title text-text">{label}</Text><Switch value={value} onValueChange={onValueChange} trackColor={{ false: '#E5E7EB', true: '#5D3DF0' }} thumbColor={value ? '#FFFFFF' : '#9CA3AF'} /></View></View>;
 }
 
 function ModeButton({ label, active, onPress, danger = false }: { label: string; active: boolean; onPress: () => void; danger?: boolean }) {

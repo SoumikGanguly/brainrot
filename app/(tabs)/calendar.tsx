@@ -7,6 +7,7 @@ import {
 	AppState,
 	AppStateStatus,
 	Dimensions,
+	Image,
 	Modal,
 	ScrollView,
 	Share,
@@ -22,11 +23,11 @@ import { Header } from "../../components/Header";
 import { database } from "../../services/database";
 
 import { BrainScoreService } from "@/services/BrainScore";
-import { DataSyncService } from "@/services/DataSyncService";
 import {
 	DailyInsightsService,
 	type ReplayEntry,
 } from "@/services/DailyInsightsService";
+import { DataSyncService } from "@/services/DataSyncService";
 import {
 	ManufacturerPermissionInfo,
 	UnifiedUsageService,
@@ -36,7 +37,7 @@ import {
 	getScoreColor,
 	getScoreLabel,
 } from "../../utils/brainScore";
-import { formatTime, formatTimeDetailed } from "../../utils/time";
+import { formatTime } from "../../utils/time";
 
 interface DailyData {
 	date: string;
@@ -51,6 +52,7 @@ interface DailyData {
 }
 
 interface DayDetailData extends DailyData {
+	totalMonitoredOpens: number;
 	replayEntries: ReplayEntry[];
 	biggestTimeLeak: {
 		packageName: string;
@@ -96,12 +98,25 @@ interface TimeReclaimedSummary {
 }
 
 const { width: screenWidth } = Dimensions.get("window");
+const TIMELINE_MAX_HEIGHT = 430;
 const replayMomentTheme = {
-	"Early morning": { dot: "#F59E0B", pillBackground: "#FFF1D6", pillText: "#C66A00" },
-	"Before lunch": { dot: "#9AD9FF", pillBackground: "#E7F6FF", pillText: "#3B82F6" },
+	"Early morning": {
+		dot: "#F59E0B",
+		pillBackground: "#FFF1D6",
+		pillText: "#C66A00",
+	},
+	"Before lunch": {
+		dot: "#9AD9FF",
+		pillBackground: "#E7F6FF",
+		pillText: "#3B82F6",
+	},
 	"Mid day": { dot: "#38BDF8", pillBackground: "#E0F2FE", pillText: "#0284C7" },
 	Evening: { dot: "#F9A8D4", pillBackground: "#FDE7F3", pillText: "#DB2777" },
-	"Before bed": { dot: "#C084FC", pillBackground: "#F3E8FF", pillText: "#A21CAF" },
+	"Before bed": {
+		dot: "#C084FC",
+		pillBackground: "#F3E8FF",
+		pillText: "#A21CAF",
+	},
 } as const;
 
 function formatLocalDate(date: Date): string {
@@ -116,7 +131,10 @@ function parseLocalDate(dateStr: string): Date {
 	return new Date(year, (month || 1) - 1, day || 1);
 }
 
-function getAppVisual(appName: string, packageName: string): {
+function getAppVisual(
+	appName: string,
+	packageName: string,
+): {
 	icon: keyof typeof Ionicons.glyphMap;
 	bg: string;
 } {
@@ -507,10 +525,10 @@ export default function Calendar() {
 
 	const openDayDetail = async (dateStr: string) => {
 		try {
-			const insights = await DailyInsightsService.getInstance().getDailyInsights(
-				dateStr,
-				{ forceSummaryRefresh: true },
-			);
+			const insights =
+				await DailyInsightsService.getInstance().getDailyInsights(dateStr, {
+					forceSummaryRefresh: true,
+				});
 			const summary = insights.summary;
 
 			setSelectedDay({
@@ -519,6 +537,8 @@ export default function Calendar() {
 				brainScore: summary?.focusScore ?? summary?.brainScore ?? 0,
 				brainHealthStatus: summary?.brainHealthStatus,
 				apps: summary?.apps || [],
+				totalMonitoredOpens:
+					summary?.totalMonitoredOpens ?? insights.replayEntries.length,
 				replayEntries: insights.replayEntries,
 				biggestTimeLeak: insights.biggestTimeLeak,
 			} as DayDetailData);
@@ -1190,7 +1210,9 @@ export default function Calendar() {
 							</Text>
 							{selectedDay && (
 								<Text className="mt-xs font-body text-secondary text-muted">
-									{selectedDay.brainHealthStatus || getScoreLabel(selectedDay.brainScore)} Day
+									{selectedDay.brainHealthStatus ||
+										getScoreLabel(selectedDay.brainScore)}{" "}
+									Day
 								</Text>
 							)}
 						</View>
@@ -1204,83 +1226,95 @@ export default function Calendar() {
 
 					{selectedDay && (
 						<ScrollView className="flex-1 p-md">
-							{/* Daily Summary */}
 							<Card className="mb-md">
-								<Text className="mb-md font-heading-bold text-section text-text">
-									Daily Summary
-								</Text>
-
-								<View className="items-center mb-md">
-									<View
-										className="w-20 h-20 rounded-full items-center justify-center mb-sm"
-										style={{
-											backgroundColor: `${getScoreColor(selectedDay.brainScore)}20`,
-										}}
-									>
-										<Text
-											className="text-2xl font-bold"
-											style={{ color: getScoreColor(selectedDay.brainScore) }}
-										>
-											{Math.round(selectedDay.brainScore)}
+								<View className="flex-row items-center justify-between">
+									<View className="flex-1 pr-md">
+										<Text className="font-heading-bold text-section text-text">
+											You wasted
+										</Text>
+										<Text className="mt-sm text-4xl font-bold text-danger">
+											{formatTime(
+												selectedDay.replayEntries.reduce(
+													(sum, entry) => sum + entry.durationMs,
+													0,
+												),
+											)}
+										</Text>
+										<Text className="mt-2 font-body text-secondary text-muted">
+											opening apps {selectedDay.totalMonitoredOpens} times
 										</Text>
 									</View>
-									<Text className="font-heading-semibold text-card-title text-text">
-										{selectedDay.brainHealthStatus || getScoreLabel(selectedDay.brainScore)} Brain Health
-									</Text>
-								</View>
-
-								<View className="space-y-sm">
-									<View className="flex-row justify-between items-center py-sm border-b border-gray-100">
-										<Text className="font-body text-body text-muted">
-											Total Screen Time
-										</Text>
-										<Text className="font-heading-semibold text-card-title text-text">
-											{formatTimeDetailed(selectedDay.totalScreenTime)}
-										</Text>
-									</View>
-									<View className="flex-row justify-between items-center py-sm border-b border-gray-100">
-										<Text className="font-body text-body text-muted">
-											Apps Used
-										</Text>
-										<Text className="font-heading-semibold text-card-title text-text">
-											{selectedDay.apps.length} apps
-										</Text>
-									</View>
-									<View className="flex-row justify-between items-center py-sm">
-										<Text className="font-body text-body text-muted">
-											Most Used
-										</Text>
-										<Text className="font-heading-semibold text-card-title text-text">
-											{selectedDay.apps[0]?.appName || "None"}
-										</Text>
+									<View className="flex-row items-center">
+										<Image
+											source={require("../../assets/expressions/disappointed.png")}
+											style={{ width: 100, height: 100 }}
+											resizeMode="contain"
+										/>
 									</View>
 								</View>
 							</Card>
 
-							<Card className="mb-md">
-								<Text className="mb-md font-heading-bold text-section text-text">
-									Biggest Time Leak
-								</Text>
-								{selectedDay.biggestTimeLeak ? (
-									<View className="flex-row items-center justify-between">
-										<View className="flex-1 pr-sm">
-											<Text className="font-heading-semibold text-card-title text-text">
-												{selectedDay.biggestTimeLeak.appName}
-											</Text>
-											<Text className="mt-1 font-body text-secondary text-muted">
-												{selectedDay.biggestTimeLeak.percentage}% of distraction time
+							<View className="mb-md flex-row">
+								<Card className="mr-sm flex-1 px-5 py-5">
+									<Text className="font-heading-bold text-card-title text-text">
+										Biggest Time Leak
+									</Text>
+									{selectedDay.biggestTimeLeak ? (
+										<View className="mt-3 min-h-[128px] justify-between">
+											<View className="flex-1">
+												<View className="flex-row items-center">
+													<AppBadge
+														appName={selectedDay.biggestTimeLeak.appName}
+														packageName={
+															selectedDay.biggestTimeLeak.packageName
+														}
+														size={42}
+													/>
+													<Text
+														className="ml-3 flex-1 font-heading-semibold text-card-title text-text"
+														numberOfLines={2}
+													>
+														{selectedDay.biggestTimeLeak.appName}
+													</Text>
+												</View>
+												<Text className="mt-4 text-3xl font-bold text-danger">
+													{formatTime(selectedDay.biggestTimeLeak.totalTimeMs)}
+												</Text>
+												<Text className="mt-2 font-body text-secondary text-muted">
+													{selectedDay.biggestTimeLeak.percentage}% of
+													distraction time
+												</Text>
+											</View>
+										</View>
+									) : (
+										<View className="mt-3 min-h-[128px] justify-center">
+											<Text className="font-body text-secondary text-muted">
+												No obvious villain today.
 											</Text>
 										</View>
-										<Text className="font-heading-bold text-card-title text-danger">
-											{formatTime(selectedDay.biggestTimeLeak.totalTimeMs)}
-										</Text>
+									)}
+								</Card>
+
+								<Card className="ml-sm flex-1 px-5 py-5">
+									<View className="min-h-[128px] justify-between">
+										<View>
+											<Text className="font-heading-bold text-section text-text">
+												Brain Score
+											</Text>
+											<Text
+												className="mt-2 text-5xl font-bold"
+												style={{ color: getScoreColor(selectedDay.brainScore) }}
+											>
+												{Math.round(selectedDay.brainScore)}
+											</Text>
+											<Text className="mt-2 font-body text-secondary text-muted">
+												{selectedDay.brainHealthStatus ||
+													getScoreLabel(selectedDay.brainScore)}
+											</Text>
+										</View>
 									</View>
-								) : (
-									<Text className="font-body text-body text-muted">
-										No obvious time leak on this day.
-									</Text>
-								)}
-							</Card>
+								</Card>
+							</View>
 
 							<Card className="mb-md">
 								<Text className="mb-md font-heading-bold text-section text-text">
@@ -1288,82 +1322,99 @@ export default function Calendar() {
 								</Text>
 								{selectedDay.replayEntries.length === 0 ? (
 									<Text className="font-body text-body text-muted">
-										No monitored distraction sessions were recorded for this day.
+										No monitored distraction sessions were recorded for this
+										day.
 									</Text>
 								) : (
-									selectedDay.replayEntries.map((entry, index) => (
-										<View
-											key={`${entry.packageName}-${entry.startedAt}-${index}`}
-											className="flex-row pb-md last:pb-0"
-										>
-											<View className="w-16 pt-1">
-												<Text className="font-body-semibold text-secondary text-muted">
+									<ScrollView
+										nestedScrollEnabled
+										showsVerticalScrollIndicator={false}
+										style={{ maxHeight: TIMELINE_MAX_HEIGHT }}
+									>
+										{selectedDay.replayEntries.map((entry, index) => (
+											<View
+												key={`${entry.packageName}-${entry.startedAt}-${index}`}
+												className="flex-row pb-md last:pb-0"
+											>
+												<View className="w-16 pt-3">
+													<Text className="font-body-semibold text-secondary text-muted">
 														{new Date(entry.startedAt).toLocaleTimeString([], {
 															hour: "numeric",
 															minute: "2-digit",
 														})}
 													</Text>
 												</View>
-											<View className="mr-md items-center">
-												{(() => {
-													const momentTheme = getReplayMomentTheme(entry.moment);
-													return (
-														<>
-												<View
-													className="mt-2 h-3 w-3 rounded-full"
-													style={{ backgroundColor: momentTheme.dot }}
-												/>
-												{index < selectedDay.replayEntries.length - 1 ? (
-													<View
-														className="mt-1 w-0.5 flex-1"
-														style={{ backgroundColor: `${momentTheme.dot}55` }}
-													/>
-												) : (
-													<View className="w-0.5 flex-1" />
-												)}
-														</>
-													);
-												})()}
-											</View>
-											<View className="flex-1 rounded-3xl border border-slate-200 bg-card px-4 py-4">
-												<View className="flex-row items-start justify-between">
-													<View className="flex-1 flex-row items-center">
-														<AppBadge
-															appName={entry.appName}
-															packageName={entry.packageName}
-															size={42}
-														/>
-														<Text className="ml-3 flex-1 font-heading-semibold text-card-title text-text">
-															{entry.appName}
+												<View className="mr-md items-center">
+													{(() => {
+														const momentTheme = getReplayMomentTheme(
+															entry.moment,
+														);
+														return (
+															<>
+																<View
+																	className="mt-3 h-3 w-3 rounded-full"
+																	style={{ backgroundColor: momentTheme.dot }}
+																/>
+																{index <
+																selectedDay.replayEntries.length - 1 ? (
+																	<View
+																		className="mt-1 w-0.5 flex-1"
+																		style={{
+																			backgroundColor: `${momentTheme.dot}55`,
+																		}}
+																	/>
+																) : (
+																	<View className="w-0.5 flex-1" />
+																)}
+															</>
+														);
+													})()}
+												</View>
+												<View className="flex-1 rounded-3xl border border-slate-200 bg-card px-4 py-4">
+													<View className="flex-row items-start justify-between">
+														<View className="flex-row flex-1 items-center">
+															<AppBadge
+																appName={entry.appName}
+																packageName={entry.packageName}
+																size={42}
+															/>
+															<Text className="ml-3 flex-1 font-heading-semibold text-card-title text-text">
+																{entry.appName}
+															</Text>
+														</View>
+														<Text className="ml-3 font-heading-bold text-card-title text-danger">
+															+{formatTime(entry.durationMs)}
 														</Text>
 													</View>
-													<Text className="ml-3 font-heading-bold text-card-title text-danger">
-														+{formatTime(entry.durationMs)}
-													</Text>
-												</View>
-												<View className="mt-3 flex-row justify-end">
-													<View
-														className="rounded-full px-3 py-1"
-														style={{
-															backgroundColor: getReplayMomentTheme(entry.moment).pillBackground,
-														}}
-													>
-														<Text
-															className="font-body-semibold text-secondary"
-															style={{ color: getReplayMomentTheme(entry.moment).pillText }}
+													<View className="mt-3 flex-row justify-end">
+														<View
+															className="rounded-full px-3 py-1"
+															style={{
+																backgroundColor: getReplayMomentTheme(
+																	entry.moment,
+																).pillBackground,
+															}}
 														>
-															{entry.moment}
-														</Text>
+															<Text
+																className="font-body-semibold text-secondary"
+																style={{
+																	color: getReplayMomentTheme(entry.moment)
+																		.pillText,
+																}}
+															>
+																{entry.moment}
+															</Text>
+														</View>
 													</View>
 												</View>
 											</View>
-										</View>
-									))
+										))}
+									</ScrollView>
 								)}
 							</Card>
 
 							{/* App Usage Breakdown */}
-							<Card>
+							<Card className="mb-md">
 								<Text className="mb-md font-heading-bold text-section text-text">
 									App Usage Breakdown
 								</Text>
