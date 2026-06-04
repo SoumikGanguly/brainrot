@@ -4,8 +4,8 @@ import android.app.*
 import android.content.Context
 import android.content.Intent
 import android.os.Build
-import android.os.IBinder
 import android.os.Handler
+import android.os.IBinder
 import android.os.Looper
 import android.util.Log
 import androidx.core.app.NotificationCompat
@@ -15,9 +15,10 @@ class ForegroundMonitoringService : Service() {
     private val TAG = "ForegroundMonitoringService"
     private val CHANNEL_ID = "brainrot_monitoring"
     private val NOTIFICATION_ID = 1001
+    private val REFRESH_INTERVAL_MS = 60_000L
     
-    private var monitoringHandler: Handler? = null
-    private var monitoringRunnable: Runnable? = null
+    private var notificationHandler: Handler? = null
+    private var notificationRunnable: Runnable? = null
     private var usageChecker: UsageChecker? = null
 
     override fun onCreate() {
@@ -28,57 +29,76 @@ class ForegroundMonitoringService : Service() {
     
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         createNotificationChannel()
-        
-        val notification = NotificationCompat.Builder(this, CHANNEL_ID)
-            .setContentTitle("Brainrot Monitoring")
-            .setContentText("Protecting your brain health")
-            .setSmallIcon(R.drawable.ic_notification)
-            .setPriority(NotificationCompat.PRIORITY_LOW)
-            .setOngoing(true)
-            .build()
-            
-        startForeground(NOTIFICATION_ID, notification)
-        
-        // Start periodic checks
-        startMonitoringLoop()
+
+        startForeground(NOTIFICATION_ID, buildNotification())
+        startNotificationLoop()
         
         return START_STICKY
     }
-    
-    private fun startMonitoringLoop() {
-        if (monitoringHandler != null) {
-            Log.d(TAG, "Monitoring already running")
+
+    private fun buildNotification(): Notification {
+        val brainState = usageChecker?.getCurrentBrainState(forceRefresh = true)
+            ?: UsageChecker.BrainState(100, "Focused", 0L)
+        val contentText = "Screen time ${formatDuration(brainState.totalUsageMs)}"
+
+        return NotificationCompat.Builder(this, CHANNEL_ID)
+            .setContentTitle("${brainState.status} brain • ${brainState.score}")
+            .setContentText(contentText)
+            .setStyle(NotificationCompat.BigTextStyle().bigText(contentText))
+            .setSmallIcon(R.drawable.ic_notification)
+            .setPriority(NotificationCompat.PRIORITY_LOW)
+            .setSilent(true)
+            .setOnlyAlertOnce(true)
+            .setOngoing(true)
+            .setShowWhen(false)
+            .build()
+    }
+
+    private fun formatDuration(durationMs: Long): String {
+        val totalMinutes = durationMs / 60000
+        val hours = totalMinutes / 60
+        val minutes = totalMinutes % 60
+
+        return if (hours > 0) {
+            "${hours}h ${minutes}m"
+        } else {
+            "${minutes}m"
+        }
+    }
+
+    private fun startNotificationLoop() {
+        if (notificationHandler != null) {
+            Log.d(TAG, "Focus status notification already running")
             return
         }
 
-        Log.d(TAG, "Starting monitoring loop")
-        monitoringHandler = Handler(Looper.getMainLooper())
-        
-        monitoringRunnable = object : Runnable {
+        Log.d(TAG, "Starting focus status notification loop")
+        notificationHandler = Handler(Looper.getMainLooper())
+
+        notificationRunnable = object : Runnable {
             override fun run() {
                 try {
-                    Log.d(TAG, "Running periodic usage check")
                     usageChecker?.checkUsageAndNotify()
+                    val notificationManager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+                    notificationManager.notify(NOTIFICATION_ID, buildNotification())
                 } catch (e: Exception) {
-                    Log.e(TAG, "Error during monitoring check", e)
+                    Log.e(TAG, "Error refreshing focus status notification", e)
                 }
-                
-                // Check every 5 minutes (300000 ms)
-                monitoringHandler?.postDelayed(this, 5 * 60 * 1000)
+
+                notificationHandler?.postDelayed(this, REFRESH_INTERVAL_MS)
             }
         }
-        
-        // Start the first check
-        monitoringHandler?.post(monitoringRunnable!!)
+
+        notificationHandler?.post(notificationRunnable!!)
     }
 
-    private fun stopMonitoringLoop() {
-        Log.d(TAG, "Stopping monitoring loop")
-        monitoringRunnable?.let { 
-            monitoringHandler?.removeCallbacks(it) 
+    private fun stopNotificationLoop() {
+        Log.d(TAG, "Stopping focus status notification loop")
+        notificationRunnable?.let {
+            notificationHandler?.removeCallbacks(it)
         }
-        monitoringHandler = null
-        monitoringRunnable = null
+        notificationHandler = null
+        notificationRunnable = null
     }
     
     private fun createNotificationChannel() {
@@ -101,7 +121,7 @@ class ForegroundMonitoringService : Service() {
     override fun onDestroy() {
         super.onDestroy()
         Log.d(TAG, "Service destroyed")
-        stopMonitoringLoop()
+        stopNotificationLoop()
     }
     
     override fun onBind(intent: Intent?): IBinder? = null

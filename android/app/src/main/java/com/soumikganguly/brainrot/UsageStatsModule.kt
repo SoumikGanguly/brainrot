@@ -17,6 +17,7 @@ import android.os.Process
 import android.provider.Settings
 import android.util.Log
 import com.facebook.react.bridge.*
+import org.json.JSONArray
 import java.util.*
 
 class UsageStatsModule(reactContext: ReactApplicationContext) : ReactContextBaseJavaModule(reactContext) {
@@ -180,6 +181,7 @@ class UsageStatsModule(reactContext: ReactApplicationContext) : ReactContextBase
         Log.d(TAG, "startBackgroundMonitoring() called with interval: $intervalMinutes")
         try {
             BackgroundUsageWorker.startPeriodicWork(reactApplicationContext, intervalMinutes.toLong())
+            ForegroundMonitoringService.start(reactApplicationContext)
             startRealtimeMonitoring()
         } catch (e: Exception) {
             Log.e(TAG, "Error starting background monitoring", e)
@@ -191,9 +193,49 @@ class UsageStatsModule(reactContext: ReactApplicationContext) : ReactContextBase
         Log.d(TAG, "stopBackgroundMonitoring() called")
         try {
             BackgroundUsageWorker.stopPeriodicWork(reactApplicationContext)
+            ForegroundMonitoringService.stop(reactApplicationContext)
             stopRealtimeMonitoring()
         } catch (e: Exception) {
             Log.e(TAG, "Error stopping background monitoring", e)
+        }
+    }
+
+    @ReactMethod
+    fun getSessionsSince(startTimeMs: Double, promise: Promise) {
+        Log.d(TAG, "getSessionsSince called with startTime: $startTimeMs")
+        try {
+            if (!checkUsageStatsPermission()) {
+                promise.resolve(WritableNativeArray())
+                return
+            }
+
+            val sessionData = getSessionDataSince(startTimeMs.toLong())
+            promise.resolve(sessionData)
+        } catch (e: Exception) {
+            Log.e(TAG, "Error in getSessionsSince", e)
+            promise.reject("GET_SESSIONS_ERROR", e.message)
+        }
+    }
+
+    @ReactMethod
+    fun startFocusStatusService(promise: Promise) {
+        try {
+            ForegroundMonitoringService.start(reactApplicationContext)
+            promise.resolve(true)
+        } catch (e: Exception) {
+            Log.e(TAG, "Error starting focus status service", e)
+            promise.reject("START_FOCUS_STATUS_ERROR", e.message)
+        }
+    }
+
+    @ReactMethod
+    fun stopFocusStatusService(promise: Promise) {
+        try {
+            ForegroundMonitoringService.stop(reactApplicationContext)
+            promise.resolve(true)
+        } catch (e: Exception) {
+            Log.e(TAG, "Error stopping focus status service", e)
+            promise.reject("STOP_FOCUS_STATUS_ERROR", e.message)
         }
     }
 
@@ -441,6 +483,7 @@ class UsageStatsModule(reactContext: ReactApplicationContext) : ReactContextBase
         try {
             val prefs = reactApplicationContext.getSharedPreferences("brainrot_prefs", Context.MODE_PRIVATE)
             prefs.edit().putString("monitored_apps", monitoredAppsJson).apply()
+            UsageChecker(reactApplicationContext).getCurrentBrainState(forceRefresh = true)
             Log.d(TAG, "Monitored apps synced to SharedPreferences")
             promise.resolve(true)
         } catch (e: Exception) {
@@ -457,6 +500,45 @@ class UsageStatsModule(reactContext: ReactApplicationContext) : ReactContextBase
             promise.resolve(true)
         } catch (e: Exception) {
             promise.reject("SYNC_BLOCKING_ERROR", e.message)
+        }
+    }
+
+    @ReactMethod
+    fun syncMonitoringState(monitoringEnabled: Boolean, backgroundChecksEnabled: Boolean, realtimeMonitoringEnabled: Boolean, promise: Promise) {
+        try {
+            val prefs = reactApplicationContext.getSharedPreferences("brainrot_prefs", Context.MODE_PRIVATE)
+            prefs.edit()
+                .putBoolean("monitoring_enabled", monitoringEnabled)
+                .putBoolean("background_checks_enabled", backgroundChecksEnabled)
+                .putBoolean("realtime_monitoring_enabled", realtimeMonitoringEnabled)
+                .apply()
+            promise.resolve(true)
+        } catch (e: Exception) {
+            Log.e(TAG, "Error syncing monitoring state", e)
+            promise.reject("SYNC_MONITORING_ERROR", e.message)
+        }
+    }
+
+    @ReactMethod
+    fun getPendingBlockEvents(promise: Promise) {
+        try {
+            val prefs = reactApplicationContext.getSharedPreferences("brainrot_prefs", Context.MODE_PRIVATE)
+            promise.resolve(prefs.getString("pending_block_events", "[]"))
+        } catch (e: Exception) {
+            Log.e(TAG, "Error getting pending block events", e)
+            promise.reject("GET_BLOCK_EVENTS_ERROR", e.message)
+        }
+    }
+
+    @ReactMethod
+    fun clearPendingBlockEvents(promise: Promise) {
+        try {
+            val prefs = reactApplicationContext.getSharedPreferences("brainrot_prefs", Context.MODE_PRIVATE)
+            prefs.edit().putString("pending_block_events", "[]").apply()
+            promise.resolve(true)
+        } catch (e: Exception) {
+            Log.e(TAG, "Error clearing pending block events", e)
+            promise.reject("CLEAR_BLOCK_EVENTS_ERROR", e.message)
         }
     }
 
@@ -631,6 +713,94 @@ class UsageStatsModule(reactContext: ReactApplicationContext) : ReactContextBase
             }
 
         return result
+    }
+
+    private fun getSessionDataSince(startTimeMs: Long): WritableNativeArray {
+        val usageStatsManager = reactApplicationContext.getSystemService(Context.USAGE_STATS_SERVICE) as UsageStatsManager
+        val endTime = System.currentTimeMillis()
+        val events = usageStatsManager.queryEvents(startTimeMs, endTime)
+        val event = UsageEvents.Event()
+        val sessionStartTimes = HashMap<String, Long>()
+        val result = WritableNativeArray()
+
+        while (events.hasNextEvent()) {
+            events.getNextEvent(event)
+            val pkg = event.packageName ?: continue
+
+            if (pkg == reactApplicationContext.packageName) continue
+
+            when (event.eventType) {
+                UsageEvents.Event.MOVE_TO_FOREGROUND -> {
+                    sessionStartTimes[pkg] = event.timeStamp
+                }
+                UsageEvents.Event.MOVE_TO_BACKGROUND -> {
+                    val startTs = sessionStartTimes[pkg] ?: continue
+                    if (event.timeStamp <= startTs) {
+                        sessionStartTimes.remove(pkg)
+                        continue
+                    }
+
+                    result.pushMap(buildSessionMap(pkg, startTs, event.timeStamp))
+                    sessionStartTimes.remove(pkg)
+                }
+            }
+        }
+
+        sessionStartTimes.forEach { (pkg, startTs) ->
+            if (endTime > startTs) {
+                result.pushMap(buildSessionMap(pkg, startTs, endTime))
+            }
+        }
+
+        return result
+    }
+
+    private fun buildSessionMap(packageName: String, startedAtMs: Long, endedAtMs: Long): WritableNativeMap {
+        val appName = getAppName(packageName)
+        val durationMs = (endedAtMs - startedAtMs).coerceAtLeast(0L)
+        val map = WritableNativeMap()
+        map.putString("date", getLocalDateString(startedAtMs))
+        map.putString("packageName", packageName)
+        map.putString("appName", appName)
+        map.putString("startedAt", formatIsoTimestamp(startedAtMs))
+        map.putString("endedAt", formatIsoTimestamp(endedAtMs))
+        map.putDouble("durationMs", durationMs.toDouble())
+        map.putString("source", "usage_events")
+        map.putBoolean("wasMonitored", isMonitoredPackage(packageName))
+        return map
+    }
+
+    private fun isMonitoredPackage(packageName: String): Boolean {
+        return try {
+            val prefs = reactApplicationContext.getSharedPreferences("brainrot_prefs", Context.MODE_PRIVATE)
+            val monitoredAppsJson = prefs.getString("monitored_apps", "[]") ?: "[]"
+            val jsonArray = JSONArray(monitoredAppsJson)
+            for (i in 0 until jsonArray.length()) {
+                if (jsonArray.optString(i) == packageName) {
+                    return true
+                }
+            }
+            false
+        } catch (_: Exception) {
+            false
+        }
+    }
+
+    private fun getLocalDateString(timestampMs: Long): String {
+        return java.text.SimpleDateFormat("yyyy-MM-dd", Locale.US).format(Date(timestampMs))
+    }
+
+    private fun formatIsoTimestamp(timestampMs: Long): String {
+        return java.text.SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ssXXX", Locale.US).format(Date(timestampMs))
+    }
+
+    private fun getAppName(packageName: String): String {
+        return try {
+            val ai = reactApplicationContext.packageManager.getApplicationInfo(packageName, 0)
+            reactApplicationContext.packageManager.getApplicationLabel(ai).toString()
+        } catch (_: PackageManager.NameNotFoundException) {
+            packageName.substringAfterLast('.').replaceFirstChar { it.uppercase() }
+        }
     }
 
     private fun checkUsageStatsPermission(): Boolean {

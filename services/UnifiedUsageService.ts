@@ -251,6 +251,7 @@ export class UnifiedUsageService {
 
     // Check if monitoring should be started
     const monitoringEnabled = await database.getMeta('monitoring_enabled');
+    await this.applyMonitoringSettings();
     if (monitoringEnabled === 'true') {
       await this.startMonitoring();
     }
@@ -270,6 +271,7 @@ export class UnifiedUsageService {
 
     // Save monitoring state
     await database.setMeta('monitoring_enabled', 'true');
+    await UnifiedUsageService.startFocusStatusService();
 
     await this.applyMonitoringSettings();
 
@@ -290,13 +292,23 @@ export class UnifiedUsageService {
 
     // Save state
     await database.setMeta('monitoring_enabled', 'false');
+    await this.applyMonitoringSettings();
+    await UnifiedUsageService.stopFocusStatusService();
 
     console.log('Usage monitoring stopped');
   }
 
   async applyMonitoringSettings(): Promise<void> {
+    const monitoringEnabled = (await database.getMeta('monitoring_enabled')) === 'true';
+    this.isMonitoring = monitoringEnabled;
     const backgroundChecksEnabled = (await database.getMeta('background_checks_enabled')) !== 'false';
     const realtimeMonitoringEnabled = (await database.getMeta('realtime_monitoring_enabled')) === 'true';
+
+    await UnifiedUsageService.syncMonitoringStateToNative(
+      monitoringEnabled,
+      backgroundChecksEnabled,
+      realtimeMonitoringEnabled
+    );
 
     if (this.isMonitoring && backgroundChecksEnabled) {
       this.startBackgroundMonitoring();
@@ -324,20 +336,26 @@ export class UnifiedUsageService {
 
   private startBackgroundMonitoring(): void {
     this.stopBackgroundMonitoring();
+    if (UnifiedUsageService.isNativeModuleAvailable() && UsageStatsModule.startBackgroundMonitoring) {
+      UsageStatsModule.startBackgroundMonitoring(15);
+      return;
+    }
 
-    // Check every 30 seconds
     this.checkInterval = setInterval(async () => {
       await this.checkUsageAndNotify();
     }, 30000);
 
-    // Initial check
-    this.checkUsageAndNotify();
+    void this.checkUsageAndNotify();
   }
 
   private stopBackgroundMonitoring(): void {
     if (this.checkInterval) {
       clearInterval(this.checkInterval);
       this.checkInterval = undefined;
+    }
+
+    if (UnifiedUsageService.isNativeModuleAvailable() && UsageStatsModule.stopBackgroundMonitoring) {
+      UsageStatsModule.stopBackgroundMonitoring();
     }
   }
 
@@ -408,14 +426,18 @@ export class UnifiedUsageService {
 
         // Send notification using the CORRECT method from NotificationService
         const minutes = Math.round(threshold.duration / 60000);
-        await NotificationService.scheduleUsageAlert(
+        const sent = await NotificationService.scheduleUsageAlert(
           tracker.appName,
           `${minutes} minutes`,
           threshold.intensity
         );
 
-        console.log(`Sent ${threshold.intensity} notification for ${tracker.appName} at ${minutes} minutes`);
-        return true;
+        if (sent) {
+          console.log(`Sent ${threshold.intensity} notification for ${tracker.appName} at ${minutes} minutes`);
+          return true;
+        }
+
+        return false;
       }
     }
 
@@ -493,7 +515,11 @@ export class UnifiedUsageService {
   // ========== MANUAL TRIGGERS ==========
 
   async triggerManualCheck(): Promise<void> {
-    console.log('Manual usage check triggered');
+    if (UnifiedUsageService.isNativeModuleAvailable() && UsageStatsModule.triggerUsageCheck) {
+      UsageStatsModule.triggerUsageCheck();
+      return;
+    }
+
     await this.checkUsageAndNotify();
   }
 
@@ -687,6 +713,56 @@ export class UnifiedUsageService {
     }
   }
 
+  static async startFocusStatusService(): Promise<boolean> {
+    if (!this.isNativeModuleAvailable() || !UsageStatsModule.startFocusStatusService) {
+      return false;
+    }
+
+    try {
+      await UsageStatsModule.startFocusStatusService();
+      return true;
+    } catch (error) {
+      console.error('Error starting focus status service:', error);
+      return false;
+    }
+  }
+
+  static async syncMonitoringStateToNative(
+    monitoringEnabled: boolean,
+    backgroundChecksEnabled: boolean,
+    realtimeMonitoringEnabled: boolean
+  ): Promise<boolean> {
+    if (!this.isNativeModuleAvailable() || !UsageStatsModule.syncMonitoringState) {
+      return false;
+    }
+
+    try {
+      await UsageStatsModule.syncMonitoringState(
+        monitoringEnabled,
+        backgroundChecksEnabled,
+        realtimeMonitoringEnabled
+      );
+      return true;
+    } catch (error) {
+      console.error('Error syncing monitoring state to native:', error);
+      return false;
+    }
+  }
+
+  static async stopFocusStatusService(): Promise<boolean> {
+    if (!this.isNativeModuleAvailable() || !UsageStatsModule.stopFocusStatusService) {
+      return false;
+    }
+
+    try {
+      await UsageStatsModule.stopFocusStatusService();
+      return true;
+    } catch (error) {
+      console.error('Error stopping focus status service:', error);
+      return false;
+    }
+  }
+
   // Get synced monitored apps from native (for debugging)
   static async getSyncedMonitoredApps(): Promise<string[]> {
     if (!this.isNativeModuleAvailable()) {
@@ -828,6 +904,7 @@ export interface BlockingConfigPayload {
   blockingEnabled: boolean;
   blockingMode: 'soft' | 'hard';
   bypassLimit: number;
+  softBlockIntervalMinutes: number;
   scheduleEnabled: boolean;
   scheduleStart: string;
   scheduleEnd: string;

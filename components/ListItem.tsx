@@ -17,9 +17,9 @@ export function ListItem({ title, subtitle, rightElement, onPress }: ListItemPro
       onPress={onPress}
     >
       <View className="flex-1 mr-sm">
-        <Text className="text-base font-medium text-text">{title}</Text>
+        <Text className="font-heading-semibold text-card-title text-text">{title}</Text>
         {subtitle && (
-          <Text className="text-sm text-muted mt-xs">{subtitle}</Text>
+          <Text className="font-body text-secondary text-muted mt-xs">{subtitle}</Text>
         )}
       </View>
       {rightElement}

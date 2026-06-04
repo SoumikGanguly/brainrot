@@ -1,7 +1,7 @@
-// Create ErrorBoundary.tsx
 import React from 'react';
 import { Text, TouchableOpacity, View } from 'react-native';
-import { TelemetryService } from '../../services/TelemetryService';
+
+import { TelemetryService } from '../services/TelemetryService';
 
 interface Props {
   children: React.ReactNode;
@@ -13,7 +13,7 @@ interface State {
   error?: Error;
 }
 
-export class ErrorBoundary extends React.Component<Props, State> {
+export default class ErrorBoundary extends React.Component<Props, State> {
   constructor(props: Props) {
     super(props);
     this.state = { hasError: false };
@@ -37,18 +37,18 @@ export class ErrorBoundary extends React.Component<Props, State> {
   render() {
     if (this.state.hasError) {
       return this.props.fallback || (
-        <View className="flex-1 justify-center items-center p-4">
-          <Text className="text-lg font-bold text-danger mb-4">
+        <View className="flex-1 items-center justify-center p-4">
+          <Text className="mb-4 text-lg font-bold text-danger">
             Something went wrong
           </Text>
-          <Text className="text-sm text-muted mb-4">
+          <Text className="mb-4 text-sm text-muted">
             {this.state.error?.message}
           </Text>
           <TouchableOpacity
             onPress={this.handleReset}
-            className="bg-accent px-6 py-3 rounded-lg"
+            className="rounded-lg bg-accent px-6 py-3"
           >
-            <Text className="text-white font-medium">Try Again</Text>
+            <Text className="font-medium text-white">Try Again</Text>
           </TouchableOpacity>
         </View>
       );

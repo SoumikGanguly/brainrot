@@ -1,5 +1,6 @@
 import { calculateBrainScore } from '../utils/brainScore';
 import { database, type UsageData } from './database';
+import { HistoricalDataService } from './HistoricalDataService';
 import { UnifiedUsageService } from './UnifiedUsageService';
 
 interface BrainScoreResult {
@@ -40,15 +41,31 @@ export class BrainScoreService {
     }
     
     // 1. Try to get pre-computed summary
-    const summary = await database.getDailySummary(dateStr);
+    let summary = await database.getDailySummary(dateStr);
     if (summary) {
       const result = {
         totalUsageMs: summary.totalScreenTime,
-        score: summary.brainScore,
+        score: summary.focusScore ?? summary.brainScore,
         apps: summary.apps
       };
       this.cache.set(dateStr, { data: result, timestamp: Date.now() });
       return result;
+    }
+
+    const rebuilt = await HistoricalDataService.getInstance().rebuildSummaryForDate(dateStr, {
+      force: true,
+    });
+    if (rebuilt) {
+      summary = await database.getDailySummary(dateStr);
+      if (summary) {
+        const result = {
+          totalUsageMs: summary.totalScreenTime,
+          score: summary.focusScore ?? summary.brainScore,
+          apps: summary.apps,
+        };
+        this.cache.set(dateStr, { data: result, timestamp: Date.now() });
+        return result;
+      }
     }
     
     // 2. Compute from raw usage

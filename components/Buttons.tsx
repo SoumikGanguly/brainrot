@@ -12,7 +12,7 @@ export function PrimaryButton({ title, className, disabled, ...props }: ButtonPr
       disabled={disabled}
       {...props}
     >
-      <Text className={`text-base font-semibold ${disabled ? 'text-gray-500' : 'text-white'}`}>{title}</Text>
+      <Text className={`font-heading-semibold text-card-title ${disabled ? 'text-gray-500' : 'text-white'}`}>{title}</Text>
     </TouchableOpacity>
   );
 }
@@ -23,7 +23,7 @@ export function SecondaryButton({ title, className, ...props }: ButtonProps) {
       className={`bg-surface border border-accent py-sm px-md rounded-lg items-center justify-center ${className || ''}`}
       {...props}
     >
-      <Text className="text-base font-semibold text-accent">{title}</Text>
+      <Text className="font-heading-semibold text-card-title text-accent">{title}</Text>
     </TouchableOpacity>
   );
 }

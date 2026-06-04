@@ -3,3 +3,13 @@
 # and AndroidManifest entries (UsageStatsModule, overlay services, etc.).
 # Excluding `android/` causes EAS to prebuild a generic project and drop
 # those custom integrations, breaking permission flows.
+
+# Keep the native project, but never upload machine-specific generated artifacts.
+android/build/
+android/.gradle/
+android/.kotlin/
+android/app/build/
+
+# Local-only files
+notes.txt
+.env*.local

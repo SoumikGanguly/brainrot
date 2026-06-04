@@ -1,5 +1,6 @@
 import { BrainScoreService } from './BrainScore';
 import { HistoricalDataService } from './HistoricalDataService';
+import { TelemetryService } from './TelemetryService';
 import { UnifiedUsageService } from './UnifiedUsageService';
 import { database, type AppSettings } from './database';
 
@@ -65,6 +66,9 @@ export class MonitoredAppsService {
     await UnifiedUsageService.syncMonitoredAppsToNative(nextMonitoredPackages);
     await UnifiedUsageService.getInstance().refreshMonitoredApps();
     await this.refreshDerivedData();
+    TelemetryService.capture('monitored_apps_selected_count', {
+      monitored_count: nextMonitoredPackages.length,
+    });
 
     return nextMonitoredPackages;
   }
@@ -139,10 +143,10 @@ export class MonitoredAppsService {
       blockingEnabled: (await database.getMeta('app_blocking_enabled')) === 'true',
       blockingMode: ((await database.getMeta('blocking_mode')) || 'soft') as 'soft' | 'hard',
       bypassLimit: parseInt((await database.getMeta('block_bypass_limit')) || '3', 10),
+      softBlockIntervalMinutes: parseInt((await database.getMeta('soft_block_interval_minutes')) || '15', 10),
       scheduleEnabled: (await database.getMeta('block_schedule_enabled')) === 'true',
       scheduleStart: (await database.getMeta('block_schedule_start')) || '22:00',
       scheduleEnd: (await database.getMeta('block_schedule_end')) || '06:00',
     });
   }
 }
-

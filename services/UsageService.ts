@@ -16,6 +16,30 @@ export interface UsageData {
   lastTimeUsed: number;
 }
 
+export interface AppSessionData {
+  date: string;
+  packageName: string;
+  appName: string;
+  startedAt: string;
+  endedAt: string;
+  durationMs: number;
+  source: string;
+  wasMonitored: boolean;
+}
+
+export interface BlockEventData {
+  date: string;
+  packageName: string;
+  appName: string;
+  triggeredAt: string;
+  blockType: string;
+  limitMs?: number | null;
+  usageAtTriggerMs?: number | null;
+  action: 'blocked' | 'bypassed' | 'cooldown_started' | 'accountability_requested' | 'abandoned';
+  resolvedAt?: string | null;
+  source?: string;
+}
+
 export class UsageService {
   private static readonly RECOMMENDED_APPS = [
     { packageName: 'com.google.android.youtube', appName: 'YouTube', isRecommended: true },
@@ -135,6 +159,53 @@ export class UsageService {
     } catch (error) {
       console.error('Error getting today usage:', error);
       return [];
+    }
+  }
+
+  static async getSessionsSince(startTimeMs: number): Promise<AppSessionData[]> {
+    try {
+      if (Platform.OS !== 'android' || !UsageStatsModule?.getSessionsSince) {
+        return [];
+      }
+
+      const sessions = await UsageStatsModule.getSessionsSince(startTimeMs);
+      return sessions || [];
+    } catch (error) {
+      console.error('Error getting sessions:', error);
+      return [];
+    }
+  }
+
+  static async getTodaySessions(): Promise<AppSessionData[]> {
+    const startOfDay = new Date();
+    startOfDay.setHours(0, 0, 0, 0);
+    return this.getSessionsSince(startOfDay.getTime());
+  }
+
+  static async getPendingBlockEvents(): Promise<BlockEventData[]> {
+    try {
+      if (Platform.OS !== 'android' || !UsageStatsModule?.getPendingBlockEvents) {
+        return [];
+      }
+
+      const jsonString = await UsageStatsModule.getPendingBlockEvents();
+      return jsonString ? JSON.parse(jsonString) as BlockEventData[] : [];
+    } catch (error) {
+      console.error('Error getting pending block events:', error);
+      return [];
+    }
+  }
+
+  static async clearPendingBlockEvents(): Promise<boolean> {
+    try {
+      if (Platform.OS !== 'android' || !UsageStatsModule?.clearPendingBlockEvents) {
+        return false;
+      }
+
+      return await UsageStatsModule.clearPendingBlockEvents();
+    } catch (error) {
+      console.error('Error clearing pending block events:', error);
+      return false;
     }
   }
 

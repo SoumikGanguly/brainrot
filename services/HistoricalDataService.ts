@@ -1,5 +1,16 @@
-import { calculateBrainScore } from '../utils/brainScore';
-import { database } from './database';
+import { database, type AppSession, type UsageData } from './database';
+import {
+  calculateBrainScore,
+  getBrainStateLabel,
+  type BrainScoreMetrics,
+} from '../utils/brainScore';
+
+interface AggregatedAppUsage extends UsageData {
+  openCount: number;
+}
+
+const SUMMARY_INTEGRITY_WARNING_MS = 2 * 60 * 1000;
+const DAILY_SUMMARY_VERSION = 'v2';
 
 export class HistoricalDataService {
   private static instance: HistoricalDataService;
@@ -27,33 +38,72 @@ export class HistoricalDataService {
       }
 
       const monitoredPackages = await database.getMonitoredPackages();
+      const monitoredSet = new Set(monitoredPackages);
+      monitoredSet.delete('com.soumikganguly.brainrot');
+
+      const sessions = await database.getAppSessionsForDate(dateStr);
       const rawUsage = await database.getDailyUsage(dateStr);
 
-      if (rawUsage.length === 0) {
+      if (rawUsage.length === 0 && sessions.length === 0) {
         console.log(`No raw usage data for ${dateStr}, skipping summary rebuild`);
         return false;
       }
 
-      const monitoredSet = new Set(monitoredPackages);
-      monitoredSet.delete('com.soumikganguly.brainrot');
-      const monitoredUsage = (monitoredSet.size === 0
-        ? rawUsage.filter(app => app.packageName !== 'com.soumikganguly.brainrot')
-        : rawUsage.filter(app => monitoredSet.has(app.packageName))
-      ).map(app => ({
-        packageName: app.packageName,
-        appName: app.appName,
-        totalTimeMs: app.totalTimeMs,
-        date: dateStr,
-      }));
+      const sessionUsage = this.buildAggregatedUsageFromSessions(dateStr, sessions, monitoredSet);
+      const rawUsageAggregated = this.buildAggregatedUsageFromRaw(dateStr, rawUsage, monitoredSet);
+      const monitoredUsage = sessionUsage.length > 0 ? sessionUsage : rawUsageAggregated;
+      const monitoredSessions = sessions.filter((session) =>
+        monitoredSet.size === 0
+          ? session.packageName !== 'com.soumikganguly.brainrot'
+          : monitoredSet.has(session.packageName)
+      );
+      const blockEvents = await database.getBlockEventsForDate(dateStr);
       const totalScreenTime = monitoredUsage.reduce((sum, app) => sum + app.totalTimeMs, 0);
-      const brainScore = calculateBrainScore(totalScreenTime);
+      const sessionTotalMs = sessionUsage.reduce((sum, app) => sum + app.totalTimeMs, 0);
+      const rawUsageTotalMs = rawUsageAggregated.reduce((sum, app) => sum + app.totalTimeMs, 0);
+      const integrityDeltaMs = Math.abs(sessionTotalMs - rawUsageTotalMs);
+      const summarySource: 'sessions' | 'raw_usage' =
+        sessionUsage.length > 0 ? 'sessions' : 'raw_usage';
+      const totalMonitoredOpens = monitoredSessions.length;
+      const longestSessionMs = monitoredSessions.reduce((max, session) => Math.max(max, session.durationMs), 0);
+      const averageSessionMs = totalMonitoredOpens > 0 ? Math.round(totalScreenTime / totalMonitoredOpens) : 0;
+      const topApp = monitoredUsage[0] ?? null;
+      const metrics: BrainScoreMetrics = {
+        totalDistractingMinutes: totalScreenTime / 60000,
+        totalMonitoredOpens,
+        longestSessionMinutes: longestSessionMs / 60000,
+        bypassCount: blockEvents.filter((event) => event.action === 'bypassed').length,
+        successfulAvoidances: blockEvents.filter((event) => event.action === 'abandoned').length,
+      };
+      const focusScore = calculateBrainScore(metrics);
+      const brainHealthStatus = getBrainStateLabel(focusScore);
 
       const summary = {
         date: dateStr,
         totalScreenTime,
-        brainScore,
-        apps: monitoredUsage
+        brainScore: focusScore,
+        apps: monitoredUsage.map(({ openCount: _openCount, ...app }) => app),
+        totalDistractingMs: totalScreenTime,
+        totalMonitoredOpens,
+        longestSessionMs,
+        averageSessionMs,
+        topAppPackage: topApp?.packageName ?? null,
+        topAppName: topApp?.appName ?? null,
+        topAppMs: topApp?.totalTimeMs ?? 0,
+        focusScore,
+        brainHealthStatus,
+        summarySource,
+        sessionTotalMs,
+        rawUsageTotalMs,
+        integrityDeltaMs,
+        summaryVersion: DAILY_SUMMARY_VERSION,
       };
+
+      if (sessionUsage.length > 0 && rawUsageAggregated.length > 0 && integrityDeltaMs > SUMMARY_INTEGRITY_WARNING_MS) {
+        console.warn(
+          `Summary integrity drift on ${dateStr}: sessions=${sessionTotalMs} raw=${rawUsageTotalMs} delta=${integrityDeltaMs}`
+        );
+      }
 
       await database.saveDailySummary(dateStr, summary);
       return true;
@@ -61,6 +111,59 @@ export class HistoricalDataService {
       console.error(`Error rebuilding summary for ${dateStr}:`, error);
       return false;
     }
+  }
+
+  private buildAggregatedUsageFromSessions(
+    dateStr: string,
+    sessions: AppSession[],
+    monitoredSet: Set<string>
+  ): AggregatedAppUsage[] {
+    const filteredSessions = sessions.filter((session) =>
+      monitoredSet.size === 0
+        ? session.packageName !== 'com.soumikganguly.brainrot'
+        : monitoredSet.has(session.packageName)
+    );
+
+    if (filteredSessions.length === 0) {
+      return [];
+    }
+
+    const usageMap = new Map<string, AggregatedAppUsage>();
+    for (const session of filteredSessions) {
+      const existing = usageMap.get(session.packageName);
+      if (existing) {
+        existing.totalTimeMs += session.durationMs;
+        existing.openCount += 1;
+        continue;
+      }
+
+      usageMap.set(session.packageName, {
+        packageName: session.packageName,
+        appName: session.appName,
+        totalTimeMs: session.durationMs,
+        date: dateStr,
+        openCount: 1,
+      });
+    }
+
+    return Array.from(usageMap.values()).sort((a, b) => b.totalTimeMs - a.totalTimeMs);
+  }
+
+  private buildAggregatedUsageFromRaw(
+    dateStr: string,
+    rawUsage: UsageData[],
+    monitoredSet: Set<string>
+  ): AggregatedAppUsage[] {
+    return (monitoredSet.size === 0
+      ? rawUsage.filter((app) => app.packageName !== 'com.soumikganguly.brainrot')
+      : rawUsage.filter((app) => monitoredSet.has(app.packageName))
+    )
+      .map((app) => ({
+        ...app,
+        date: dateStr,
+        openCount: 0,
+      }))
+      .sort((a, b) => b.totalTimeMs - a.totalTimeMs);
   }
 
   async saveTodaySummary(): Promise<void> {

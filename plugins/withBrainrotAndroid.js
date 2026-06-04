@@ -28,6 +28,7 @@ const ADDITIONAL_DEPENDENCIES = [
 
 const REQUIRED_PERMISSIONS = [
   { "android:name": "android.permission.FOREGROUND_SERVICE", __nodeKey: "android.permission.FOREGROUND_SERVICE" },
+  { "android:name": "android.permission.FOREGROUND_SERVICE_DATA_SYNC", __nodeKey: "android.permission.FOREGROUND_SERVICE_DATA_SYNC" },
   { "android:name": "android.permission.FOREGROUND_SERVICE_SPECIAL_USE", __nodeKey: "android.permission.FOREGROUND_SERVICE_SPECIAL_USE" },
   {
     "android:name": "android.permission.PACKAGE_USAGE_STATS",

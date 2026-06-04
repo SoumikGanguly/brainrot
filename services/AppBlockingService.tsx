@@ -1,5 +1,6 @@
 import { Alert, AppState, AppStateStatus } from 'react-native';
 import { database } from './database';
+import { TelemetryService } from './TelemetryService';
 import { UnifiedUsageService } from './UnifiedUsageService';
 import { UsageService } from './UsageService';
 
@@ -18,12 +19,15 @@ export class AppBlockingService {
   private blockingEnabled = false;
   private blockingMode: BlockingMode = 'soft';
   private bypassLimit = 3;
+  private softBlockIntervalMinutes = 15;
   private scheduleEnabled = false;
   private scheduleStart = '22:00';
   private scheduleEnd = '06:00';
   private hasAccessibilityPermission = false;
   private currentForegroundApp?: string;
+  private currentForegroundAppStartedAt?: number;
   private lastFallbackBlockAt = 0;
+  private lastSoftBlockShownAt = 0;
 
   static getInstance(): AppBlockingService {
     if (!this.instance) {
@@ -55,6 +59,9 @@ export class AppBlockingService {
   async setBlockingEnabled(enabled: boolean): Promise<void> {
     this.blockingEnabled = enabled;
     await database.setMeta('app_blocking_enabled', enabled.toString());
+    TelemetryService.capture('blocking_enabled_changed', {
+      enabled,
+    });
     await this.syncNativeConfig();
     await this.applyRuntimeBehavior();
   }
@@ -62,6 +69,9 @@ export class AppBlockingService {
   async setBlockingMode(mode: BlockingMode): Promise<void> {
     this.blockingMode = mode;
     await database.setMeta('blocking_mode', mode);
+    TelemetryService.capture('blocking_mode_changed', {
+      mode,
+    });
     await this.syncNativeConfig();
     await this.applyRuntimeBehavior();
   }
@@ -69,6 +79,12 @@ export class AppBlockingService {
   async setBypassLimit(limit: number): Promise<void> {
     this.bypassLimit = limit;
     await database.setMeta('block_bypass_limit', limit.toString());
+    await this.syncNativeConfig();
+  }
+
+  async setSoftBlockIntervalMinutes(minutes: number): Promise<void> {
+    this.softBlockIntervalMinutes = minutes;
+    await database.setMeta('soft_block_interval_minutes', minutes.toString());
     await this.syncNativeConfig();
   }
 
@@ -104,13 +120,17 @@ export class AppBlockingService {
     }
 
     const now = Date.now();
-    if (now - this.lastFallbackBlockAt < 3000 || this.blockingMode === 'hard') {
+    if (this.blockingMode === 'hard') {
       if (this.blockingMode === 'hard') {
         Alert.alert(
           'Accessibility Required',
           'Hard block requires Accessibility access on Android. Enable Accessibility to turn hard blocking on.'
         );
       }
+      return;
+    }
+
+    if (now - this.lastFallbackBlockAt < 1500) {
       return;
     }
 
@@ -123,7 +143,13 @@ export class AppBlockingService {
       return;
     }
 
+    const intervalMs = this.softBlockIntervalMinutes * 60 * 1000;
+    if (this.lastSoftBlockShownAt !== 0 && now - this.lastSoftBlockShownAt < intervalMs) {
+      return;
+    }
+
     this.lastFallbackBlockAt = now;
+    this.lastSoftBlockShownAt = now;
     await UnifiedUsageService.showBlockingOverlay(
       packageName,
       appName || this.blockedApps.get(packageName)?.appName || UnifiedUsageService.getAppDisplayName(packageName),
@@ -155,6 +181,7 @@ export class AppBlockingService {
     currentApp?: string;
     monitoring: boolean;
     bypassLimit: number;
+    softBlockIntervalMinutes: number;
     mode: BlockingMode;
     accessibilityEnabled: boolean;
   } {
@@ -165,6 +192,7 @@ export class AppBlockingService {
       currentApp: this.currentForegroundApp,
       monitoring: !!this.fallbackPollingInterval,
       bypassLimit: this.bypassLimit,
+      softBlockIntervalMinutes: this.softBlockIntervalMinutes,
       mode: this.blockingMode,
       accessibilityEnabled: this.hasAccessibilityPermission,
     };
@@ -182,6 +210,7 @@ export class AppBlockingService {
     this.blockingEnabled = (await database.getMeta('app_blocking_enabled')) === 'true';
     this.blockingMode = ((await database.getMeta('blocking_mode')) || 'soft') as BlockingMode;
     this.bypassLimit = parseInt((await database.getMeta('block_bypass_limit')) || '3', 10);
+    this.softBlockIntervalMinutes = parseInt((await database.getMeta('soft_block_interval_minutes')) || '15', 10);
     this.scheduleEnabled = (await database.getMeta('block_schedule_enabled')) === 'true';
     this.scheduleStart = (await database.getMeta('block_schedule_start')) || '22:00';
     this.scheduleEnd = (await database.getMeta('block_schedule_end')) || '06:00';
@@ -214,6 +243,7 @@ export class AppBlockingService {
       blockingEnabled: this.blockingEnabled,
       blockingMode: this.blockingMode,
       bypassLimit: this.bypassLimit,
+      softBlockIntervalMinutes: this.softBlockIntervalMinutes,
       scheduleEnabled: this.scheduleEnabled,
       scheduleStart: this.scheduleStart,
       scheduleEnd: this.scheduleEnd,
@@ -253,14 +283,31 @@ export class AppBlockingService {
     try {
       const currentForegroundApp = await UsageService.getCurrentForegroundApp();
       if (!currentForegroundApp?.packageName || currentForegroundApp.packageName === 'com.soumikganguly.brainrot') {
+        this.currentForegroundApp = currentForegroundApp?.packageName;
+        this.currentForegroundAppStartedAt = undefined;
+        this.lastSoftBlockShownAt = 0;
         return;
       }
 
       if (currentForegroundApp.packageName === this.currentForegroundApp) {
+        if (
+          this.blockingMode === 'soft' &&
+          this.blockingEnabled &&
+          this.blockedApps.has(currentForegroundApp.packageName) &&
+          this.currentForegroundAppStartedAt
+        ) {
+          const now = Date.now();
+          const intervalMs = this.softBlockIntervalMinutes * 60 * 1000;
+          if (now - this.lastSoftBlockShownAt >= intervalMs) {
+            await this.evaluateForegroundApp(currentForegroundApp.packageName, currentForegroundApp.appName);
+          }
+        }
         return;
       }
 
       this.currentForegroundApp = currentForegroundApp.packageName;
+      this.currentForegroundAppStartedAt = Date.now();
+      this.lastSoftBlockShownAt = 0;
       await this.evaluateForegroundApp(currentForegroundApp.packageName, currentForegroundApp.appName);
     } catch (error) {
       console.error('Error checking blocked app fallback:', error);
@@ -273,4 +320,3 @@ export class AppBlockingService {
     }
   };
 }
-

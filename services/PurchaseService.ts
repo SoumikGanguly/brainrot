@@ -1,4 +1,5 @@
 import { database } from './database';
+import { TelemetryService } from './TelemetryService';
 
 class PurchaseServiceClass {
   async isPremium(): Promise<boolean> {
@@ -21,10 +22,20 @@ class PurchaseServiceClass {
 
 
   async purchaseLifetime(): Promise<boolean> {
+    TelemetryService.capture('purchase_started', {
+      purchase_type: 'lifetime',
+      environment: __DEV__ ? 'development' : 'production',
+    });
+
     if (__DEV__) {
       // Simulate purchase in dev mode
       await new Promise(resolve => setTimeout(resolve, 2000)); // Simulate network delay
       await database.setMeta('dev_premium_status', 'true');
+      TelemetryService.capture('purchase_completed', {
+        purchase_type: 'lifetime',
+        success: true,
+        environment: 'development',
+      });
       return true;
     }
 
@@ -33,9 +44,19 @@ class PurchaseServiceClass {
       // Your actual RevenueCat purchase implementation here
       // const purchaserInfo = await Purchases.purchasePackage(package);
       // return purchaserInfo.entitlements.active.premium !== undefined;
+      TelemetryService.capture('purchase_completed', {
+        purchase_type: 'lifetime',
+        success: false,
+        environment: 'production',
+      });
       return false;
     } catch (error) {
       console.error('Error making purchase:', error);
+      TelemetryService.capture('purchase_completed', {
+        purchase_type: 'lifetime',
+        success: false,
+        environment: 'production',
+      });
       return false;
     }
   }

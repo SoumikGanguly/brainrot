@@ -5,12 +5,19 @@ module.exports = {
   theme: {
     extend: {
       colors: {
-        bg: '#FFFFFF',
-        surface: '#F8F9FA',
-        accent: '#4F46E5',
+        bg: '#F8F9FC',
+        surface: '#F8F9FC',
+        card: '#FFFFFF',
+        accent: '#5B4CF0',
         danger: '#EF4444',
-        muted: '#6B7280',
-        text: '#111827',
+        muted: '#64748B',
+        text: '#0F172A',
+      },
+      fontFamily: {
+        body: ['Inter_400Regular'],
+        'body-semibold': ['Inter_600SemiBold'],
+        'heading-semibold': ['PlusJakartaSans_600SemiBold'],
+        'heading-bold': ['PlusJakartaSans_700Bold'],
       },
       spacing: {
         'xs': '4px',
@@ -20,9 +27,13 @@ module.exports = {
       },
       fontSize: {
         'xl': '24px',
-        'lg': '18px',
-        'base': '16px',
-        'sm': '14px',
+        'lg': '20px',
+        'base': '14px',
+        'sm': '12px',
+        'section': '20px',
+        'card-title': '16px',
+        'body': '14px',
+        'secondary': '12px',
       }
     }
   },

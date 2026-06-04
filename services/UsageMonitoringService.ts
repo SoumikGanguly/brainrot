@@ -359,11 +359,15 @@ export class UsageMonitoringService {
           const usageTimeFormatted = this.formatDuration(tracker.totalTodayMs);
           
           try {
-            await NotificationService.scheduleUsageAlert(
+            const sent = await NotificationService.scheduleUsageAlert(
               tracker.appName,
               usageTimeFormatted,
               threshold.intensity
             );
+
+            if (!sent) {
+              continue;
+            }
 
             tracker.notificationsSent.add(i);
             
