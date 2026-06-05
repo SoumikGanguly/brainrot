@@ -1,7 +1,13 @@
 import { database, type AppSession, type BlockEvent, type DailyUsage } from './database';
 import { HistoricalDataService } from './HistoricalDataService';
 
-export type DayMoment = 'Early morning' | 'Before lunch' | 'Mid day' | 'Evening' | 'Before bed';
+export type DayMoment =
+  | 'Early morning'
+  | 'Morning'
+  | 'Mid day'
+  | 'Before lunch'
+  | 'Evening'
+  | 'Before bed';
 
 export interface ReplayEntry {
   packageName: string;
@@ -137,10 +143,11 @@ export class DailyInsightsService {
 
   private getMomentLabel(isoTimestamp: string): DayMoment {
     const hour = new Date(isoTimestamp).getHours();
-    if (hour >= 4 && hour < 8) return 'Early morning';
-    if (hour >= 8 && hour < 12) return 'Before lunch';
-    if (hour >= 12 && hour < 16) return 'Mid day';
-    if (hour >= 16 && hour < 22) return 'Evening';
+    if (hour >= 4 && hour < 7) return 'Early morning';
+    if (hour >= 7 && hour < 9) return 'Morning';
+    if (hour >= 9 && hour < 12) return 'Mid day';
+    if (hour >= 12 && hour < 14) return 'Before lunch';
+    if (hour >= 14 && hour < 22) return 'Evening';
     return 'Before bed';
   }
 }

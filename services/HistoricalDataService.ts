@@ -1,4 +1,5 @@
 import { database, type AppSession, type UsageData } from './database';
+import { UsageService } from './UsageService';
 import {
   calculateBrainScore,
   getBrainStateLabel,
@@ -41,7 +42,10 @@ export class HistoricalDataService {
       const monitoredSet = new Set(monitoredPackages);
       monitoredSet.delete('com.soumikganguly.brainrot');
 
-      const sessions = await database.getAppSessionsForDate(dateStr);
+      let sessions = await database.getAppSessionsForDate(dateStr);
+      if (sessions.length === 0) {
+        sessions = await this.hydrateSessionsForDate(dateStr);
+      }
       const rawUsage = await database.getDailyUsage(dateStr);
 
       if (rawUsage.length === 0 && sessions.length === 0) {
@@ -111,6 +115,49 @@ export class HistoricalDataService {
       console.error(`Error rebuilding summary for ${dateStr}:`, error);
       return false;
     }
+  }
+
+  private async hydrateSessionsForDate(dateStr: string): Promise<AppSession[]> {
+    try {
+      const startOfDate = this.getStartOfLocalDay(dateStr);
+      const nativeSessions = await UsageService.getSessionsSince(startOfDate.getTime());
+
+      const sessionRows: AppSession[] = nativeSessions
+        .filter((session) => this.getSessionDate(session) === dateStr)
+        .map((session) => ({
+          date: session.date || dateStr,
+          packageName: session.packageName,
+          appName: session.appName,
+          startedAt: session.startedAt,
+          endedAt: session.endedAt,
+          durationMs: Math.round(session.durationMs),
+          source: session.source || 'usage_events',
+          wasMonitored: Boolean(session.wasMonitored),
+        }));
+
+      if (sessionRows.length === 0) {
+        return [];
+      }
+
+      await database.saveAppSessions(sessionRows);
+      return await database.getAppSessionsForDate(dateStr);
+    } catch (error) {
+      console.error(`Error hydrating sessions for ${dateStr}:`, error);
+      return [];
+    }
+  }
+
+  private getStartOfLocalDay(dateStr: string): Date {
+    const [year, month, day] = dateStr.split('-').map(Number);
+    return new Date(year, month - 1, day, 0, 0, 0, 0);
+  }
+
+  private getSessionDate(session: Pick<AppSession, 'date' | 'startedAt'>): string {
+    if (session.date) {
+      return session.date;
+    }
+
+    return session.startedAt.slice(0, 10);
   }
 
   private buildAggregatedUsageFromSessions(

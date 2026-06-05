@@ -61,9 +61,9 @@ function TabsLayoutContent() {
       <Tabs.Screen
         name="blocking"
         options={{
-          title: 'Blocking',
+          title: 'Focus',
           tabBarIcon: ({ color, size }) => (
-            <MaterialIcons name="block" size={size} color={color} />
+            <MaterialIcons name="timer" size={size} color={color} />
           ),
         }}
       />

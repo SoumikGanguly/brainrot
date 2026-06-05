@@ -24,6 +24,7 @@ export interface AppSettings {
   appName: string;
   monitored: boolean;
   dailyLimitMs: number;
+  protectionMode?: 'monitor' | 'limit' | 'locked' | 'ignore' | null;
 }
 
 export interface TrialInfo {

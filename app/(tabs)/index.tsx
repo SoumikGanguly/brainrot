@@ -100,7 +100,11 @@ function buildInsightCard(
 	const totalOpens = summary?.totalMonitoredOpens ?? replayEntries.length;
 	const wastedTimeMs = todayInsights?.wastedTimeMs ?? summary?.totalDistractingMs ?? 0;
 	const beforeLunchEntries = replayEntries.filter(
-		(entry) => entry.moment === "Early morning" || entry.moment === "Before lunch",
+		(entry) =>
+			entry.moment === "Early morning" ||
+			entry.moment === "Morning" ||
+			entry.moment === "Mid day" ||
+			entry.moment === "Before lunch",
 	);
 	const beforeBedEntries = replayEntries.filter((entry) => entry.moment === "Before bed");
 	const todayScore = summary?.focusScore ?? summary?.brainScore ?? 0;

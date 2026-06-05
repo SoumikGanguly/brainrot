@@ -690,6 +690,7 @@ class UsageStatsModule(reactContext: ReactApplicationContext) : ReactContextBase
         val event = UsageEvents.Event()
         val usageMap = HashMap<String, Long>()
         val sessionStartTimes = HashMap<String, Long>()
+        var activePackage: String? = null
 
         while (events.hasNextEvent()) {
             events.getNextEvent(event)
@@ -699,7 +700,15 @@ class UsageStatsModule(reactContext: ReactApplicationContext) : ReactContextBase
 
             when (event.eventType) {
                 UsageEvents.Event.MOVE_TO_FOREGROUND -> {
+                    if (activePackage != null && activePackage != pkg) {
+                        val previousStartTs = sessionStartTimes.remove(activePackage)
+                        if (previousStartTs != null && event.timeStamp > previousStartTs) {
+                            val sessionDuration = event.timeStamp - previousStartTs
+                            usageMap[activePackage!!] = (usageMap[activePackage!!] ?: 0L) + sessionDuration
+                        }
+                    }
                     sessionStartTimes[pkg] = event.timeStamp
+                    activePackage = pkg
                 }
                 UsageEvents.Event.MOVE_TO_BACKGROUND -> {
                     val startTs = sessionStartTimes[pkg]
@@ -707,6 +716,9 @@ class UsageStatsModule(reactContext: ReactApplicationContext) : ReactContextBase
                         val sessionDuration = event.timeStamp - startTs
                         usageMap[pkg] = (usageMap[pkg] ?: 0L) + sessionDuration
                         sessionStartTimes.remove(pkg)
+                    }
+                    if (activePackage == pkg) {
+                        activePackage = null
                     }
                 }
             }
@@ -751,6 +763,7 @@ class UsageStatsModule(reactContext: ReactApplicationContext) : ReactContextBase
         val event = UsageEvents.Event()
         val sessionStartTimes = HashMap<String, Long>()
         val result = WritableNativeArray()
+        var activePackage: String? = null
 
         while (events.hasNextEvent()) {
             events.getNextEvent(event)
@@ -760,17 +773,30 @@ class UsageStatsModule(reactContext: ReactApplicationContext) : ReactContextBase
 
             when (event.eventType) {
                 UsageEvents.Event.MOVE_TO_FOREGROUND -> {
+                    if (activePackage != null && activePackage != pkg) {
+                        val previousStartTs = sessionStartTimes.remove(activePackage)
+                        if (previousStartTs != null && event.timeStamp > previousStartTs) {
+                            result.pushMap(buildSessionMap(activePackage!!, previousStartTs, event.timeStamp))
+                        }
+                    }
                     sessionStartTimes[pkg] = event.timeStamp
+                    activePackage = pkg
                 }
                 UsageEvents.Event.MOVE_TO_BACKGROUND -> {
                     val startTs = sessionStartTimes[pkg] ?: continue
                     if (event.timeStamp <= startTs) {
                         sessionStartTimes.remove(pkg)
+                        if (activePackage == pkg) {
+                            activePackage = null
+                        }
                         continue
                     }
 
                     result.pushMap(buildSessionMap(pkg, startTs, event.timeStamp))
                     sessionStartTimes.remove(pkg)
+                    if (activePackage == pkg) {
+                        activePackage = null
+                    }
                 }
             }
         }

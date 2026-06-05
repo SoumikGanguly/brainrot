@@ -1,6 +1,5 @@
 import { Ionicons } from "@expo/vector-icons";
-import { useEffect, useMemo, useRef, useState } from "react";
-import { useLocalSearchParams } from "expo-router";
+import { useEffect, useRef, useState } from "react";
 import {
   AppState,
   AppStateStatus,
@@ -27,13 +26,17 @@ import {
 import { getBrainStateLevel } from "../../utils/brainScore";
 import { formatTime } from "../../utils/time";
 
-type ReplayDay = "today" | "yesterday";
 const TIMELINE_MAX_HEIGHT = 430;
 const replayMomentTheme = {
 	"Early morning": {
 		dot: "#F59E0B",
 		pillBackground: "#FFF1D6",
 		pillText: "#C66A00",
+	},
+	Morning: {
+		dot: "#FBBF24",
+		pillBackground: "#FFF7D6",
+		pillText: "#B45309",
 	},
 	"Before lunch": {
 		dot: "#9AD9FF",
@@ -63,11 +66,9 @@ function formatLocalDate(date: Date): string {
 	return `${year}-${month}-${day}`;
 }
 
-function getDateForTab(tab: ReplayDay): string {
+function getYesterdayDate(): string {
 	const date = new Date();
-	if (tab === "yesterday") {
-		date.setDate(date.getDate() - 1);
-	}
+	date.setDate(date.getDate() - 1);
 	return formatLocalDate(date);
 }
 
@@ -135,9 +136,6 @@ function getBrainExpression(score: number | null | undefined) {
 }
 
 export default function ReplayScreen() {
-	const params = useLocalSearchParams<{ day?: string }>();
-	const initialDay: ReplayDay = params.day === "today" ? "today" : "yesterday";
-	const [selectedDay, setSelectedDay] = useState<ReplayDay>(initialDay);
 	const [loading, setLoading] = useState(true);
 	const [hasUsagePermission, setHasUsagePermission] = useState(false);
 	const [manufacturerInfo, setManufacturerInfo] =
@@ -154,18 +152,7 @@ export default function ReplayScreen() {
 	const pendingPermissionCheck = useRef(false);
 	const appStateRef = useRef<AppStateStatus>(AppState.currentState);
 
-	const selectedDate = useMemo(() => getDateForTab(selectedDay), [selectedDay]);
-
-	useEffect(() => {
-		if (params.day === "today") {
-			setSelectedDay("today");
-			return;
-		}
-
-		if (params.day === "yesterday") {
-			setSelectedDay("yesterday");
-		}
-	}, [params.day]);
+	const selectedDate = getYesterdayDate();
 
 	useEffect(() => {
 		const loadManufacturerInfo = async () => {
@@ -312,33 +299,15 @@ export default function ReplayScreen() {
 				)}
 
 				<Card className="mx-md mb-md">
-					<View className="flex-row rounded-2xl bg-slate-100 p-1">
-						<TouchableOpacity
-							onPress={() => setSelectedDay("yesterday")}
-							className={`flex-1 rounded-2xl px-4 py-3 ${selectedDay === "yesterday" ? "bg-white" : ""}`}
-						>
-							<Text
-								className={`text-center font-heading-semibold ${selectedDay === "yesterday" ? "text-text" : "text-muted"}`}
-							>
-								Yesterday&apos;s Replay
-							</Text>
-						</TouchableOpacity>
-						<TouchableOpacity
-							onPress={() => setSelectedDay("today")}
-							className={`flex-1 rounded-2xl px-4 py-3 ${selectedDay === "today" ? "bg-white" : ""}`}
-						>
-							<Text
-								className={`text-center font-heading-semibold ${selectedDay === "today" ? "text-text" : "text-muted"}`}
-							>
-								Today&apos;s Replay
-							</Text>
-						</TouchableOpacity>
-					</View>
-					<Text className="mt-3 text-center font-body text-secondary text-muted">
+					<Text className="text-center font-heading-semibold text-card-title text-text">
+						Yesterday
+					</Text>
+					<Text className="mt-2 text-center font-body text-secondary text-muted">
 						{new Date(selectedDate).toLocaleDateString("en-US", {
 							weekday: "long",
 							month: "long",
 							day: "numeric",
+							year: "numeric",
 						})}
 					</Text>
 				</Card>

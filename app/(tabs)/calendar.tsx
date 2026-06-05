@@ -105,6 +105,11 @@ const replayMomentTheme = {
 		pillBackground: "#FFF1D6",
 		pillText: "#C66A00",
 	},
+	Morning: {
+		dot: "#FBBF24",
+		pillBackground: "#FFF7D6",
+		pillText: "#B45309",
+	},
 	"Before lunch": {
 		dot: "#9AD9FF",
 		pillBackground: "#E7F6FF",
@@ -379,6 +384,7 @@ export default function Calendar() {
 	const [monitoredPackages, setMonitoredPackages] = useState<string[]>([]);
 	const [manufacturerInfo, setManufacturerInfo] =
 		useState<ManufacturerPermissionInfo | null>(null);
+	const [isRefreshingHistory, setIsRefreshingHistory] = useState(false);
 	const pendingPermissionCheck = useRef(false);
 	const appStateRef = useRef<AppStateStatus>(AppState.currentState);
 
@@ -393,21 +399,52 @@ export default function Calendar() {
 			console.error("Error checking permission:", error);
 		}
 
-		loadHistoricalData();
+		void loadHistoricalData();
 	}
 
 	async function loadHistoricalData() {
 		try {
 			setLoading(true);
 
-			// First, sync today's data from native to database
+			const [summaries, monitored] = await Promise.all([
+				database.getHistoricalData(90),
+				database.getMonitoredPackages(),
+			]);
+
+			setMonitoredPackages(monitored);
+			setHistoricalData(
+				summaries.map((entry) => ({
+					date: entry.date,
+					totalScreenTime: entry.totalScreenTime,
+					brainScore: entry.focusScore ?? entry.brainScore,
+					brainHealthStatus: entry.brainHealthStatus,
+					apps: entry.apps.map((app) => ({
+						packageName: app.packageName,
+						appName: app.appName,
+						totalTimeMs: app.totalTimeMs,
+					})),
+				}))
+			);
+		} catch (error) {
+			console.error("Error loading historical data:", error);
+			setHistoricalData([]);
+		} finally {
+			setLoading(false);
+		}
+
+		void refreshHistoricalDataInBackground();
+	}
+
+	async function refreshHistoricalDataInBackground() {
+		try {
+			setIsRefreshingHistory(true);
+
 			if (UnifiedUsageService.isNativeModuleAvailable()) {
 				const hasPermission = await UnifiedUsageService.isUsageAccessGranted();
 				if (hasPermission) {
 					try {
 						const syncService = DataSyncService.getInstance();
 						await syncService.syncUsageData();
-
 						console.log("Calendar: Synced today's data from native");
 					} catch (syncError) {
 						console.warn("Calendar: Failed to sync data:", syncError);
@@ -415,54 +452,51 @@ export default function Calendar() {
 				}
 			}
 
-			const monitored = await database.getMonitoredPackages();
-			setMonitoredPackages(monitored);
-
 			const brainScoreService = BrainScoreService.getInstance();
-			const data: DailyData[] = [];
-
-			// Get last 90 days
+			const nextData = new Map<string, DailyData>(
+				historicalData.map((entry) => [entry.date, entry]),
+			);
 			const today = new Date();
+
 			for (let i = 0; i < 90; i++) {
 				const date = new Date(today);
 				date.setDate(date.getDate() - i);
 				const dateStr = formatLocalDate(date);
 
 				try {
-					// Use SAME service as HomeScreen (now with native fallback)
 					const result = await brainScoreService.getBrainScoreForDate(dateStr);
+					if (result.apps.length === 0 && result.totalUsageMs === 0) {
+						continue;
+					}
 
-					if (result.apps.length > 0 || result.totalUsageMs > 0) {
-						const summary = await database.getDailySummary(dateStr);
-						data.push({
-							date: dateStr,
-							totalScreenTime: result.totalUsageMs,
-							brainScore: result.score,
-							brainHealthStatus: summary?.brainHealthStatus,
-							apps: result.apps.map((app) => ({
-								packageName: app.packageName,
-								appName: app.appName,
-								totalTimeMs: app.totalTimeMs,
-							})),
-						});
+					const summary = await database.getDailySummary(dateStr);
+					nextData.set(dateStr, {
+						date: dateStr,
+						totalScreenTime: result.totalUsageMs,
+						brainScore: result.score,
+						brainHealthStatus: summary?.brainHealthStatus,
+						apps: result.apps.map((app) => ({
+							packageName: app.packageName,
+							appName: app.appName,
+							totalTimeMs: app.totalTimeMs,
+						})),
+					});
+
+					if (i % 7 === 0 || i === 89) {
+						setHistoricalData(
+							Array.from(nextData.values()).sort(
+								(a, b) => new Date(b.date).getTime() - new Date(a.date).getTime(),
+							),
+						);
 					}
 				} catch (error) {
 					console.warn(`Failed to get data for ${dateStr}:`, error);
-					// Skip this day, continue with next
 				}
 			}
-
-			// Sort by date descending
-			data.sort(
-				(a, b) => new Date(b.date).getTime() - new Date(a.date).getTime(),
-			);
-
-			setHistoricalData(data);
 		} catch (error) {
-			console.error("Error loading historical data:", error);
-			setHistoricalData([]);
+			console.error("Error refreshing historical data:", error);
 		} finally {
-			setLoading(false);
+			setIsRefreshingHistory(false);
 		}
 	}
 
@@ -1048,6 +1082,14 @@ export default function Calendar() {
 		<SafeAreaView className="flex-1 bg-bg">
 			<ScrollView className="flex-1" showsVerticalScrollIndicator={false}>
 				<Header title="Progress" />
+
+				{isRefreshingHistory && (
+					<View className="px-md pb-sm">
+						<Text className="font-body text-secondary text-muted">
+							Updating your history...
+						</Text>
+					</View>
+				)}
 
 				{/* Permission Warning - Show prominently when not granted */}
 				{!hasUsagePermission && (

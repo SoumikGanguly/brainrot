@@ -125,8 +125,8 @@ export default function AppSelectionBottomSheet({
           {/* Header */}
           <View style={styles.header}>
             <View style={{ flex: 1 }}>
-              <Text style={styles.title}>Add Apps to Monitor</Text>
-              <Text style={styles.subtitle}>Select apps you want to track for brain health scoring</Text>
+              <Text style={styles.title}>Add Protected Apps</Text>
+              <Text style={styles.subtitle}>Select apps you want Brainrot to protect</Text>
             </View>
             <TouchableOpacity onPress={onClose} style={styles.iconButton}>
               <MaterialIcons name="close" size={20} color="#64748B" />
@@ -213,7 +213,6 @@ const AppSelectionRow = memo(function AppSelectionRow({
           <Text numberOfLines={1} style={styles.itemTitle}>{item.appName}</Text>
           {item.isRecommended && <View style={styles.recommendedBadge}><Text style={styles.recommendedText}>Recommended</Text></View>}
         </View>
-        <Text numberOfLines={1} style={styles.itemSubtitle}>{item.packageName}</Text>
         {item.category ? <Text numberOfLines={1} style={styles.itemCategory}>{item.category}</Text> : null}
       </View>
 

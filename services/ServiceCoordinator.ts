@@ -58,26 +58,16 @@ export class ServiceCoordinator {
 
       this.lastAppCheckTime.set(packageName, now);
 
-      // Check if blocking is enabled
-      const blockingEnabled = await database.getMeta('app_blocking_enabled');
-      if (blockingEnabled !== 'true') return;
-
-      // Check if this app is blocked
-      const blockedAppsData = await database.getMeta('blocked_apps');
-      if (!blockedAppsData) return;
-
-      const blockedPackages = JSON.parse(blockedAppsData) as string[];
-      if (!blockedPackages.includes(packageName)) return;
-
-      // App is blocked - trigger the blocking service
-      console.log(`Coordinator: Detected blocked app ${packageName}, triggering blocking check`);
-
-      // Force the blocking service to check this app
       const blockingService = AppBlockingService.getInstance();
-
-      // We need to make the blocking service's checkCurrentApp method accessible
-      // For now, we'll reinitialize it which will trigger a check
       await blockingService.initialize();
+      const protectedApps = await blockingService.getProtectedApps();
+      const protectedApp = protectedApps.find((app) => app.packageName === packageName);
+      if (!protectedApp || protectedApp.protectionMode === 'monitor' || protectedApp.protectionMode === 'ignore') {
+        return;
+      }
+
+      console.log(`Coordinator: Detected protected app ${packageName}, triggering focus check`);
+      await blockingService.evaluateForegroundApp(packageName, protectedApp.appName);
 
     } catch (error) {
       console.error('Error in checkIfAppShouldBeBlocked:', error);

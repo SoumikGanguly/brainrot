@@ -1,34 +1,19 @@
 package com.soumikganguly.brainrot
 
-import android.app.NotificationChannel
-import android.app.NotificationManager
-import android.app.Notification
 import android.app.usage.UsageEvents
 import android.app.usage.UsageStatsManager
 import android.content.Context
 import android.content.pm.PackageManager
-import android.os.Build
 import android.util.Log
-import androidx.core.app.NotificationCompat
-import androidx.core.app.NotificationManagerCompat
 import org.json.JSONArray
-import org.json.JSONObject
 import java.text.SimpleDateFormat
 import java.util.*
 
 class UsageChecker(private val context: Context) {
     
     private val TAG = "UsageChecker"
-    private val notificationManager = NotificationManagerCompat.from(context)
     private val usageStatsManager = context.getSystemService(Context.USAGE_STATS_SERVICE) as UsageStatsManager
     private val packageManager = context.packageManager
-    
-    // Track which notifications we've already sent today
-    private val sentNotifications = mutableSetOf<String>()
-    
-    init {
-        createNotificationChannels()
-    }
     
     fun checkUsageAndNotify() {
         Log.d(TAG, "Starting background usage check")
@@ -47,7 +32,7 @@ class UsageChecker(private val context: Context) {
             
             for (packageName in monitoredApps) {
                 val appUsage = todayUsage[packageName] ?: 0L
-                checkAppUsageThresholds(packageName, appUsage)
+                Log.d(TAG, "Usage for $packageName: ${appUsage / (1000 * 60)} min today")
             }
             
         } catch (e: Exception) {
@@ -82,10 +67,8 @@ class UsageChecker(private val context: Context) {
             return
         }
         
-        val todayUsage = getTodayUsageForApp(packageName)
-        checkAppUsageThresholds(packageName, todayUsage)
     }
-    
+
     private fun getTodayUsageStats(): Map<String, Long> {
         val cal = Calendar.getInstance()
         cal.set(Calendar.HOUR_OF_DAY, 0)
@@ -96,72 +79,6 @@ class UsageChecker(private val context: Context) {
         val endTime = System.currentTimeMillis()
 
         return getUsageStatsFromEvents(startTime, endTime)
-    }
-    
-    private fun getTodayUsageForApp(packageName: String): Long {
-        val todayUsage = getTodayUsageStats()
-        return todayUsage[packageName] ?: 0L
-    }
-    
-    private fun checkAppUsageThresholds(packageName: String, usageMs: Long) {
-        val appName = getAppName(packageName)
-        val usageMinutes = usageMs / (1000 * 60)
-        
-        val thresholds = listOf(
-            Threshold(30, "mild", "Time for a quick break?"),
-            Threshold(45, "normal", "Consider switching to something productive"),
-            Threshold(60, "harsh", "Your brain needs a break from $appName"),
-            Threshold(90, "critical", "🧠 BRAIN ROT ALERT: $appName overload!")
-        )
-        
-        for (threshold in thresholds) {
-            val notificationKey = "$packageName-${threshold.minutes}-${getCurrentDateString()}"
-            
-            if (usageMinutes >= threshold.minutes && !sentNotifications.contains(notificationKey)) {
-                sendUsageNotification(appName, usageMinutes.toInt(), threshold)
-                sentNotifications.add(notificationKey)
-                Log.d(TAG, "Sent ${threshold.intensity} notification for $appName (${usageMinutes}min)")
-                break // Only send one notification per check
-            }
-        }
-    }
-    
-    private fun sendUsageNotification(appName: String, usageMinutes: Int, threshold: Threshold) {
-        val channelId = when (threshold.intensity) {
-            "critical" -> "brainrot_critical"
-            "harsh" -> "brainrot_harsh"
-            "normal" -> "brainrot_normal"
-            else -> "brainrot_mild"
-        }
-        
-        val title = when (threshold.intensity) {
-            "critical" -> "🚨 BRAIN ROT ALERT"
-            "harsh" -> "⚠️ Heavy Usage Warning"
-            "normal" -> "📱 Usage Reminder"
-            else -> "💡 Gentle Reminder"
-        }
-        
-        val message = "${threshold.message}\n${formatUsageTime(usageMinutes)} on $appName today"
-        
-        val notification = NotificationCompat.Builder(context, channelId)
-            .setSmallIcon(android.R.drawable.ic_dialog_alert)
-            .setContentTitle(title)
-            .setContentText(message)
-            .setStyle(NotificationCompat.BigTextStyle().bigText(message))
-            .setPriority(when (threshold.intensity) {
-                "critical" -> NotificationCompat.PRIORITY_MAX
-                "harsh" -> NotificationCompat.PRIORITY_HIGH
-                else -> NotificationCompat.PRIORITY_DEFAULT
-            })
-            .setAutoCancel(true)
-            .setVibrate(if (threshold.intensity in listOf("harsh", "critical")) longArrayOf(0, 500, 200, 500) else null)
-            .build()
-            
-        try {
-            notificationManager.notify("${appName}_usage".hashCode(), notification)
-        } catch (e: SecurityException) {
-            Log.e(TAG, "Notification permission not granted", e)
-        }
     }
     
     private fun getMonitoredApps(): List<String> {
@@ -210,22 +127,6 @@ class UsageChecker(private val context: Context) {
         }
     }
     
-    private fun formatUsageTime(minutes: Int): String {
-        return when {
-            minutes < 60 -> "${minutes}min"
-            else -> {
-                val hours = minutes / 60
-                val remainingMinutes = minutes % 60
-                if (remainingMinutes == 0) "${hours}h" else "${hours}h ${remainingMinutes}min"
-            }
-        }
-    }
-    
-    private fun getCurrentDateString(): String {
-        val cal = Calendar.getInstance()
-        return "${cal.get(Calendar.YEAR)}-${cal.get(Calendar.MONTH)}-${cal.get(Calendar.DAY_OF_MONTH)}"
-    }
-
     private fun updateBrainState(
         monitoredApps: List<String>,
         todayUsage: Map<String, Long>?
@@ -288,23 +189,39 @@ class UsageChecker(private val context: Context) {
         val sessionStartTimes = HashMap<String, Long>()
         var totalMonitoredOpens = 0
         var longestSessionMs = 0L
+        var activePackage: String? = null
 
         while (events.hasNextEvent()) {
             events.getNextEvent(event)
             val packageName = event.packageName ?: continue
-            if (!monitoredSet.contains(packageName)) {
-                continue
-            }
 
             when (event.eventType) {
                 UsageEvents.Event.MOVE_TO_FOREGROUND -> {
-                    totalMonitoredOpens += 1
-                    sessionStartTimes[packageName] = event.timeStamp
+                    if (activePackage != null && activePackage != packageName && monitoredSet.contains(activePackage)) {
+                        val previousStartTs = sessionStartTimes.remove(activePackage)
+                        if (previousStartTs != null && event.timeStamp > previousStartTs) {
+                            longestSessionMs = maxOf(longestSessionMs, event.timeStamp - previousStartTs)
+                        }
+                    }
+                    if (monitoredSet.contains(packageName)) {
+                        totalMonitoredOpens += 1
+                        sessionStartTimes[packageName] = event.timeStamp
+                    }
+                    activePackage = packageName
                 }
                 UsageEvents.Event.MOVE_TO_BACKGROUND -> {
+                    if (!monitoredSet.contains(packageName)) {
+                        if (activePackage == packageName) {
+                            activePackage = null
+                        }
+                        continue
+                    }
                     val startTs = sessionStartTimes.remove(packageName) ?: continue
                     if (event.timeStamp > startTs) {
                         longestSessionMs = maxOf(longestSessionMs, event.timeStamp - startTs)
+                    }
+                    if (activePackage == packageName) {
+                        activePackage = null
                     }
                 }
             }
@@ -336,6 +253,7 @@ class UsageChecker(private val context: Context) {
         val event = UsageEvents.Event()
         val usageMap = mutableMapOf<String, Long>()
         val sessionStartTimes = HashMap<String, Long>()
+        var activePackage: String? = null
 
         while (events.hasNextEvent()) {
             events.getNextEvent(event)
@@ -346,12 +264,22 @@ class UsageChecker(private val context: Context) {
 
             when (event.eventType) {
                 UsageEvents.Event.MOVE_TO_FOREGROUND -> {
+                    if (activePackage != null && activePackage != packageName) {
+                        val previousStartTs = sessionStartTimes.remove(activePackage)
+                        if (previousStartTs != null && event.timeStamp > previousStartTs) {
+                            usageMap[activePackage!!] = (usageMap[activePackage!!] ?: 0L) + (event.timeStamp - previousStartTs)
+                        }
+                    }
                     sessionStartTimes[packageName] = event.timeStamp
+                    activePackage = packageName
                 }
                 UsageEvents.Event.MOVE_TO_BACKGROUND -> {
                     val startTs = sessionStartTimes.remove(packageName) ?: continue
                     if (event.timeStamp > startTs) {
                         usageMap[packageName] = (usageMap[packageName] ?: 0L) + (event.timeStamp - startTs)
+                    }
+                    if (activePackage == packageName) {
+                        activePackage = null
                     }
                 }
             }
@@ -393,40 +321,6 @@ class UsageChecker(private val context: Context) {
         }
     }
     
-    private fun createNotificationChannels() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            val channels = listOf(
-                NotificationChannel("brainrot_mild", "Gentle Reminders", NotificationManager.IMPORTANCE_LOW),
-                NotificationChannel("brainrot_normal", "Usage Reminders", NotificationManager.IMPORTANCE_DEFAULT),
-                NotificationChannel("brainrot_harsh", "Strong Warnings", NotificationManager.IMPORTANCE_HIGH),
-                NotificationChannel("brainrot_critical", "Critical Alerts", NotificationManager.IMPORTANCE_HIGH)
-            )
-            
-            val notificationManager = context.getSystemService(NotificationManager::class.java)
-            channels.forEach { channel ->
-                channel.description = "Brain health notifications - ${channel.name}"
-                channel.lockscreenVisibility = Notification.VISIBILITY_PUBLIC
-                if (channel.id == "brainrot_critical") {
-                    channel.enableVibration(true)
-                    channel.vibrationPattern = longArrayOf(0, 500, 200, 500)
-                }
-                notificationManager.createNotificationChannel(channel)
-            }
-        }
-    }
-    
-    // Reset daily notifications (call at midnight)
-    fun resetDailyNotifications() {
-        sentNotifications.clear()
-        Log.d(TAG, "Daily notifications reset")
-    }
-    
-    data class Threshold(
-        val minutes: Int,
-        val intensity: String,
-        val message: String
-    )
-
     data class BrainState(
         val score: Int,
         val status: String,

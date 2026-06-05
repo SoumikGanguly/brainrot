@@ -64,6 +64,7 @@ export default function SettingsScreen() {
 	const [widgetPreviewScore, setWidgetPreviewScore] = useState<string>("--");
 	const [widgetPreviewScoreColor, setWidgetPreviewScoreColor] =
 		useState("#5D3DF0");
+	const [analyticsLabelTapCount, setAnalyticsLabelTapCount] = useState(0);
 	const [request, response, promptAsync] = Google.useIdTokenAuthRequest({
 		webClientId: firebaseGoogleClientIds.webClientId,
 		androidClientId: firebaseGoogleClientIds.androidClientId,
@@ -259,7 +260,7 @@ export default function SettingsScreen() {
 				if (!granted) {
 					Alert.alert(
 						"Overlay Required",
-						"Grant Display over other apps to preview the soft block screen.",
+						"Grant Display over other apps to preview the limit screen.",
 					);
 					await refresh();
 					return;
@@ -272,7 +273,7 @@ export default function SettingsScreen() {
 				if (!granted) {
 					Alert.alert(
 						"Accessibility Required",
-						"Enable Accessibility to preview the hard block screen.",
+						"Enable Accessibility to preview the locked screen.",
 					);
 					await refresh();
 					return;
@@ -281,7 +282,7 @@ export default function SettingsScreen() {
 
 			await UnifiedUsageService.showBlockingOverlay(
 				"dev.preview.app",
-				mode === "soft" ? "Soft Block Preview" : "Hard Block Preview",
+				mode === "soft" ? "Limit Screen Preview" : "Locked Screen Preview",
 				mode,
 			);
 		} catch (error) {
@@ -487,6 +488,31 @@ export default function SettingsScreen() {
 		setWidgetPreviewVisible(true);
 	};
 
+	const disableFixedNotificationEasterEgg = async () => {
+		setAnalyticsLabelTapCount((currentCount) => {
+			const nextCount = currentCount + 1;
+			if (nextCount < 4) {
+				return nextCount;
+			}
+
+			void (async () => {
+				try {
+					await UnifiedUsageService.setFocusStatusNotificationEnabled(false);
+					Alert.alert(
+						"Shh...",
+						"The fixed focus notification has been disabled on this device.",
+					);
+				} catch (error) {
+					const message =
+						error instanceof Error ? error.message : "Unknown notification error";
+					Alert.alert("Couldn't disable notification", message);
+				}
+			})();
+
+			return 0;
+		});
+	};
+
 	if (loading) {
 		return (
 			<SafeAreaView className="flex-1 bg-bg">
@@ -690,6 +716,7 @@ export default function SettingsScreen() {
 						onValueChange={(value) =>
 							TelemetryService.setEnabled(value).then(() => void refresh())
 						}
+						onLabelPress={() => void disableFixedNotificationEasterEgg()}
 					/>
 					<Text className="mt-sm font-body text-secondary text-muted">
 						Crash reporting stays on through Sentry so app failures can still be
@@ -712,10 +739,10 @@ export default function SettingsScreen() {
 				{__DEV__ && (
 					<Card className="mx-md mb-md bg-gray-50">
 						<Text className="mb-sm font-heading-bold text-section text-text">
-							Dev Blocking Preview
+							Dev Focus Preview
 						</Text>
 						<Text className="mb-md font-body text-secondary text-muted">
-							Open the native soft and hard block screens directly for testing.
+							Open the native limit and locked screens directly for testing.
 						</Text>
 						<View className="flex-row">
 							<TouchableOpacity
@@ -723,7 +750,7 @@ export default function SettingsScreen() {
 								className="flex-1 rounded-lg bg-accent px-4 py-3 items-center"
 							>
 								<Text className="font-heading-semibold text-secondary text-white">
-									Preview Soft Block
+									Preview Limit Screen
 								</Text>
 							</TouchableOpacity>
 							<TouchableOpacity
@@ -731,7 +758,7 @@ export default function SettingsScreen() {
 								className="flex-1 rounded-lg bg-danger ml-sm px-4 py-3 items-center"
 							>
 								<Text className="font-heading-semibold text-secondary text-white">
-									Preview Hard Block
+									Preview Locked Screen
 								</Text>
 							</TouchableOpacity>
 						</View>
@@ -838,17 +865,27 @@ function ToggleRow({
 	label,
 	value,
 	onValueChange,
+	onLabelPress,
 }: {
 	label: string;
 	value: boolean;
 	onValueChange: (value: boolean) => void;
+	onLabelPress?: () => void;
 }) {
 	return (
 		<View className="py-sm border-b border-gray-100 last:border-b-0">
 			<View className="flex-row items-center justify-between">
-				<Text className="font-heading-semibold text-card-title text-text">
-					{label}
-				</Text>
+				{onLabelPress ? (
+					<TouchableOpacity onPress={onLabelPress} activeOpacity={0.85}>
+						<Text className="font-heading-semibold text-card-title text-text">
+							{label}
+						</Text>
+					</TouchableOpacity>
+				) : (
+					<Text className="font-heading-semibold text-card-title text-text">
+						{label}
+					</Text>
+				)}
 				<Switch
 					value={value}
 					onValueChange={onValueChange}

@@ -10,6 +10,7 @@ const UsageStatsModule = NativeModules.UsageStatsModule;
  */
 export class UnifiedUsageService {
   private static instance: UnifiedUsageService;
+  private static readonly FOCUS_STATUS_NOTIFICATION_ENABLED_KEY = 'focus_status_notification_enabled';
 
   // Core monitoring state
   private isMonitoring = false;
@@ -29,15 +30,6 @@ export class UnifiedUsageService {
     { packageName: 'com.netflix.mediaclient', appName: 'Netflix', isRecommended: true },
     { packageName: 'com.whatsapp', appName: 'WhatsApp', isRecommended: true },
     { packageName: 'com.discord', appName: 'Discord', isRecommended: true },
-  ];
-
-  // Notification thresholds (in milliseconds)
-  private static readonly THRESHOLDS: UsageThreshold[] = [
-    { duration: 30 * 60 * 1000, intensity: 'mild' },     // 30 minutes
-    { duration: 45 * 60 * 1000, intensity: 'normal' },   // 45 minutes
-    { duration: 60 * 60 * 1000, intensity: 'harsh' },    // 1 hour
-    { duration: 90 * 60 * 1000, intensity: 'critical' }, // 1.5 hours
-    { duration: 120 * 60 * 1000, intensity: 'critical' }, // 2 hours
   ];
 
   static getInstance(): UnifiedUsageService {
@@ -190,7 +182,11 @@ export class UnifiedUsageService {
     return app?.totalTimeMs || 0;
   }
 
-  static async getCurrentForegroundApp(): Promise<string | null> {
+  static async getCurrentForegroundApp(): Promise<{
+    packageName: string;
+    appName: string;
+    timestamp: number;
+  } | null> {
     if (!this.isNativeModuleAvailable()) {
       return null;
     }
@@ -254,6 +250,8 @@ export class UnifiedUsageService {
     await this.applyMonitoringSettings();
     if (monitoringEnabled === 'true') {
       await this.startMonitoring();
+    } else {
+      await UnifiedUsageService.stopFocusStatusService();
     }
 
     console.log('UnifiedUsageService initialized');
@@ -271,7 +269,11 @@ export class UnifiedUsageService {
 
     // Save monitoring state
     await database.setMeta('monitoring_enabled', 'true');
-    await UnifiedUsageService.startFocusStatusService();
+    if (await UnifiedUsageService.isFocusStatusNotificationEnabled()) {
+      await UnifiedUsageService.startFocusStatusService();
+    } else {
+      await UnifiedUsageService.stopFocusStatusService();
+    }
 
     await this.applyMonitoringSettings();
 
@@ -303,6 +305,8 @@ export class UnifiedUsageService {
     this.isMonitoring = monitoringEnabled;
     const backgroundChecksEnabled = (await database.getMeta('background_checks_enabled')) !== 'false';
     const realtimeMonitoringEnabled = (await database.getMeta('realtime_monitoring_enabled')) === 'true';
+    const focusStatusNotificationEnabled =
+      await UnifiedUsageService.isFocusStatusNotificationEnabled();
 
     await UnifiedUsageService.syncMonitoringStateToNative(
       monitoringEnabled,
@@ -320,6 +324,12 @@ export class UnifiedUsageService {
       await this.startRealtimeDetection();
     } else {
       await this.stopRealtimeDetection();
+    }
+
+    if (this.isMonitoring && focusStatusNotificationEnabled) {
+      await UnifiedUsageService.startFocusStatusService();
+    } else {
+      await UnifiedUsageService.stopFocusStatusService();
     }
   }
 
@@ -342,10 +352,10 @@ export class UnifiedUsageService {
     }
 
     this.checkInterval = setInterval(async () => {
-      await this.checkUsageAndNotify();
+      await this.refreshTrackedUsage();
     }, 30000);
 
-    void this.checkUsageAndNotify();
+    void this.refreshTrackedUsage();
   }
 
   private stopBackgroundMonitoring(): void {
@@ -381,67 +391,24 @@ export class UnifiedUsageService {
     }
   }
 
-  // ========== NOTIFICATION LOGIC ==========
+  // ========== TRACKED USAGE REFRESH ==========
 
-  private async checkUsageAndNotify(): Promise<void> {
+  private async refreshTrackedUsage(): Promise<void> {
     try {
-      // Check if notifications are snoozed
-      const snoozeUntilStr = await database.getMeta('notifications_snooze_until');
-      const snoozeUntil = snoozeUntilStr ? parseInt(snoozeUntilStr) : 0;
-      if (Date.now() < snoozeUntil) {
-        return;
-      }
-
-      // Get current usage data
       const todayUsage = await UnifiedUsageService.getTodayUsage();
 
-      // Check each tracked app
       for (const [packageName, tracker] of this.appTrackers) {
         const currentUsage = todayUsage.find(u => u.packageName === packageName);
         const currentTotalMs = currentUsage?.totalTimeMs || 0;
 
-        // Only check if usage has increased
         if (currentTotalMs > tracker.totalTodayMs) {
           tracker.totalTodayMs = currentTotalMs;
           tracker.lastCheckedMs = Date.now();
-
-          // Check thresholds and send notifications
-          await this.checkThresholdsForApp(tracker);
         }
       }
     } catch (error) {
-      console.error('Error in checkUsageAndNotify:', error);
+      console.error('Error refreshing tracked usage:', error);
     }
-  }
-
-  private async checkThresholdsForApp(tracker: AppUsageTracker): Promise<boolean> {
-    const NotificationService = (await import('./NotificationService')).NotificationService;
-
-    for (const threshold of UnifiedUsageService.THRESHOLDS) {
-      if (tracker.totalTodayMs >= threshold.duration &&
-        !tracker.notificationsSent.has(threshold.duration)) {
-
-        // Mark as sent
-        tracker.notificationsSent.add(threshold.duration);
-
-        // Send notification using the CORRECT method from NotificationService
-        const minutes = Math.round(threshold.duration / 60000);
-        const sent = await NotificationService.scheduleUsageAlert(
-          tracker.appName,
-          `${minutes} minutes`,
-          threshold.intensity
-        );
-
-        if (sent) {
-          console.log(`Sent ${threshold.intensity} notification for ${tracker.appName} at ${minutes} minutes`);
-          return true;
-        }
-
-        return false;
-      }
-    }
-
-    return false;
   }
 
   // ========== TRACKED APPS MANAGEMENT ==========
@@ -503,8 +470,6 @@ export class UnifiedUsageService {
       if (currentTotalMs > tracker.totalTodayMs) {
         tracker.totalTodayMs = currentTotalMs;
         tracker.lastCheckedMs = Date.now();
-
-        await this.checkThresholdsForApp(tracker);
       }
 
     } catch (error) {
@@ -520,7 +485,7 @@ export class UnifiedUsageService {
       return;
     }
 
-    await this.checkUsageAndNotify();
+    await this.refreshTrackedUsage();
   }
 
   // ========== BLOCKING OVERLAY METHODS ==========
@@ -763,6 +728,21 @@ export class UnifiedUsageService {
     }
   }
 
+  static async isFocusStatusNotificationEnabled(): Promise<boolean> {
+    return (await database.getMeta(this.FOCUS_STATUS_NOTIFICATION_ENABLED_KEY)) !== 'false';
+  }
+
+  static async setFocusStatusNotificationEnabled(enabled: boolean): Promise<boolean> {
+    await database.setMeta(this.FOCUS_STATUS_NOTIFICATION_ENABLED_KEY, String(enabled));
+
+    const monitoringEnabled = (await database.getMeta('monitoring_enabled')) === 'true';
+    if (enabled && monitoringEnabled) {
+      return this.startFocusStatusService();
+    }
+
+    return this.stopFocusStatusService();
+  }
+
   // Get synced monitored apps from native (for debugging)
   static async getSyncedMonitoredApps(): Promise<string[]> {
     if (!this.isNativeModuleAvailable()) {
@@ -859,11 +839,6 @@ interface AppUsageData {
   lastTimeStamp?: number;
 }
 
-interface UsageThreshold {
-  duration: number;
-  intensity: 'mild' | 'normal' | 'harsh' | 'critical';
-}
-
 interface AppUsageTracker {
   packageName: string;
   appName: string;
@@ -899,13 +874,12 @@ export interface ManufacturerPermissionInfo {
 }
 
 export interface BlockingConfigPayload {
-  monitoredApps: string[];
-  blockedApps: string[];
+  protectedApps: Array<{
+    packageName: string;
+    mode: 'monitor' | 'limit' | 'locked' | 'ignore';
+  }>;
+  focusSessionActive: boolean;
   blockingEnabled: boolean;
-  blockingMode: 'soft' | 'hard';
-  bypassLimit: number;
-  softBlockIntervalMinutes: number;
-  scheduleEnabled: boolean;
-  scheduleStart: string;
-  scheduleEnd: string;
+  limitIntervalMinutes: number;
+  lockedPassesPerDay: number;
 }

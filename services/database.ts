@@ -71,6 +71,7 @@ export interface AppSettings {
   appName: string;
   monitored: boolean;
   dailyLimitMs: number;
+  protectionMode?: 'monitor' | 'limit' | 'locked' | 'ignore' | null;
 }
 
 export interface TrialInfo {
@@ -124,6 +125,7 @@ interface AppSettingsRow {
   appName: string;
   monitored: number;
   dailyLimitMs: number;
+  protectionMode?: string | null;
 }
 
 interface MonitoredAppRow {
@@ -207,7 +209,8 @@ export class DatabaseService {
         packageName TEXT PRIMARY KEY,
         appName TEXT NOT NULL,
         monitored BOOLEAN DEFAULT 1,
-        dailyLimitMs INTEGER DEFAULT 7200000
+        dailyLimitMs INTEGER DEFAULT 7200000,
+        protectionMode TEXT
       )
     `);
     
@@ -322,6 +325,7 @@ export class DatabaseService {
     this.ensureColumn('daily_summary', 'rawUsageTotalMs', 'INTEGER');
     this.ensureColumn('daily_summary', 'integrityDeltaMs', 'INTEGER');
     this.ensureColumn('daily_summary', 'summaryVersion', 'TEXT');
+    this.ensureColumn('app_settings', 'protectionMode', 'TEXT');
   }
 
   private ensureColumn(tableName: string, columnName: string, definition: string): void {
@@ -684,7 +688,7 @@ export class DatabaseService {
     return new Promise((resolve, reject) => {
       try {
         const result = this.db.getAllSync(
-          `SELECT packageName, appName, monitored, dailyLimitMs 
+          `SELECT packageName, appName, monitored, dailyLimitMs, protectionMode
            FROM app_settings 
            ORDER BY appName`
         ) as AppSettingsRow[];
@@ -693,7 +697,9 @@ export class DatabaseService {
           packageName: row.packageName,
           appName: row.appName,
           monitored: Boolean(row.monitored),
-          dailyLimitMs: row.dailyLimitMs
+          dailyLimitMs: row.dailyLimitMs,
+          protectionMode:
+            (row.protectionMode as AppSettings['protectionMode']) ?? null,
         }));
         
         resolve(settings);
@@ -754,8 +760,14 @@ export class DatabaseService {
       try {
         this.db.runSync(
           `INSERT OR REPLACE INTO app_settings 
-           (packageName, appName, monitored, dailyLimitMs) VALUES (?, ?, ?, ?)`,
-          [settings.packageName, settings.appName, settings.monitored ? 1 : 0, settings.dailyLimitMs]
+           (packageName, appName, monitored, dailyLimitMs, protectionMode) VALUES (?, ?, ?, ?, ?)`,
+          [
+            settings.packageName,
+            settings.appName,
+            settings.monitored ? 1 : 0,
+            settings.dailyLimitMs,
+            settings.protectionMode ?? null,
+          ]
         );
         
         // Clear cache when settings change

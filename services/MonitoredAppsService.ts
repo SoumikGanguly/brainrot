@@ -1,3 +1,4 @@
+import { AppBlockingService } from './AppBlockingService';
 import { BrainScoreService } from './BrainScore';
 import { HistoricalDataService } from './HistoricalDataService';
 import { TelemetryService } from './TelemetryService';
@@ -59,6 +60,7 @@ export class MonitoredAppsService {
         appName,
         monitored,
         dailyLimitMs,
+        protectionMode: existing?.protectionMode ?? (monitored ? 'monitor' : null),
       });
       await database.setMeta(`app_monitored_${packageName}`, monitored.toString());
     }
@@ -120,6 +122,8 @@ export class MonitoredAppsService {
         dailyLimitMs:
           nextSettings.get(app.packageName)?.dailyLimitMs ||
           MonitoredAppsService.DEFAULT_DAILY_LIMIT_MS,
+        protectionMode:
+          nextSettings.get(app.packageName)?.protectionMode ?? 'monitor',
       });
     }
 
@@ -137,16 +141,6 @@ export class MonitoredAppsService {
     const today = new Date().toISOString().split('T')[0];
     BrainScoreService.getInstance().invalidateCache();
     await HistoricalDataService.getInstance().rebuildSummaryForDate(today, { force: true });
-    await UnifiedUsageService.syncBlockingConfigToNative({
-      monitoredApps: await database.getMonitoredPackages(),
-      blockedApps: JSON.parse((await database.getMeta('blocked_apps')) || '[]'),
-      blockingEnabled: (await database.getMeta('app_blocking_enabled')) === 'true',
-      blockingMode: ((await database.getMeta('blocking_mode')) || 'soft') as 'soft' | 'hard',
-      bypassLimit: parseInt((await database.getMeta('block_bypass_limit')) || '3', 10),
-      softBlockIntervalMinutes: parseInt((await database.getMeta('soft_block_interval_minutes')) || '15', 10),
-      scheduleEnabled: (await database.getMeta('block_schedule_enabled')) === 'true',
-      scheduleStart: (await database.getMeta('block_schedule_start')) || '22:00',
-      scheduleEnd: (await database.getMeta('block_schedule_end')) || '06:00',
-    });
+    await AppBlockingService.getInstance().initialize();
   }
 }

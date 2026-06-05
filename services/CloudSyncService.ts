@@ -14,7 +14,13 @@ import {
 import { firestore } from './firebase';
 import { PurchaseService } from './PurchaseService';
 import { TrialService } from './TrialService';
-import { database, type AppSettings, type DailyUsage } from './database';
+import {
+  database,
+  type AppSettings,
+  type AppSession,
+  type BlockEvent,
+  type DailyUsage,
+} from './database';
 
 type UserSettingsSnapshot = {
   onboardingCompleted: boolean;
@@ -47,7 +53,9 @@ export class CloudSyncService {
     const hasMeaningfulLocalState =
       localSnapshot.monitoredApps.some((app) => app.monitored) ||
       localSnapshot.blockedApps.length > 0 ||
-      localSnapshot.dailySummaries.length > 0;
+      localSnapshot.dailySummaries.length > 0 ||
+      localSnapshot.appSessions.length > 0 ||
+      localSnapshot.blockEvents.length > 0;
 
     if (!existingUserDoc.exists()) {
       await this.uploadSnapshot(user, localSnapshot, true);
@@ -62,9 +70,10 @@ export class CloudSyncService {
   }
 
   private static async getLocalSnapshot() {
-    const [monitoredApps, dailySummaries, blockedAppsMeta, settings, isPremium] = await Promise.all([
+    const [monitoredApps, dailySummaries, historyEvents, blockedAppsMeta, settings, isPremium] = await Promise.all([
       database.getAppSettings(),
       database.getHistoricalData(SYNC_LOOKBACK_DAYS),
+      this.getLocalHistoryEvents(SYNC_LOOKBACK_DAYS),
       database.getMeta('blocked_apps'),
       this.getSettingsSnapshot(),
       PurchaseService.isPremium(),
@@ -74,6 +83,8 @@ export class CloudSyncService {
       monitoredApps,
       blockedApps: this.parseStringArray(blockedAppsMeta),
       dailySummaries,
+      appSessions: historyEvents.appSessions,
+      blockEvents: historyEvents.blockEvents,
       settings: {
         ...settings,
         isPremium,
@@ -185,10 +196,22 @@ export class CloudSyncService {
       { updatedAt: now },
       { merge: true }
     );
+    await setDoc(
+      doc(firestore, 'users', user.uid, 'history', 'appSessions'),
+      { updatedAt: now },
+      { merge: true }
+    );
+    await setDoc(
+      doc(firestore, 'users', user.uid, 'history', 'blockEvents'),
+      { updatedAt: now },
+      { merge: true }
+    );
 
-    const [existingMonitoredApps, existingBlockedApps] = await Promise.all([
+    const [existingMonitoredApps, existingBlockedApps, existingAppSessions, existingBlockEvents] = await Promise.all([
       getDocs(collection(firestore, 'users', user.uid, 'settings', 'monitoredApps', 'items')),
       getDocs(collection(firestore, 'users', user.uid, 'settings', 'blockedApps', 'items')),
+      getDocs(collection(firestore, 'users', user.uid, 'history', 'appSessions', 'items')),
+      getDocs(collection(firestore, 'users', user.uid, 'history', 'blockEvents', 'items')),
     ]);
 
     const batch = writeBatch(firestore);
@@ -216,6 +239,22 @@ export class CloudSyncService {
       'dailySummaries',
       'items'
     );
+    const sessionsCollection = collection(
+      firestore,
+      'users',
+      user.uid,
+      'history',
+      'appSessions',
+      'items'
+    );
+    const blockEventsCollection = collection(
+      firestore,
+      'users',
+      user.uid,
+      'history',
+      'blockEvents',
+      'items'
+    );
 
     snapshot.monitoredApps.forEach((app) => {
       batch.set(doc(monitoredAppsCollection, app.packageName), {
@@ -223,6 +262,7 @@ export class CloudSyncService {
         appName: app.appName,
         monitored: app.monitored,
         dailyLimitMs: app.dailyLimitMs,
+        protectionMode: app.protectionMode ?? null,
         updatedAt: now,
       });
     });
@@ -260,16 +300,69 @@ export class CloudSyncService {
       });
     });
 
+    snapshot.appSessions.forEach((session) => {
+      batch.set(doc(sessionsCollection, this.getAppSessionDocId(session)), {
+        date: session.date,
+        packageName: session.packageName,
+        appName: session.appName,
+        startedAt: session.startedAt,
+        endedAt: session.endedAt,
+        durationMs: session.durationMs,
+        source: session.source,
+        wasMonitored: session.wasMonitored,
+        updatedAt: now,
+      });
+    });
+
+    snapshot.blockEvents.forEach((event) => {
+      batch.set(doc(blockEventsCollection, this.getBlockEventDocId(event)), {
+        date: event.date,
+        packageName: event.packageName,
+        appName: event.appName,
+        triggeredAt: event.triggeredAt,
+        blockType: event.blockType,
+        limitMs: event.limitMs ?? null,
+        usageAtTriggerMs: event.usageAtTriggerMs ?? null,
+        action: event.action,
+        resolvedAt: event.resolvedAt ?? null,
+        source: event.source ?? 'native_overlay',
+        updatedAt: now,
+      });
+    });
+
+    const localSessionIds = new Set(snapshot.appSessions.map((session) => this.getAppSessionDocId(session)));
+    existingAppSessions.docs.forEach((entry) => {
+      if (!localSessionIds.has(entry.id)) {
+        batch.delete(entry.ref);
+      }
+    });
+
+    const localBlockEventIds = new Set(snapshot.blockEvents.map((event) => this.getBlockEventDocId(event)));
+    existingBlockEvents.docs.forEach((entry) => {
+      if (!localBlockEventIds.has(entry.id)) {
+        batch.delete(entry.ref);
+      }
+    });
+
     await batch.commit();
   }
 
   private static async restoreSnapshot(user: User): Promise<void> {
     const userRef = doc(firestore, 'users', user.uid);
-    const [userDoc, monitoredAppsSnapshot, blockedAppsSnapshot, dailySummariesSnapshot] = await Promise.all([
+    const [
+      userDoc,
+      monitoredAppsSnapshot,
+      blockedAppsSnapshot,
+      dailySummariesSnapshot,
+      appSessionsSnapshot,
+      blockEventsSnapshot,
+    ] = await Promise.all([
       getDoc(userRef),
       getDocs(collection(firestore, 'users', user.uid, 'settings', 'monitoredApps', 'items')),
       getDocs(collection(firestore, 'users', user.uid, 'settings', 'blockedApps', 'items')),
       getDocs(collection(firestore, 'users', user.uid, 'history', 'dailySummaries', 'items')),
+      getDocs(collection(firestore, 'users', user.uid, 'history', 'appSessions', 'items')),
+      getDocs(collection(firestore, 'users', user.uid, 'history', 'blockEvents', 'items')),
     ]);
 
     if (!userDoc.exists()) {
@@ -286,6 +379,8 @@ export class CloudSyncService {
         appName: app.appName,
         monitored: Boolean(app.monitored),
         dailyLimitMs: app.dailyLimitMs,
+        protectionMode:
+          (app.protectionMode as AppSettings['protectionMode']) ?? null,
       });
     }
 
@@ -315,6 +410,78 @@ export class CloudSyncService {
         apps: parsedApps,
       });
     }
+
+    const restoredSessions = appSessionsSnapshot.docs.map((entry) => {
+      const session = entry.data() as Omit<AppSession, 'id'>;
+      return {
+        date: session.date,
+        packageName: session.packageName,
+        appName: session.appName,
+        startedAt: session.startedAt,
+        endedAt: session.endedAt,
+        durationMs: this.parseNumber(session.durationMs, 0),
+        source: session.source || 'usage_events',
+        wasMonitored: Boolean(session.wasMonitored),
+      } satisfies AppSession;
+    });
+    await database.saveAppSessions(restoredSessions);
+
+    const restoredBlockEvents = blockEventsSnapshot.docs.map((entry) => {
+      const event = entry.data() as Omit<BlockEvent, 'id'>;
+      return {
+        date: event.date,
+        packageName: event.packageName,
+        appName: event.appName,
+        triggeredAt: event.triggeredAt,
+        blockType: event.blockType,
+        limitMs: event.limitMs != null ? this.parseNumber(event.limitMs, 0) : null,
+        usageAtTriggerMs:
+          event.usageAtTriggerMs != null ? this.parseNumber(event.usageAtTriggerMs, 0) : null,
+        action: event.action,
+        resolvedAt: event.resolvedAt ?? null,
+        source: event.source || 'native_overlay',
+      } satisfies BlockEvent;
+    });
+    await database.saveBlockEvents(restoredBlockEvents);
+  }
+
+  private static async getLocalHistoryEvents(days: number): Promise<{
+    appSessions: AppSession[];
+    blockEvents: BlockEvent[];
+  }> {
+    const dateStrings = Array.from({ length: days }, (_, index) => {
+      const date = new Date();
+      date.setDate(date.getDate() - index);
+      return date.toISOString().split('T')[0];
+    });
+
+    const perDayData = await Promise.all(
+      dateStrings.map(async (dateStr) => ({
+        appSessions: await database.getAppSessionsForDate(dateStr),
+        blockEvents: await database.getBlockEventsForDate(dateStr),
+      }))
+    );
+
+    return {
+      appSessions: perDayData.flatMap((entry) => entry.appSessions),
+      blockEvents: perDayData.flatMap((entry) => entry.blockEvents),
+    };
+  }
+
+  private static getAppSessionDocId(session: Pick<AppSession, 'packageName' | 'startedAt' | 'source'>): string {
+    return this.encodeDocId([session.packageName, session.startedAt, session.source].join('__'));
+  }
+
+  private static getBlockEventDocId(
+    event: Pick<BlockEvent, 'packageName' | 'triggeredAt' | 'action' | 'source'>
+  ): string {
+    return this.encodeDocId(
+      [event.packageName, event.triggeredAt, event.action, event.source ?? 'native_overlay'].join('__')
+    );
+  }
+
+  private static encodeDocId(value: string): string {
+    return encodeURIComponent(value);
   }
 
   private static async restoreMetaFromCloud(data: Record<string, unknown>): Promise<void> {

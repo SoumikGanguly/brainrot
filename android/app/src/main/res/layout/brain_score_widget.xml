@@ -28,7 +28,7 @@
             android:id="@+id/widget_score"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
-            android:layout_marginTop="14dp"
+            android:layout_marginTop="6dp"
             android:text="92"
             android:textColor="#5D3DF0"
             android:textSize="82sp"

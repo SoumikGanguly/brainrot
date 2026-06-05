@@ -9,24 +9,6 @@ export class NotificationService {
   private static readonly DAILY_REPLAY_NOTIFICATION_KEY = 'scheduled_daily_replay_notification_id';
   private static readonly WEEKLY_REVIEW_NOTIFICATION_KEY = 'scheduled_weekly_review_notification_id';
   private static readonly DEFAULT_NOTIFICATION_ROUTE = '/(tabs)/replay';
-  private static notificationTemplates = {
-    mild: [
-      "Heads up — you've used {app} for {timeToday}. Consider a break.",
-      "{app} used {timeToday} today. Maybe take 10 mins off?"
-    ],
-    normal: [
-      "Your brain's fogging — {app} used {timeToday}. Maybe switch to something else?",
-      "You've spent {timeToday} on {app} — try focusing on a task now."
-    ],
-    harsh: [
-      "Stop. {app} is eating your day — {timeToday} so far. This is ruining your focus.",
-      "Enough. {app} is rotting your brain — {timeToday} today. Unlock to remove reminders."
-    ],
-    critical: [
-      "🚨 YOU'RE LETTING APPS ROT YOUR BRAIN. Unlock premium or stop using {app} NOW.",
-      "FINAL WARNING: {app} usage = {timeToday}. Buy unlock or close the app."
-    ]
-  };
 
   static async initialize(): Promise<void> {
     try {
@@ -82,73 +64,11 @@ export class NotificationService {
   }
 
   static async scheduleUsageAlert(
-    appName: string,
-    usageTime: string,
-    intensity: 'mild' | 'normal' | 'harsh' | 'critical'
+    _appName: string,
+    _usageTime: string,
+    _intensity: 'mild' | 'normal' | 'harsh' | 'critical'
   ): Promise<boolean> {
-    try {
-      // Check if notifications are enabled
-      const notificationsEnabled = await database.getMeta('notifications_enabled');
-      if (notificationsEnabled !== 'true') return false;
-
-      if (!(await this.hasPermission())) {
-        return false;
-      }
-
-      // Check cooldown
-      const lastNotificationKey = `last_notification_${appName}_${intensity}`;
-      const lastNotificationStr = await database.getMeta(lastNotificationKey);
-      const lastNotification = lastNotificationStr ? parseInt(lastNotificationStr) : 0;
-      const now = Date.now();
-      
-      // Cooldown periods (in milliseconds)
-      const cooldowns = {
-        mild: 24 * 60 * 60 * 1000, // 24 hours
-        normal: 12 * 60 * 60 * 1000, // 12 hours
-        harsh: 4 * 60 * 60 * 1000, // 4 hours
-        critical: 2 * 60 * 60 * 1000 // 2 hours
-      };
-
-      if (now - lastNotification < cooldowns[intensity]) {
-        return false; // Still in cooldown
-      }
-
-      // Get random template
-      const templates = this.notificationTemplates[intensity];
-      const template = templates[Math.floor(Math.random() * templates.length)];
-      const message = template
-        .replace('{app}', appName)
-        .replace('{timeToday}', usageTime);
-
-      await Notifications.scheduleNotificationAsync({
-        content: {
-          title: intensity === 'critical' ? '🚨 BRAIN ALERT' : 'Brainrot Alert',
-          body: message,
-          priority: intensity === 'critical' ? 'high' : 'normal',
-          sound: true,
-        },
-        trigger: null, // Show immediately
-      });
-
-      // Update last notification time
-      await database.setMeta(lastNotificationKey, now.toString());
-
-      // Log notification
-      const today = new Date().toISOString().split('T')[0];
-      await database.setMeta(`notification_${Date.now()}`, JSON.stringify({
-        appName,
-        intensity,
-        message,
-        sentAt: now,
-        date: today
-      }));
-
-      return true;
-
-    } catch (error) {
-      console.error('Error scheduling notification:', error);
-      return false;
-    }
+    return false;
   }
 
   static async ensureDefaultSchedules(): Promise<void> {
