@@ -630,7 +630,7 @@ class BlockingOverlayService : Service() {
     private fun getSoftBlockIntervalMinutes(): Int {
         val prefs = getSharedPreferences("brainrot_prefs", MODE_PRIVATE)
         val configString = prefs.getString("blocking_config", "{}") ?: "{}"
-        return runCatching { JSONObject(configString).optInt("limitIntervalMinutes", 15) }
+        return runCatching { JSONObject(configString).optInt("softBlockIntervalMinutes", 15) }
             .getOrDefault(15)
             .coerceAtLeast(1)
     }
@@ -679,44 +679,26 @@ class BlockingOverlayService : Service() {
             var opens = 0
             var currentStart: Long? = null
             var lastSessionMs = 0L
-            var activePackage: String? = null
 
             while (events.hasNextEvent()) {
                 events.getNextEvent(event)
+                if (event.packageName != packageName) {
+                    continue
+                }
+
                 when (event.eventType) {
                     UsageEvents.Event.MOVE_TO_FOREGROUND -> {
-                        if (activePackage == packageName && event.packageName != packageName) {
-                            currentStart?.let { start ->
-                                if (event.timeStamp > start) {
-                                    lastSessionMs = event.timeStamp - start
-                                }
-                            }
-                            currentStart = null
-                        }
-
-                        if (event.packageName == packageName) {
-                            opens += 1
-                            currentStart = event.timeStamp
-                        }
-                        activePackage = event.packageName
+                        opens += 1
+                        currentStart = event.timeStamp
                     }
 
                     UsageEvents.Event.MOVE_TO_BACKGROUND -> {
-                        if (event.packageName != packageName) {
-                            if (activePackage == event.packageName) {
-                                activePackage = null
-                            }
-                            continue
-                        }
                         currentStart?.let { start ->
                             if (event.timeStamp > start) {
                                 lastSessionMs = event.timeStamp - start
                             }
                         }
                         currentStart = null
-                        if (activePackage == packageName) {
-                            activePackage = null
-                        }
                     }
                 }
             }
@@ -757,7 +739,7 @@ class BlockingOverlayService : Service() {
     private fun getRemainingBypasses(packageName: String): Int {
         val prefs = getSharedPreferences("brainrot_prefs", MODE_PRIVATE)
         val configString = prefs.getString("blocking_config", "{}") ?: "{}"
-        val bypassLimit = runCatching { JSONObject(configString).optInt("lockedPassesPerDay", 2) }.getOrDefault(2)
+        val bypassLimit = runCatching { JSONObject(configString).optInt("bypassLimit", 0) }.getOrDefault(0)
         val today = SimpleDateFormat("yyyy-MM-dd", Locale.US).format(Date())
         val currentCount = prefs.getInt("bypass_count_${packageName}_$today", 0)
         return (bypassLimit - currentCount).coerceAtLeast(0)

@@ -8,6 +8,7 @@ import {
 	AppStateStatus,
 	Dimensions,
 	Image,
+	InteractionManager,
 	ScrollView,
 	Text,
 	TouchableOpacity,
@@ -15,6 +16,8 @@ import {
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 
+import ActionInsightCard from "@/components/ActionInsightCard";
+import SkeletonBlock from "@/components/SkeletonBlock";
 import { Card } from "../../components/Card";
 import { database, type DailyUsage } from "../../services/database";
 
@@ -23,7 +26,9 @@ import { CapabilitiesService } from "@/services/CapabilitiesService";
 import { DailyResetService } from "@/services/DailyResetService";
 import { DailyInsightsService, type DailyInsights } from "@/services/DailyInsightsService";
 import { DataSyncService } from "@/services/DataSyncService";
-import { HistoricalDataService } from "@/services/HistoricalDataService";
+import { HistoryRefreshCoordinator } from "@/services/HistoryRefreshCoordinator";
+import { InsightActionService } from "@/services/InsightActionService";
+import { InsightInvalidationService } from "@/services/InsightInvalidationService";
 import { NotificationService } from "@/services/NotificationService";
 import { PurchaseService } from "@/services/PurchaseService";
 import { TelemetryService } from "@/services/TelemetryService";
@@ -46,12 +51,6 @@ const heroExpressions = {
 	exhausted: require("../../assets/expressions/exhausted.png"),
 } as const;
 
-type InsightCardContent = {
-	title: string;
-	subtext: string;
-	icon: keyof typeof Ionicons.glyphMap;
-};
-
 function formatLocalDate(date: Date): string {
 	const year = date.getFullYear();
 	const month = String(date.getMonth() + 1).padStart(2, "0");
@@ -63,13 +62,6 @@ function getDateShiftedBy(days: number): string {
 	const date = new Date();
 	date.setDate(date.getDate() + days);
 	return formatLocalDate(date);
-}
-
-function formatTimeOfDay(isoTimestamp: string): string {
-	return new Date(isoTimestamp).toLocaleTimeString([], {
-		hour: "numeric",
-		minute: "2-digit",
-	});
 }
 
 function getExpressionSource(score: number) {
@@ -86,136 +78,6 @@ function getExpressionSource(score: number) {
 	return heroExpressions.exhausted;
 }
 
-function getDayProgressMinutes(): number {
-	const now = new Date();
-	return Math.max(1, now.getHours() * 60 + now.getMinutes());
-}
-
-function buildInsightCard(
-	todayInsights: DailyInsights | null,
-	yesterdaySummary: DailyUsage | null,
-): InsightCardContent {
-	const summary = todayInsights?.summary;
-	const replayEntries = todayInsights?.replayEntries ?? [];
-	const totalOpens = summary?.totalMonitoredOpens ?? replayEntries.length;
-	const wastedTimeMs = todayInsights?.wastedTimeMs ?? summary?.totalDistractingMs ?? 0;
-	const beforeLunchEntries = replayEntries.filter(
-		(entry) =>
-			entry.moment === "Early morning" ||
-			entry.moment === "Morning" ||
-			entry.moment === "Mid day" ||
-			entry.moment === "Before lunch",
-	);
-	const beforeBedEntries = replayEntries.filter((entry) => entry.moment === "Before bed");
-	const todayScore = summary?.focusScore ?? summary?.brainScore ?? 0;
-	const yesterdayScore = yesterdaySummary?.focusScore ?? yesterdaySummary?.brainScore ?? 0;
-	const yesterdayOpens = yesterdaySummary?.totalMonitoredOpens ?? 0;
-	const opensImprovement = yesterdayOpens - totalOpens;
-	const improvedMeaningfully =
-		yesterdaySummary !== null &&
-		opensImprovement >= 10 &&
-		todayScore >= yesterdayScore &&
-		totalOpens > 0;
-
-	if (improvedMeaningfully) {
-		return {
-			title: "You improved.",
-			subtext: `${opensImprovement} fewer app opens than yesterday.`,
-			icon: "hourglass-outline",
-		};
-	}
-
-	if (beforeLunchEntries.length >= 3) {
-		const packageCounts = new Map<string, { appName: string; count: number }>();
-		for (const entry of beforeLunchEntries) {
-			const existing = packageCounts.get(entry.packageName);
-			packageCounts.set(entry.packageName, {
-				appName: entry.appName,
-				count: (existing?.count || 0) + 1,
-			});
-		}
-
-		const topBeforeLunch = Array.from(packageCounts.values()).sort(
-			(a, b) => b.count - a.count,
-		)[0];
-
-		if (topBeforeLunch) {
-			const beforeNoonShare = totalOpens > 0 ? Math.round((beforeLunchEntries.length / totalOpens) * 100) : 0;
-			return {
-				title: `You opened ${topBeforeLunch.appName}\n${topBeforeLunch.count} times before lunch.`,
-				subtext: `${beforeNoonShare}% of today's distractions\nhappened before noon.`,
-				icon: "hourglass-outline",
-			};
-		}
-	}
-
-	if (beforeBedEntries.length >= 2) {
-		const beforeBedCounts = new Map<string, { appName: string; count: number }>();
-		for (const entry of beforeBedEntries) {
-			const existing = beforeBedCounts.get(entry.packageName);
-			beforeBedCounts.set(entry.packageName, {
-				appName: entry.appName,
-				count: (existing?.count || 0) + 1,
-			});
-		}
-
-		const topBeforeBed = Array.from(beforeBedCounts.values()).sort(
-			(a, b) => b.count - a.count,
-		)[0];
-
-		if (topBeforeBed) {
-			const share = Math.round((topBeforeBed.count / beforeBedEntries.length) * 100);
-			return {
-				title: "Most distractions happened\nbefore bed.",
-				subtext: `${topBeforeBed.appName} accounted for\n${share}% of them.`,
-				icon: "hourglass-outline",
-			};
-		}
-	}
-
-	const longestSession = replayEntries.reduce<DailyInsights["replayEntries"][number] | null>(
-		(longest, entry) => {
-			if (!longest || entry.durationMs > longest.durationMs) {
-				return entry;
-			}
-			return longest;
-		},
-		null,
-	);
-
-	if (longestSession && longestSession.durationMs >= 15 * 60 * 1000) {
-		return {
-			title: `Your longest distraction\nlasted ${formatTime(longestSession.durationMs)}.`,
-			subtext: `It started at ${formatTimeOfDay(longestSession.startedAt)}.`,
-			icon: "hourglass-outline",
-		};
-	}
-
-	if (wastedTimeMs >= 20 * 60 * 1000) {
-		const gymWorkouts = Math.max(1, Math.round(wastedTimeMs / (35 * 60 * 1000)));
-		return {
-			title: `You lost ${formatTime(wastedTimeMs)} today.`,
-			subtext: `That's enough time for\n${gymWorkouts} gym workouts this week.`,
-			icon: "hourglass-outline",
-		};
-	}
-
-	if (totalOpens > 0) {
-		const cadenceMinutes = Math.max(1, Math.round(getDayProgressMinutes() / totalOpens));
-		return {
-			title: `You checked your phone\n${totalOpens} times today.`,
-			subtext: `About once every ${cadenceMinutes} minutes.`,
-			icon: "hourglass-outline",
-		};
-	}
-
-	return {
-		title: "Today's insight",
-		subtext: "Your replay builds as you go.\nCome back after a few sessions.",
-		icon: "hourglass-outline",
-	};
-}
-
 export default function HomeScreen() {
 	const router = useRouter();
 	const screenHeight = Dimensions.get("window").height;
@@ -230,12 +92,14 @@ export default function HomeScreen() {
 		expired: false,
 	});
 	const [loading, setLoading] = useState(true);
-	const [hasUsagePermission, setHasUsagePermission] = useState(false);
+	const [hasUsagePermission, setHasUsagePermission] = useState<boolean | null>(null);
 	const [manufacturerInfo, setManufacturerInfo] =
 		useState<ManufacturerPermissionInfo | null>(null);
 	const pendingPermissionCheck = useRef(false);
 	const appStateRef = useRef<AppStateStatus>(AppState.currentState);
 	const paywallLoggedRef = useRef<"trial" | "expired" | null>(null);
+	const homeRefreshInFlightRef = useRef(false);
+	const backgroundHomeRefreshQueuedRef = useRef(false);
 
 	useEffect(() => {
 		Animated.loop(
@@ -268,31 +132,55 @@ export default function HomeScreen() {
 				const blockingService = AppBlockingService.getInstance();
 				await blockingService.initialize();
 
-				const historicalService = HistoricalDataService.getInstance();
-				const lastBackfill = await database.getMeta("last_backfill_date");
-				const today = formatLocalDate(new Date());
-				if (lastBackfill !== today) {
-					await historicalService.backfillHistoricalData(90);
-					await database.setMeta("last_backfill_date", today);
-				}
-
 				DailyResetService.getInstance().initialize();
 
-				try {
-					const monitoredAppsData = await database.getMeta("monitored_apps");
-					if (monitoredAppsData) {
-						const monitoredPackages = JSON.parse(monitoredAppsData) as string[];
-						await UnifiedUsageService.syncMonitoredAppsToNative(monitoredPackages);
-					}
-				} catch (syncError) {
-					console.warn("Failed to sync monitored apps to native:", syncError);
-				}
-
-				await database.cleanupDuplicateEntries();
 				isInitialized = true;
+				thisQueueBackgroundInitialization();
 			} catch (error) {
 				console.error("Failed to initialize services:", error);
 			}
+		};
+
+		const thisQueueBackgroundInitialization = () => {
+			if (backgroundHomeRefreshQueuedRef.current) {
+				return;
+			}
+
+			backgroundHomeRefreshQueuedRef.current = true;
+			InteractionManager.runAfterInteractions(() => {
+				void (async () => {
+					try {
+						const lastBackfill = await database.getMeta("last_backfill_date");
+						const today = formatLocalDate(new Date());
+						if (lastBackfill !== today) {
+							await HistoryRefreshCoordinator.getInstance().requestRefresh({
+								source: "home_cold_start",
+								days: 90,
+								prioritizeDates: [today],
+								syncToday: true,
+							});
+							await database.setMeta("last_backfill_date", today);
+						}
+
+						try {
+							const monitoredAppsData = await database.getMeta("monitored_apps");
+							if (monitoredAppsData) {
+								const monitoredPackages = JSON.parse(monitoredAppsData) as string[];
+								await UnifiedUsageService.syncMonitoredAppsToNative(monitoredPackages);
+							}
+						} catch (syncError) {
+							console.warn("Failed to sync monitored apps to native:", syncError);
+						}
+
+						await database.cleanupDuplicateEntries();
+						await loadHomeData({ refreshInBackground: true, preferCached: true });
+					} catch (error) {
+						console.error("Background home initialization failed:", error);
+					} finally {
+						backgroundHomeRefreshQueuedRef.current = false;
+					}
+				})();
+			});
 		};
 
 		const loadManufacturerInfo = async () => {
@@ -317,7 +205,7 @@ export default function HomeScreen() {
 				if (pendingPermissionCheck.current) {
 					pendingPermissionCheck.current = false;
 					setTimeout(() => {
-						void loadHomeData();
+						void loadHomeData({ refreshInBackground: true });
 					}, 500);
 				}
 
@@ -340,6 +228,13 @@ export default function HomeScreen() {
 		return () => {
 			subscription?.remove();
 		};
+	}, []);
+
+	useEffect(() => {
+		const unsubscribe = InsightInvalidationService.subscribe(() => {
+			void loadHomeData({ refreshInBackground: true, preferCached: true });
+		});
+		return unsubscribe;
 	}, []);
 
 	const checkNativeModuleAndPermissions = async () => {
@@ -368,10 +263,95 @@ export default function HomeScreen() {
 		}
 	};
 
-	async function loadHomeData() {
-		try {
-			setLoading(true);
+	function buildCachedInsights(
+		date: string,
+		summary: DailyUsage | null,
+		persisted: DailyInsights | null,
+	): DailyInsights | null {
+		if (!summary && !persisted) {
+			return null;
+		}
 
+		const apps = summary?.apps || [];
+		return {
+			date,
+			summary,
+			sessions: persisted?.sessions || [],
+			blockEvents: persisted?.blockEvents || [],
+			replayEntries: persisted?.replayEntries || [],
+			primaryInsight: persisted?.primaryInsight ?? null,
+			replayInsightCards: persisted?.replayInsightCards || [],
+			rankedInsights: persisted?.rankedInsights || [],
+			wastedTimeMs:
+				summary?.totalDistractingMs ??
+				summary?.totalScreenTime ??
+				persisted?.wastedTimeMs ??
+				0,
+			biggestTimeLeak:
+				persisted?.biggestTimeLeak ??
+				(apps[0]
+					? {
+							packageName: apps[0].packageName,
+							appName: apps[0].appName,
+							totalTimeMs: apps[0].totalTimeMs,
+							percentage:
+								(summary?.totalScreenTime ?? 0) > 0
+									? Math.round((apps[0].totalTimeMs / (summary?.totalScreenTime ?? 1)) * 100)
+									: 0,
+					  }
+					: null),
+			integrity: {
+				source: summary?.summarySource || persisted?.integrity.source || "missing",
+				deltaMs: summary?.integrityDeltaMs ?? persisted?.integrity.deltaMs ?? 0,
+				isConsistent:
+					(summary?.integrityDeltaMs ?? persisted?.integrity.deltaMs ?? 0) <=
+					2 * 60 * 1000,
+			},
+			insightLoadState: persisted?.insightLoadState || "missing",
+		};
+	}
+
+	async function hydrateHomeFromCache() {
+		const today = formatLocalDate(new Date());
+		const yesterday = getDateShiftedBy(-1);
+		const [todaySummary, yesterdaySummaryData, trial, cachedTodayInsights] = await Promise.all([
+			database.getDailySummary(today),
+			database.getDailySummary(yesterday),
+			TrialService.getTrialInfo().catch(() => ({
+				isActive: false,
+				daysRemaining: 0,
+				expired: false,
+			})),
+			DailyInsightsService.getInstance().getDailyInsights(today, {
+				allowInsightRegeneration: false,
+				preferPersistedInsights: true,
+			}),
+		]);
+
+		setTodayInsights(
+			buildCachedInsights(today, todaySummary ?? cachedTodayInsights.summary, cachedTodayInsights),
+		);
+		setYesterdaySummary(yesterdaySummaryData);
+		const nextScore =
+			todaySummary?.focusScore ??
+			todaySummary?.brainScore ??
+			cachedTodayInsights.summary?.focusScore ??
+			cachedTodayInsights.summary?.brainScore ??
+			100;
+		setBrainScore(nextScore);
+		setBrainState(getBrainStateLabel(nextScore));
+		setTrialInfo(trial);
+		setLoading(false);
+	};
+
+	async function refreshHomeDataInBackground() {
+		if (homeRefreshInFlightRef.current) {
+			return;
+		}
+
+		homeRefreshInFlightRef.current = true;
+
+		try {
 			const { hasModule, hasPermission } = await checkNativeModuleAndPermissions();
 			if (hasModule && hasPermission) {
 				try {
@@ -386,9 +366,12 @@ export default function HomeScreen() {
 			const [todayResult, yesterdayResult, trial] = await Promise.all([
 				DailyInsightsService.getInstance().getDailyInsights(today, {
 					forceSummaryRefresh: true,
+					allowInsightRegeneration: true,
+					preferPersistedInsights: true,
 				}),
 				DailyInsightsService.getInstance().getDailyInsights(yesterday, {
-					forceSummaryRefresh: true,
+					allowInsightRegeneration: false,
+					preferPersistedInsights: true,
 				}),
 				TrialService.getTrialInfo().catch(() => ({
 					isActive: false,
@@ -407,6 +390,35 @@ export default function HomeScreen() {
 		} catch (error) {
 			console.log(`Critical error: ${String(error)}`);
 		} finally {
+			homeRefreshInFlightRef.current = false;
+		}
+	}
+
+	async function loadHomeData(
+		options: { refreshInBackground?: boolean; preferCached?: boolean } = {},
+	) {
+		try {
+			const { refreshInBackground = true, preferCached = true } = options;
+			const { hasModule, hasPermission } = await checkNativeModuleAndPermissions();
+
+			if (preferCached) {
+				await hydrateHomeFromCache();
+			}
+
+			if (!refreshInBackground) {
+				return;
+			}
+
+			InteractionManager.runAfterInteractions(() => {
+				if (hasModule && hasPermission) {
+					void refreshHomeDataInBackground();
+					return;
+				}
+
+				void refreshHomeDataInBackground();
+			});
+		} catch (error) {
+			console.log(`Critical error: ${String(error)}`);
 			setLoading(false);
 		}
 	}
@@ -452,27 +464,86 @@ export default function HomeScreen() {
 		);
 	};
 
-	const openTodayReplay = () => {
-		router.push("/replay?day=today" as never);
-	};
-
 	const scoreColor = getScoreColor(brainScore);
-	const insightCard = useMemo(
-		() => buildInsightCard(todayInsights, yesterdaySummary),
-		[todayInsights, yesterdaySummary],
-	);
+	const primaryInsight = todayInsights?.primaryInsight ?? null;
 	const floatTranslateY = heroFloat.interpolate({
 		inputRange: [0, 1],
 		outputRange: [-6, 10],
 	});
-	const heroMinHeight = Math.round(screenHeight * 0.68);
+	const heroMinHeight = Math.round(screenHeight * 0.58);
+
+	useEffect(() => {
+		if (loading) {
+			return;
+		}
+
+		const monitoredAppCount = todayInsights?.summary?.apps?.length ?? 0;
+		const hasAccessibility = AppBlockingService.getInstance().getFocusStatus().accessibilityEnabled;
+
+		TelemetryService.track("home_viewed", {
+			brain_score: brainScore,
+			brain_status: brainState,
+			monitored_app_count: monitoredAppCount,
+			has_usage_access: hasUsagePermission === true,
+			has_accessibility: hasAccessibility,
+		});
+		TelemetryService.track("brain_score_viewed", {
+			brain_score: brainScore,
+			brain_status: brainState,
+			monitored_app_count: monitoredAppCount,
+			has_usage_access: hasUsagePermission === true,
+			has_accessibility: hasAccessibility,
+		});
+
+		if (yesterdaySummary?.totalScreenTime && yesterdaySummary.totalScreenTime > 0) {
+			void TelemetryService.trackOnce("telemetry_first_full_day_data_ready", "first_full_day_data_ready", {
+				brain_score: brainScore,
+				brain_status: brainState,
+			});
+		}
+	}, [brainScore, brainState, hasUsagePermission, loading, manufacturerInfo, todayInsights?.summary?.apps?.length, yesterdaySummary?.totalScreenTime]);
+
+	useEffect(() => {
+		if (!primaryInsight) {
+			return;
+		}
+
+		TelemetryService.track("insight_generated", {
+			insight_type: primaryInsight.category,
+			app_package: primaryInsight.relatedAppPackage || primaryInsight.subjectAppPackage || undefined,
+			app_name: undefined,
+			severity: primaryInsight.scoreBreakdown?.finalPriority >= 80 ? "high" : primaryInsight.scoreBreakdown?.finalPriority >= 50 ? "medium" : "low",
+			recommended_action: primaryInsight.action.type,
+			cta_type: primaryInsight.action.type,
+		});
+
+		void TelemetryService.trackOnce(
+			"telemetry_first_insight_generated",
+			"first_insight_generated",
+			{
+				insight_type: primaryInsight.category,
+				app_package: primaryInsight.relatedAppPackage || primaryInsight.subjectAppPackage || undefined,
+				app_name: undefined,
+			},
+		);
+
+		void TelemetryService.trackOnce(
+			"telemetry_first_insight_viewed",
+			"first_insight_viewed",
+			{
+				insight_type: primaryInsight.category,
+				app_package: primaryInsight.relatedAppPackage || primaryInsight.subjectAppPackage || undefined,
+				app_name: undefined,
+			},
+		);
+	}, [primaryInsight]);
 
 	if (loading) {
 		return (
 			<SafeAreaView className="flex-1 bg-[#FCFBFF]">
-				<View className="flex-1 items-center justify-center p-4">
-					<Text className="font-body text-body text-muted">Loading...</Text>
-				</View>
+				<ScrollView className="flex-1" showsVerticalScrollIndicator={false}>
+					<HomeSkeleton heroMinHeight={heroMinHeight} />
+				</ScrollView>
 			</SafeAreaView>
 		);
 	}
@@ -481,7 +552,7 @@ export default function HomeScreen() {
 		<SafeAreaView className="flex-1 bg-[#FCFBFF]">
 			<ScrollView className="flex-1" showsVerticalScrollIndicator={false}>
 				<View
-					className="overflow-hidden px-6 pb-6 pt-4"
+					className="overflow-hidden px-6 pb-5 pt-2"
 					style={{ minHeight: heroMinHeight }}
 				>
 					<View
@@ -494,7 +565,7 @@ export default function HomeScreen() {
 						className="absolute left-10 top-1/2 h-32 w-32 rounded-full bg-[#F7F2FF]"
 					/>
 
-					<View className="flex-1 items-center justify-center pt-6">
+					<View className="flex-1 items-center justify-center pt-1">
 						<Animated.View
 							style={{
 								transform: [{ translateY: floatTranslateY }],
@@ -508,7 +579,7 @@ export default function HomeScreen() {
 						</Animated.View>
 					</View>
 
-					<View className="-mt-24 items-center pb-2">
+					<View className="-mt-36 items-center pb-1">
 						<Text
 							className="font-heading-bold text-[64px] leading-[72px]"
 							style={{ color: scoreColor }}
@@ -521,36 +592,35 @@ export default function HomeScreen() {
 					</View>
 				</View>
 
-				<TouchableOpacity
-					activeOpacity={0.92}
-					onPress={openTodayReplay}
-					className="mx-md mb-md"
-				>
-					<Card className="border border-[#E7DFFD] bg-[#F5F1FF] px-5 py-5">
-						<View className="flex-row items-start">
-							<View className="flex-1 pr-4">
-								<Text className="font-heading-semibold text-secondary text-[#7C6AA6]">
-									Today's Insight
-								</Text>
-								<Text className="mt-3 font-heading-bold text-section leading-8 text-slate-900">
-									{insightCard.title}
-								</Text>
-								<Text className="mt-3 font-body text-body leading-6 text-slate-600">
-									{insightCard.subtext}
-								</Text>
-							</View>
-							<View className="mt-1 h-12 w-12 items-center justify-center rounded-2xl bg-white/85">
-								<Ionicons
-									name={insightCard.icon}
-									size={22}
-									color="#5D3DF0"
-								/>
-							</View>
-						</View>
+				{primaryInsight ? (
+					<View className="mx-md">
+						<ActionInsightCard
+							insight={primaryInsight}
+							label="Today's Insight"
+							surface="home"
+							onPress={() =>
+								void (async () => {
+									await InsightActionService.execute(primaryInsight.action, router, "insight_cta");
+								})()
+							}
+						/>
+					</View>
+				) : (
+					<Card className="mx-md mb-md border border-[#E7DFFD] bg-[#F5F1FF] px-5 py-5">
+						<Text className="mb-3 font-heading-semibold text-secondary text-[#7C6AA6]">
+							Today's Insight
+						</Text>
+						<Text className="font-heading-bold text-section leading-8 text-slate-900">
+							Your replay is still building.
+						</Text>
+						<Text className="mt-3 font-body text-body leading-6 text-slate-600">
+							Come back after a few more distraction sessions and Brainrot will
+							show you the strongest pattern worth fixing.
+						</Text>
 					</Card>
-				</TouchableOpacity>
+				)}
 
-				{!hasUsagePermission && (
+				{hasUsagePermission === false && (
 					<Card className="mx-md mb-md border border-yellow-200 bg-yellow-50">
 						<View className="flex-row items-start">
 							<Ionicons
@@ -571,7 +641,7 @@ export default function HomeScreen() {
 									onPress={async () => {
 										try {
 											pendingPermissionCheck.current = true;
-											await UnifiedUsageService.openUsageAccessSettings();
+											await CapabilitiesService.ensureUsageAccess("home");
 										} catch (error) {
 											console.error("Failed to open settings:", error);
 											pendingPermissionCheck.current = false;
@@ -596,7 +666,7 @@ export default function HomeScreen() {
 											<TouchableOpacity
 												onPress={async () => {
 													try {
-														await UnifiedUsageService.openManufacturerSettings();
+														await CapabilitiesService.openBackgroundReliabilitySettings("home");
 													} catch (oemError) {
 														console.warn(
 															"Failed to open OEM settings:",
@@ -640,5 +710,46 @@ export default function HomeScreen() {
 				)}
 			</ScrollView>
 		</SafeAreaView>
+	);
+}
+
+function HomeSkeleton({ heroMinHeight }: { heroMinHeight: number }) {
+	return (
+		<>
+			<View
+				className="overflow-hidden px-6 pb-5 pt-2"
+				style={{ minHeight: heroMinHeight }}
+			>
+				<View className="absolute -left-12 top-20 h-48 w-48 rounded-full bg-[#EEE7FF]" />
+				<View className="absolute -right-10 top-14 h-56 w-56 rounded-full bg-[#F3EDFF]" />
+				<View className="absolute left-10 top-1/2 h-32 w-32 rounded-full bg-[#F7F2FF]" />
+
+				<View className="flex-1 items-center justify-center pt-1">
+					<SkeletonBlock
+						className="rounded-[56px]"
+						style={{ width: 304, height: 304 }}
+					/>
+				</View>
+
+				<View className="-mt-28 items-center pb-1">
+					<SkeletonBlock className="h-16 w-28 rounded-3xl" />
+					<SkeletonBlock className="mt-3 h-6 w-32 rounded-xl" />
+				</View>
+			</View>
+
+			<Card className="mx-md mb-md border border-[#E7DFFD] bg-white px-5 py-5">
+				<SkeletonBlock className="h-5 w-32" />
+				<SkeletonBlock className="mt-4 h-8 w-4/5" />
+				<SkeletonBlock className="mt-3 h-4 w-full" />
+				<SkeletonBlock className="mt-2 h-4 w-3/4" />
+				<SkeletonBlock className="mt-4 h-11 w-40 rounded-2xl" />
+			</Card>
+
+			<Card className="mx-md mb-xl border border-[#E7DFFD] bg-white">
+				<SkeletonBlock className="mx-auto h-5 w-44" />
+				<SkeletonBlock className="mx-auto mt-4 h-4 w-32" />
+				<SkeletonBlock className="mt-5 h-14 w-full rounded-2xl" />
+			</Card>
+		</>
 	);
 }

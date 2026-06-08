@@ -389,6 +389,22 @@ async function copyDirectory(sourceDir, destinationDir, packageName) {
       continue;
     }
 
+    const extension = path.extname(entry.name).toLowerCase();
+    const isTextTemplate = [
+      ".kt",
+      ".java",
+      ".xml",
+      ".gradle",
+      ".properties",
+      ".json",
+      ".txt",
+    ].includes(extension);
+
+    if (!isTextTemplate) {
+      await fs.promises.copyFile(sourcePath, destinationPath);
+      continue;
+    }
+
     const contents = await fs.promises.readFile(sourcePath, "utf8");
     await fs.promises.writeFile(
       destinationPath,

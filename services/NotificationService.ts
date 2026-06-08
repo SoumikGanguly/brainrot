@@ -1,7 +1,9 @@
 import * as Notifications from 'expo-notifications';
 import { Platform } from 'react-native';
+import type { NotificationType } from '@/services/TelemetryEvents';
 import { BrainScoreService } from './BrainScore';
 import { database } from './database';
+import { TelemetryService } from './TelemetryService';
 import { formatTime } from '../utils/time';
 
 export class NotificationService {
@@ -107,13 +109,16 @@ export class NotificationService {
           route: this.DEFAULT_NOTIFICATION_ROUTE,
           replayDay: 'yesterday',
           source: 'daily_replay',
+          notification_type: 'morning_insight',
+          app_name: replayContent.topAppName,
+          brain_score: replayContent.brainScore,
         },
       },
       trigger: {
         type: Notifications.SchedulableTriggerInputTypes.DATE,
         date: triggerDate,
       },
-    });
+    }, 'morning_insight');
   }
 
   private static async scheduleWeeklyReviewNotification(): Promise<void> {
@@ -128,16 +133,17 @@ export class NotificationService {
         data: {
           route: '/(tabs)/calendar',
           source: 'weekly_review',
+          notification_type: 'weekly_report',
         },
       },
       trigger: {
         type: Notifications.SchedulableTriggerInputTypes.DATE,
         date: triggerDate,
       },
-    });
+    }, 'weekly_report');
   }
 
-  private static async buildDailyReplayContent(dateStr: string): Promise<{ title: string; body: string }> {
+  private static async buildDailyReplayContent(dateStr: string): Promise<{ title: string; body: string; topAppName?: string; brainScore?: number }> {
     try {
       const result = await BrainScoreService.getInstance().getBrainScoreForDate(dateStr);
       const topApp = result.apps[0];
@@ -146,12 +152,15 @@ export class NotificationService {
         return {
           title: 'Yesterday stayed mostly clean.',
           body: 'See your Brainrot Replay.',
+          brainScore: result.score,
         };
       }
 
       return {
         title: `Yesterday you lost ${formatTime(topApp.totalTimeMs)} to ${topApp.appName}.`,
         body: 'See your Brainrot Replay.',
+        topAppName: topApp.appName,
+        brainScore: result.score,
       };
     } catch (error) {
       console.warn('Error building daily replay notification:', error);
@@ -233,11 +242,21 @@ export class NotificationService {
 
   private static async replaceScheduledNotification(
     metaKey: string,
-    request: Notifications.NotificationRequestInput
+    request: Notifications.NotificationRequestInput,
+    notificationType: NotificationType
   ): Promise<void> {
     await this.cancelStoredNotification(metaKey);
     const id = await Notifications.scheduleNotificationAsync(request);
     await database.setMeta(metaKey, id);
+    const data = request.content.data as
+      | { insight_type?: string; app_name?: string; brain_score?: number }
+      | undefined;
+    TelemetryService.track('notification_sent', {
+      notification_type: notificationType,
+      insight_type: data?.insight_type,
+      app_name: data?.app_name,
+      brain_score: data?.brain_score,
+    });
   }
 
   private static async cancelStoredNotification(metaKey: string): Promise<void> {

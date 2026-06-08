@@ -58,15 +58,28 @@ export class AuthService {
 
   private static async handleAuthState(user: User | null): Promise<void> {
     if (!user) {
-      await TelemetryService.resetToAnonymous();
+      try {
+        await TelemetryService.resetToAnonymous();
+      } catch (error) {
+        console.warn('Failed to reset telemetry identity:', error);
+      }
       return;
     }
 
-    TelemetryService.identifyAuthenticatedUser(user.uid, {
-      auth_provider: user.providerData[0]?.providerId || 'google.com',
-      ...(user.email ? { email: user.email } : {}),
-      ...(user.displayName ? { display_name: user.displayName } : {}),
-    });
-    await CloudSyncService.syncAuthenticatedUser(user);
+    try {
+      TelemetryService.identifyAuthenticatedUser(user.uid, {
+        auth_provider: user.providerData[0]?.providerId || 'google.com',
+        ...(user.email ? { email: user.email } : {}),
+        ...(user.displayName ? { display_name: user.displayName } : {}),
+      });
+    } catch (error) {
+      console.warn('Failed to identify authenticated user for telemetry:', error);
+    }
+
+    try {
+      await CloudSyncService.syncAuthenticatedUser(user);
+    } catch (error) {
+      console.warn('Cloud sync skipped after auth state change:', error);
+    }
   }
 }

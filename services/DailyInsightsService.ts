@@ -1,5 +1,8 @@
 import { database, type AppSession, type BlockEvent, type DailyUsage } from './database';
 import { HistoricalDataService } from './HistoricalDataService';
+import { InsightEngine } from './InsightEngine';
+import { InsightMemoryService } from './InsightMemoryService';
+import type { InsightCard, InsightLoadState } from './InsightTypes';
 
 export type DayMoment =
   | 'Early morning'
@@ -7,7 +10,7 @@ export type DayMoment =
   | 'Mid day'
   | 'Before lunch'
   | 'Evening'
-  | 'Before bed';
+  | 'After bed';
 
 export interface ReplayEntry {
   packageName: string;
@@ -24,6 +27,9 @@ export interface DailyInsights {
   sessions: AppSession[];
   blockEvents: BlockEvent[];
   replayEntries: ReplayEntry[];
+  primaryInsight: InsightCard | null;
+  replayInsightCards: InsightCard[];
+  rankedInsights: InsightCard[];
   wastedTimeMs: number;
   biggestTimeLeak: {
     packageName: string;
@@ -36,6 +42,14 @@ export interface DailyInsights {
     deltaMs: number;
     isConsistent: boolean;
   };
+  insightLoadState: InsightLoadState;
+}
+
+interface DailyInsightsOptions {
+  forceSummaryRefresh?: boolean;
+  minSessionDurationMs?: number;
+  allowInsightRegeneration?: boolean;
+  preferPersistedInsights?: boolean;
 }
 
 export class DailyInsightsService {
@@ -50,25 +64,83 @@ export class DailyInsightsService {
 
   async getDailyInsights(
     date: string,
-    options: { forceSummaryRefresh?: boolean; minSessionDurationMs?: number } = {}
+    options: DailyInsightsOptions = {}
   ): Promise<DailyInsights> {
-    const { forceSummaryRefresh = false, minSessionDurationMs = 60000 } = options;
+    const {
+      forceSummaryRefresh = false,
+      minSessionDurationMs = 60000,
+      allowInsightRegeneration = true,
+      preferPersistedInsights = true,
+    } = options;
 
     await HistoricalDataService.getInstance().rebuildSummaryForDate(date, {
       force: forceSummaryRefresh,
     });
 
-    const [summary, sessions, blockEvents] = await Promise.all([
+    const [summary, sessions, blockEvents, persistedInsights] = await Promise.all([
       database.getDailySummary(date),
       database.getAppSessionsForDate(date, { monitoredOnly: true, minDurationMs: minSessionDurationMs }),
       database.getBlockEventsForDate(date),
+      InsightMemoryService.getPersistedInsights(date),
     ]);
 
     const replayEntries = this.buildReplayEntries(sessions);
     const wastedTimeMs = replayEntries.reduce((sum, entry) => sum + entry.durationMs, 0);
     const biggestTimeLeak = this.buildBiggestTimeLeak(summary, replayEntries, wastedTimeMs);
+    const isToday = date === this.getTodayDateString();
+    const shouldUsePersistedOnly =
+      preferPersistedInsights && Boolean(persistedInsights) && (!isToday || !allowInsightRegeneration);
 
-    return {
+    if (shouldUsePersistedOnly) {
+      return this.buildResponse(
+        date,
+        summary,
+        sessions,
+        blockEvents,
+        replayEntries,
+        wastedTimeMs,
+        biggestTimeLeak,
+        persistedInsights?.rankedInsights || [],
+        persistedInsights?.rankedInsights?.length ? 'persisted' : 'missing'
+      );
+    }
+
+    const [previousDaySummary, trailingSummaries, protectionModes, focusSessionFlag] = await Promise.all([
+      database.getDailySummary(this.shiftDate(date, -1)),
+      this.getTrailingSummaries(date, 7),
+      this.getProtectionModes(),
+      database.getMeta('focus_session_active'),
+    ]);
+    let rankedInsights: InsightCard[] = [];
+    let insightLoadState: InsightLoadState = 'missing';
+
+    try {
+      rankedInsights = await InsightEngine.generate({
+        date,
+        summary,
+        replayEntries,
+        blockEvents,
+        previousDaySummary,
+        trailingSummaries,
+        protectionModes,
+        focusSessionActive: focusSessionFlag === 'true',
+      });
+
+      if (rankedInsights.length === 0 && persistedInsights?.rankedInsights?.length) {
+        rankedInsights = persistedInsights.rankedInsights;
+        insightLoadState = 'persisted';
+      } else {
+        await InsightMemoryService.recordShownInsights(date, rankedInsights);
+        await InsightMemoryService.savePersistedInsights(date, rankedInsights);
+        insightLoadState = rankedInsights.length > 0 ? 'generated' : 'missing';
+      }
+    } catch (error) {
+      console.warn(`Failed to generate insights for ${date}:`, error);
+      rankedInsights = persistedInsights?.rankedInsights || [];
+      insightLoadState = rankedInsights.length > 0 ? 'persisted' : 'missing';
+    }
+
+    return this.buildResponse(
       date,
       summary,
       sessions,
@@ -76,12 +148,9 @@ export class DailyInsightsService {
       replayEntries,
       wastedTimeMs,
       biggestTimeLeak,
-      integrity: {
-        source: summary?.summarySource || 'missing',
-        deltaMs: summary?.integrityDeltaMs ?? 0,
-        isConsistent: (summary?.integrityDeltaMs ?? 0) <= 2 * 60 * 1000,
-      },
-    };
+      rankedInsights,
+      insightLoadState
+    );
   }
 
   buildReplayEntries(sessions: AppSession[]): ReplayEntry[] {
@@ -148,6 +217,64 @@ export class DailyInsightsService {
     if (hour >= 9 && hour < 12) return 'Mid day';
     if (hour >= 12 && hour < 14) return 'Before lunch';
     if (hour >= 14 && hour < 22) return 'Evening';
-    return 'Before bed';
+    return 'After bed';
+  }
+
+  private shiftDate(dateStr: string, dayDelta: number): string {
+    const date = new Date(`${dateStr}T00:00:00`);
+    date.setDate(date.getDate() + dayDelta);
+    return date.toISOString().split('T')[0];
+  }
+
+  private async getTrailingSummaries(dateStr: string, days: number): Promise<DailyUsage[]> {
+    const dateStrings = Array.from({ length: days }, (_, index) =>
+      this.shiftDate(dateStr, -(index + 1))
+    );
+    const summaries = await Promise.all(dateStrings.map((date) => database.getDailySummary(date)));
+    return summaries.filter((summary): summary is DailyUsage => Boolean(summary));
+  }
+
+  private async getProtectionModes(): Promise<Map<string, string>> {
+    const settings = await database.getAppSettings();
+    return new Map(
+      settings
+        .filter((setting) => Boolean(setting.protectionMode))
+        .map((setting) => [setting.packageName, setting.protectionMode || 'monitor'])
+    );
+  }
+
+  private buildResponse(
+    date: string,
+    summary: DailyUsage | null,
+    sessions: AppSession[],
+    blockEvents: BlockEvent[],
+    replayEntries: ReplayEntry[],
+    wastedTimeMs: number,
+    biggestTimeLeak: DailyInsights['biggestTimeLeak'],
+    rankedInsights: InsightCard[],
+    insightLoadState: InsightLoadState
+  ): DailyInsights {
+    return {
+      date,
+      summary,
+      sessions,
+      blockEvents,
+      replayEntries,
+      primaryInsight: rankedInsights[0] ?? null,
+      replayInsightCards: rankedInsights.slice(0, 2),
+      rankedInsights,
+      wastedTimeMs,
+      biggestTimeLeak,
+      integrity: {
+        source: summary?.summarySource || 'missing',
+        deltaMs: summary?.integrityDeltaMs ?? 0,
+        isConsistent: (summary?.integrityDeltaMs ?? 0) <= 2 * 60 * 1000,
+      },
+      insightLoadState,
+    };
+  }
+
+  private getTodayDateString(): string {
+    return new Date().toISOString().split('T')[0];
   }
 }

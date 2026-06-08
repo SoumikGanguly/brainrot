@@ -4,34 +4,43 @@ import { router } from "expo-router";
 import type { User } from "firebase/auth";
 import { useEffect, useState } from "react";
 import {
-  Alert,
-  type AlertButton,
-  AppState,
-  Image,
-  Modal,
-  ScrollView,
-  Switch,
-  Text,
-  TouchableOpacity,
-  View,
+	Alert,
+	AppState,
+	Image,
+	Modal,
+	ScrollView,
+	Switch,
+	Text,
+	TouchableOpacity,
+	View,
+	type AlertButton,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 
 import { Card } from "@/components/Card";
+import FocusEducationModal, {
+	type FocusEducationStep,
+} from "@/components/FocusEducationModal";
 import { Header } from "@/components/Header";
+import SkeletonBlock from "@/components/SkeletonBlock";
 import { AuthService } from "@/services/AuthService";
 import { CapabilitiesService } from "@/services/CapabilitiesService";
+import { DailyInsightsService } from "@/services/DailyInsightsService";
+import type { InsightCard } from "@/services/InsightTypes";
 import { TelemetryService } from "@/services/TelemetryService";
-import { UnifiedUsageService } from "@/services/UnifiedUsageService";
+import {
+	UnifiedUsageService,
+	type ManufacturerPermissionInfo,
+} from "@/services/UnifiedUsageService";
 import { database } from "@/services/database";
 import { firebaseGoogleClientIds } from "@/services/firebase";
 import { getScoreColor } from "@/utils/brainScore";
 
 type PermissionState = {
-	usage: boolean;
-	overlay: boolean;
-	accessibility: boolean;
-	notifications: boolean;
+	usage: boolean | null;
+	overlay: boolean | null;
+	accessibility: boolean | null;
+	notifications: boolean | null;
 };
 type ViewApp = {
 	packageName: string;
@@ -60,10 +69,25 @@ export default function SettingsScreen() {
 		lastCloudSyncAt: 0,
 	});
 	const [loading, setLoading] = useState(true);
+	const [initialLoadComplete, setInitialLoadComplete] = useState(false);
 	const [widgetPreviewVisible, setWidgetPreviewVisible] = useState(false);
 	const [widgetPreviewScore, setWidgetPreviewScore] = useState<string>("--");
 	const [widgetPreviewScoreColor, setWidgetPreviewScoreColor] =
 		useState("#5D3DF0");
+	const [insightsPreviewVisible, setInsightsPreviewVisible] = useState(false);
+	const [focusEducationPreviewVisible, setFocusEducationPreviewVisible] =
+		useState(false);
+	const [focusEducationPreviewStep, setFocusEducationPreviewStep] =
+		useState<FocusEducationStep>("accessibility");
+	const [manufacturerInfo, setManufacturerInfo] =
+		useState<ManufacturerPermissionInfo | null>(null);
+	const [insightPreviewSections, setInsightPreviewSections] = useState<
+		{
+			title: string;
+			date: string;
+			insights: InsightCard[];
+		}[]
+	>([]);
 	const [analyticsLabelTapCount, setAnalyticsLabelTapCount] = useState(0);
 	const [request, response, promptAsync] = Google.useIdTokenAuthRequest({
 		webClientId: firebaseGoogleClientIds.webClientId,
@@ -136,7 +160,9 @@ export default function SettingsScreen() {
 	}, [response]);
 
 	const refresh = async () => {
-		setLoading(true);
+		if (!initialLoadComplete) {
+			setLoading(true);
+		}
 		try {
 			const [
 				installedApps,
@@ -145,6 +171,7 @@ export default function SettingsScreen() {
 				overlay,
 				accessibility,
 				notifications,
+				nextManufacturerInfo,
 			] = await Promise.all([
 				UnifiedUsageService.getInstalledApps(),
 				database.getMonitoredPackages(),
@@ -152,6 +179,7 @@ export default function SettingsScreen() {
 				CapabilitiesService.hasOverlayPermission(),
 				CapabilitiesService.hasAccessibilityPermission(),
 				CapabilitiesService.hasNotificationPermission(),
+				UnifiedUsageService.getManufacturerInfo(),
 			]);
 
 			setApps(
@@ -165,6 +193,11 @@ export default function SettingsScreen() {
 					.sort((a, b) => a.appName.localeCompare(b.appName)),
 			);
 			setPermissions({ usage, overlay, accessibility, notifications });
+			setManufacturerInfo(
+				nextManufacturerInfo?.needsSpecialPermission
+					? nextManufacturerInfo
+					: null,
+			);
 			setState({
 				monitoringEnabled:
 					(await database.getMeta("monitoring_enabled")) === "true",
@@ -181,11 +214,12 @@ export default function SettingsScreen() {
 			});
 		} finally {
 			setLoading(false);
+			setInitialLoadComplete(true);
 		}
 	};
 
 	const guardedUsageToggle = async (work: () => Promise<void>) => {
-		const granted = await CapabilitiesService.ensureUsageAccess();
+		const granted = await CapabilitiesService.ensureUsageAccess("settings");
 		if (!granted) {
 			Alert.alert(
 				"Usage Access Required",
@@ -209,7 +243,7 @@ export default function SettingsScreen() {
 			buttons.unshift({
 				text: "Open OEM Settings",
 				onPress: () => {
-					void CapabilitiesService.openBackgroundReliabilitySettings();
+					void CapabilitiesService.openBackgroundReliabilitySettings("settings");
 				},
 			});
 		}
@@ -256,7 +290,7 @@ export default function SettingsScreen() {
 	const previewBlockingScreen = async (mode: "soft" | "hard") => {
 		try {
 			if (mode === "soft" && !permissions.overlay) {
-				const granted = await CapabilitiesService.ensureOverlayPermission();
+				const granted = await CapabilitiesService.ensureOverlayPermission("settings");
 				if (!granted) {
 					Alert.alert(
 						"Overlay Required",
@@ -269,7 +303,7 @@ export default function SettingsScreen() {
 
 			if (mode === "hard" && !permissions.accessibility) {
 				const granted =
-					await CapabilitiesService.ensureAccessibilityPermission();
+					await CapabilitiesService.ensureAccessibilityPermission("settings");
 				if (!granted) {
 					Alert.alert(
 						"Accessibility Required",
@@ -488,7 +522,54 @@ export default function SettingsScreen() {
 		setWidgetPreviewVisible(true);
 	};
 
-	const disableFixedNotificationEasterEgg = async () => {
+	const openInsightsPreview = async () => {
+		const formatLocalDate = (date: Date) => date.toISOString().split("T")[0];
+		const today = new Date();
+		const yesterday = new Date();
+		yesterday.setDate(yesterday.getDate() - 1);
+
+		try {
+			const [todayInsights, yesterdayInsights] = await Promise.all([
+				DailyInsightsService.getInstance().getDailyInsights(
+					formatLocalDate(today),
+					{
+						forceSummaryRefresh: true,
+						allowInsightRegeneration: true,
+						preferPersistedInsights: true,
+					},
+				),
+				DailyInsightsService.getInstance().getDailyInsights(
+					formatLocalDate(yesterday),
+					{
+						allowInsightRegeneration: false,
+						preferPersistedInsights: true,
+					},
+				),
+			]);
+
+			setInsightPreviewSections([
+				{
+					title: "Today's Ranked Insights",
+					date: formatLocalDate(today),
+					insights: todayInsights.rankedInsights,
+				},
+				{
+					title: "Yesterday's Ranked Insights",
+					date: formatLocalDate(yesterday),
+					insights: yesterdayInsights.rankedInsights,
+				},
+			]);
+			setInsightsPreviewVisible(true);
+		} catch (error) {
+			const message =
+				error instanceof Error
+					? error.message
+					: "Unknown insight preview error";
+			Alert.alert("Insight Preview Failed", message);
+		}
+	};
+
+	const toggleFixedNotificationEasterEgg = async () => {
 		setAnalyticsLabelTapCount((currentCount) => {
 			const nextCount = currentCount + 1;
 			if (nextCount < 4) {
@@ -497,14 +578,22 @@ export default function SettingsScreen() {
 
 			void (async () => {
 				try {
-					await UnifiedUsageService.setFocusStatusNotificationEnabled(false);
+					const isEnabled =
+						await UnifiedUsageService.isFocusStatusNotificationEnabled();
+					await UnifiedUsageService.setFocusStatusNotificationEnabled(
+						!isEnabled,
+					);
 					Alert.alert(
 						"Shh...",
-						"The fixed focus notification has been disabled on this device.",
+						isEnabled
+							? "The fixed focus notification has been disabled on this device."
+							: "The fixed focus notification has been restored on this device.",
 					);
 				} catch (error) {
 					const message =
-						error instanceof Error ? error.message : "Unknown notification error";
+						error instanceof Error
+							? error.message
+							: "Unknown notification error";
 					Alert.alert("Couldn't disable notification", message);
 				}
 			})();
@@ -513,20 +602,120 @@ export default function SettingsScreen() {
 		});
 	};
 
-	if (loading) {
-		return (
-			<SafeAreaView className="flex-1 bg-bg">
-				<View className="flex-1 items-center justify-center">
-					<Text className="font-body text-body text-muted">
-						Loading settings...
-					</Text>
-				</View>
-			</SafeAreaView>
-		);
-	}
+	const openFocusEducationPreview = () => {
+		setFocusEducationPreviewStep("accessibility");
+		setFocusEducationPreviewVisible(true);
+	};
+
+	const advanceFocusEducationPreview = () => {
+		if (focusEducationPreviewStep === "accessibility") {
+			setFocusEducationPreviewStep("oem");
+			return;
+		}
+		setFocusEducationPreviewVisible(false);
+		setFocusEducationPreviewStep("accessibility");
+	};
+
+	const closeFocusEducationPreview = () => {
+		setFocusEducationPreviewVisible(false);
+		setFocusEducationPreviewStep("accessibility");
+	};
 
 	return (
 		<SafeAreaView className="flex-1 bg-bg">
+			<FocusEducationModal
+				visible={focusEducationPreviewVisible}
+				step={focusEducationPreviewStep}
+				accessibilityGranted={permissions.accessibility === true}
+				manufacturerTitle={manufacturerInfo?.title}
+				manufacturerInstructions={manufacturerInfo?.instructions}
+				canOpenManufacturerSettings={manufacturerInfo?.canOpenDirectly}
+				onClose={closeFocusEducationPreview}
+				onPrimary={advanceFocusEducationPreview}
+				onSecondary={closeFocusEducationPreview}
+			/>
+			<Modal
+				visible={insightsPreviewVisible}
+				animationType="fade"
+				transparent
+				onRequestClose={() => setInsightsPreviewVisible(false)}
+			>
+				<View className="flex-1 items-center justify-center bg-black/40 px-md">
+					<View className="max-h-[88%] w-full max-w-[420px] rounded-[28px] bg-white p-5">
+						<View className="mb-4 flex-row items-center justify-between">
+							<View className="flex-1 pr-sm">
+								<Text className="font-heading-bold text-card-title text-text">
+									Generated Insights
+								</Text>
+								<Text className="mt-1 font-body text-secondary text-muted">
+									Dev preview of the current ranked insight output.
+								</Text>
+							</View>
+							<TouchableOpacity
+								onPress={() => setInsightsPreviewVisible(false)}
+							>
+								<Ionicons name="close" size={24} color="#0F172A" />
+							</TouchableOpacity>
+						</View>
+
+						<ScrollView showsVerticalScrollIndicator={false}>
+							{insightPreviewSections.map((section) => (
+								<View key={section.title} className="mb-5">
+									<Text className="font-heading-bold text-card-title text-text">
+										{section.title}
+									</Text>
+									<Text className="mt-1 font-body text-secondary text-muted">
+										{section.date}
+									</Text>
+
+									{section.insights.length === 0 ? (
+										<View className="mt-3 rounded-2xl border border-slate-200 bg-slate-50 px-4 py-4">
+											<Text className="font-body text-secondary text-muted">
+												No insights generated.
+											</Text>
+										</View>
+									) : (
+										section.insights.map((insight, index) => (
+											<View
+												key={`${section.title}-${insight.id}-${index}`}
+												className="mt-3 rounded-2xl border border-slate-200 bg-slate-50 px-4 py-4"
+											>
+												<Text className="font-heading-semibold text-card-title text-text">
+													{index + 1}. {insight.category}
+												</Text>
+												<Text className="mt-2 font-heading-semibold text-card-title text-text">
+													{insight.headline}
+												</Text>
+												<Text className="mt-2 font-body text-secondary text-slate-600">
+													{insight.subtext}
+												</Text>
+												<Text className="mt-3 font-body text-secondary text-accent">
+													Action: {insight.actionLabel}
+												</Text>
+												<Text className="mt-1 font-body text-secondary text-muted">
+													{insight.action.type}
+												</Text>
+												<Text className="mt-1 font-body text-secondary text-muted">
+													Priority: {insight.priority}
+												</Text>
+												<Text className="mt-1 font-body text-secondary text-muted">
+													Severity {insight.scoreBreakdown.severity} ·
+													Actionability {insight.scoreBreakdown.actionability} ·
+													Confidence {insight.scoreBreakdown.confidence}
+												</Text>
+												<Text className="mt-1 font-body text-secondary text-muted">
+													Novelty {insight.scoreBreakdown.novelty} · Freshness{" "}
+													{insight.scoreBreakdown.freshness}
+												</Text>
+											</View>
+										))
+									)}
+								</View>
+							))}
+						</ScrollView>
+					</View>
+				</View>
+			</Modal>
 			<Modal
 				visible={widgetPreviewVisible}
 				animationType="fade"
@@ -574,6 +763,14 @@ export default function SettingsScreen() {
 			<ScrollView className="flex-1" showsVerticalScrollIndicator={false}>
 				<Header title="Settings" />
 
+				{loading ? (
+					<>
+						<SettingsSkeletonCard />
+						<SettingsSkeletonCard />
+						<SettingsSkeletonCard />
+					</>
+				) : (
+					<>
 				<Card className="mx-md mb-md">
 					<Text className="mb-sm font-heading-bold text-section text-text">
 						Protect Your Data
@@ -683,14 +880,14 @@ export default function SettingsScreen() {
 						label="Usage Access"
 						granted={permissions.usage}
 						onPress={() =>
-							CapabilitiesService.ensureUsageAccess().then(() => void refresh())
+							CapabilitiesService.ensureUsageAccess("settings").then(() => void refresh())
 						}
 					/>
 					<PermissionRow
 						label="Accessibility"
 						granted={permissions.accessibility}
 						onPress={() =>
-							CapabilitiesService.ensureAccessibilityPermission().then(
+							CapabilitiesService.ensureAccessibilityPermission("settings").then(
 								() => void refresh(),
 							)
 						}
@@ -699,7 +896,7 @@ export default function SettingsScreen() {
 						label="Display Over Other Apps"
 						granted={permissions.overlay}
 						onPress={() =>
-							CapabilitiesService.ensureOverlayPermission().then(
+							CapabilitiesService.ensureOverlayPermission("settings").then(
 								() => void refresh(),
 							)
 						}
@@ -716,11 +913,10 @@ export default function SettingsScreen() {
 						onValueChange={(value) =>
 							TelemetryService.setEnabled(value).then(() => void refresh())
 						}
-						onLabelPress={() => void disableFixedNotificationEasterEgg()}
+						onLabelPress={() => void toggleFixedNotificationEasterEgg()}
 					/>
 					<Text className="mt-sm font-body text-secondary text-muted">
-						Crash reporting stays on through Sentry so app failures can still be
-						diagnosed. This toggle controls PostHog product analytics only.
+						Allow the app to send anonymous usage data to help improve the app.
 					</Text>
 					<TouchableOpacity
 						onPress={() => router.push("/privacy-policy" as never)}
@@ -768,6 +964,14 @@ export default function SettingsScreen() {
 						>
 							<Text className="font-heading-semibold text-secondary text-text">
 								Check Onboarding Flow
+							</Text>
+						</TouchableOpacity>
+						<TouchableOpacity
+							onPress={openFocusEducationPreview}
+							className="mt-sm rounded-lg bg-surface border border-gray-200 px-4 py-3 items-center"
+						>
+							<Text className="font-heading-semibold text-secondary text-text">
+								Preview Focus First-Use Flow
 							</Text>
 						</TouchableOpacity>
 					</Card>
@@ -822,7 +1026,17 @@ export default function SettingsScreen() {
 								Preview Widget
 							</Text>
 						</TouchableOpacity>
+						<TouchableOpacity
+							onPress={() => void openInsightsPreview()}
+							className="rounded-lg bg-white border border-gray-200 px-4 py-3 items-center mt-sm"
+						>
+							<Text className="font-heading-semibold text-secondary text-text">
+								Show Generated Insights
+							</Text>
+						</TouchableOpacity>
 					</Card>
+				)}
+					</>
 				)}
 			</ScrollView>
 		</SafeAreaView>
@@ -835,7 +1049,7 @@ function PermissionRow({
 	onPress,
 }: {
 	label: string;
-	granted: boolean;
+	granted: boolean | null;
 	onPress: () => void;
 }) {
 	return (
@@ -844,7 +1058,9 @@ function PermissionRow({
 				<Text className="font-heading-semibold text-card-title text-text">
 					{label}
 				</Text>
-				{granted ? (
+				{granted === null ? (
+					<SkeletonBlock className="h-10 w-20 rounded-lg" />
+				) : granted ? (
 					<Ionicons name="checkmark-circle" size={24} color="#10B981" />
 				) : (
 					<TouchableOpacity
@@ -920,4 +1136,28 @@ function formatDuration(durationMs: number): string {
 	}
 
 	return `${minutes}m`;
+}
+
+function SettingsSkeletonCard() {
+	return (
+		<Card className="mx-md mb-md">
+			<SkeletonBlock className="h-7 w-40" />
+			<SkeletonBlock className="mt-3 h-4 w-full" />
+			<SkeletonBlock className="mt-2 h-4 w-4/5" />
+			<View className="mt-md">
+				{Array.from({ length: 3 }).map((_, index) => (
+					<View
+						key={index}
+						className="flex-row items-center justify-between border-b border-gray-100 py-sm last:border-b-0"
+					>
+						<View className="flex-1 pr-sm">
+							<SkeletonBlock className="h-5 w-32" />
+							<SkeletonBlock className="mt-2 h-3.5 w-44" />
+						</View>
+						<SkeletonBlock className="h-10 w-16 rounded-full" />
+					</View>
+				))}
+			</View>
+		</Card>
+	);
 }

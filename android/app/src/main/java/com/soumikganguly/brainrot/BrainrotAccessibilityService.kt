@@ -19,15 +19,15 @@ class BrainrotAccessibilityService : AccessibilityService() {
     private var lastHandledPackage: String? = null
     private var lastHandledAt = 0L
     private val handler = Handler(Looper.getMainLooper())
-    private var limitLoopRunnable: Runnable? = null
-    private var limitLoopPackage: String? = null
+    private var softLoopRunnable: Runnable? = null
+    private var softLoopPackage: String? = null
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
         val packageName = event?.packageName?.toString() ?: return
         reconcileTemporaryPasses(packageName)
         if (packageName.isBlank() || packageName == applicationContext.packageName || packageName == "com.android.systemui") {
-            if (limitLoopPackage != null && packageName != limitLoopPackage) {
-                stopLimitLoop()
+            if (softLoopPackage != null && packageName != softLoopPackage) {
+                stopSoftLoop()
             }
             return
         }
@@ -38,28 +38,28 @@ class BrainrotAccessibilityService : AccessibilityService() {
         }
 
         val config = loadConfig() ?: run {
-            stopLimitLoop()
+            stopSoftLoop()
             return
         }
 
         if (!config.blockingEnabled) {
-            stopLimitLoop()
+            stopSoftLoop()
             return
         }
 
-        val effectiveMode = config.getEffectiveMode(packageName)
-        if (effectiveMode == null || effectiveMode == "monitor" || effectiveMode == "ignore") {
-            if (limitLoopPackage == packageName) {
-                stopLimitLoop()
+        val isBlocked = config.blockedApps.any { it == packageName }
+        if (!isBlocked || isTemporarilyAllowed(packageName, config.blockingMode)) {
+            if (softLoopPackage == packageName) {
+                stopSoftLoop()
             }
             return
         }
 
-        if (isTemporarilyAllowed(packageName, effectiveMode)) {
-            if (limitLoopPackage == packageName) {
-                stopLimitLoop()
-            }
-            return
+        val effectiveMode = if (config.scheduleEnabled &&
+            isInSchedule(config.scheduleStart, config.scheduleEnd)) {
+            "hard"
+        } else {
+            config.blockingMode
         }
 
         val now = System.currentTimeMillis()
@@ -71,25 +71,25 @@ class BrainrotAccessibilityService : AccessibilityService() {
 
         Log.d(tag, "Blocking $packageName in $effectiveMode mode")
 
-        if (effectiveMode == "locked") {
-            stopLimitLoop()
+        if (effectiveMode == "hard") {
+            stopSoftLoop()
             performGlobalAction(GLOBAL_ACTION_HOME)
-            showOverlay(packageName, "hard")
+            showOverlay(packageName, effectiveMode)
             return
         }
 
-        showOverlay(packageName, "soft")
-        startLimitLoop(packageName, config.limitIntervalMinutes)
+        showOverlay(packageName, effectiveMode)
+        startSoftLoop(packageName, config.softBlockIntervalMinutes)
     }
 
     override fun onInterrupt() {
         Log.d(tag, "Accessibility interrupted")
-        stopLimitLoop()
+        stopSoftLoop()
     }
 
     override fun onDestroy() {
         super.onDestroy()
-        stopLimitLoop()
+        stopSoftLoop()
     }
 
     private fun showOverlay(packageName: String, mode: String) {
@@ -110,24 +110,24 @@ class BrainrotAccessibilityService : AccessibilityService() {
         }
     }
 
-    private fun startLimitLoop(packageName: String, intervalMinutes: Int) {
-        stopLimitLoop()
-        limitLoopPackage = packageName
+    private fun startSoftLoop(packageName: String, intervalMinutes: Int) {
+        stopSoftLoop()
+        softLoopPackage = packageName
 
         val intervalMs = intervalMinutes.coerceAtLeast(15) * 60 * 1000L
-        Log.d(tag, "Starting limit loop for $packageName with interval ${intervalMinutes.coerceAtLeast(15)} minutes")
-        limitLoopRunnable = object : Runnable {
+        Log.d(tag, "Starting soft block loop for $packageName with interval ${intervalMinutes.coerceAtLeast(15)} minutes")
+        softLoopRunnable = object : Runnable {
             override fun run() {
                 val config = loadConfig()
-                val effectiveMode = config?.getEffectiveMode(packageName)
                 if (
                     config == null ||
                     !config.blockingEnabled ||
-                    effectiveMode != "limit" ||
-                    isTemporarilyAllowed(packageName, effectiveMode) ||
+                    config.blockingMode != "soft" ||
+                    config.blockedApps.none { it == packageName } ||
+                    isTemporarilyAllowed(packageName, "soft") ||
                     !isPackageStillForeground(packageName)
                 ) {
-                    stopLimitLoop()
+                    stopSoftLoop()
                     return
                 }
 
@@ -136,13 +136,13 @@ class BrainrotAccessibilityService : AccessibilityService() {
             }
         }
 
-        handler.postDelayed(limitLoopRunnable!!, intervalMs)
+        handler.postDelayed(softLoopRunnable!!, intervalMs)
     }
 
-    private fun stopLimitLoop() {
-        limitLoopRunnable?.let { handler.removeCallbacks(it) }
-        limitLoopRunnable = null
-        limitLoopPackage = null
+    private fun stopSoftLoop() {
+        softLoopRunnable?.let { handler.removeCallbacks(it) }
+        softLoopRunnable = null
+        softLoopPackage = null
     }
 
     private fun isPackageStillForeground(packageName: String): Boolean {
@@ -172,37 +172,35 @@ class BrainrotAccessibilityService : AccessibilityService() {
         val prefs = getSharedPreferences("brainrot_prefs", Context.MODE_PRIVATE)
         val configString = prefs.getString("blocking_config", null) ?: return null
         val json = runCatching { JSONObject(configString) }.getOrNull() ?: return null
-        val protectedAppsJson = json.optJSONArray("protectedApps") ?: JSONArray()
-        val protectedApps = buildMap {
-            for (i in 0 until protectedAppsJson.length()) {
-                val item = protectedAppsJson.optJSONObject(i) ?: continue
-                val packageName = item.optString("packageName")
-                val mode = item.optString("mode")
-                if (packageName.isNotBlank() && mode.isNotBlank()) {
-                    put(packageName, mode)
-                }
+        val blockedAppsJson = json.optJSONArray("blockedApps") ?: JSONArray()
+        val blockedApps = buildList {
+            for (i in 0 until blockedAppsJson.length()) {
+                add(blockedAppsJson.optString(i))
             }
         }
 
         return BlockingConfig(
-            blockingEnabled = json.optBoolean("blockingEnabled", true),
-            protectedApps = protectedApps,
-            focusSessionActive = json.optBoolean("focusSessionActive", false),
-            limitIntervalMinutes = json.optInt("limitIntervalMinutes", 15),
+            blockingEnabled = json.optBoolean("blockingEnabled", false),
+            blockingMode = json.optString("blockingMode", "soft"),
+            blockedApps = blockedApps,
+            scheduleEnabled = json.optBoolean("scheduleEnabled", false),
+            scheduleStart = json.optString("scheduleStart", "22:00"),
+            scheduleEnd = json.optString("scheduleEnd", "06:00"),
+            softBlockIntervalMinutes = json.optInt("softBlockIntervalMinutes", 15)
         )
     }
 
-    private fun isTemporarilyAllowed(packageName: String, mode: String): Boolean {
-        return isLimitCooldownActive(packageName) || isEmergencyPassActive(packageName, mode)
+    private fun isTemporarilyAllowed(packageName: String, blockingMode: String): Boolean {
+        return isSoftCooldownActive(packageName) || isEmergencyPassActive(packageName, blockingMode)
     }
 
-    private fun isLimitCooldownActive(packageName: String): Boolean {
+    private fun isSoftCooldownActive(packageName: String): Boolean {
         val prefs = getSharedPreferences("brainrot_prefs", Context.MODE_PRIVATE)
         return prefs.getLong("soft_block_cooldown_until_$packageName", 0L) > System.currentTimeMillis()
     }
 
-    private fun isEmergencyPassActive(packageName: String, mode: String): Boolean {
-        if (mode != "locked") {
+    private fun isEmergencyPassActive(packageName: String, blockingMode: String): Boolean {
+        if (blockingMode != "hard") {
             return false
         }
 
@@ -249,6 +247,15 @@ class BrainrotAccessibilityService : AccessibilityService() {
         }
     }
 
+    private fun isInSchedule(start: String, end: String): Boolean {
+        val currentTime = java.text.SimpleDateFormat("HH:mm", java.util.Locale.US).format(java.util.Date())
+        return if (start > end) {
+            currentTime >= start || currentTime <= end
+        } else {
+            currentTime in start..end
+        }
+    }
+
     private fun getReadableAppName(packageName: String): String {
         return try {
             val appInfo = packageManager.getApplicationInfo(packageName, 0)
@@ -260,16 +267,11 @@ class BrainrotAccessibilityService : AccessibilityService() {
 
     private data class BlockingConfig(
         val blockingEnabled: Boolean,
-        val protectedApps: Map<String, String>,
-        val focusSessionActive: Boolean,
-        val limitIntervalMinutes: Int,
-    ) {
-        fun getEffectiveMode(packageName: String): String? {
-            val storedMode = protectedApps[packageName] ?: return null
-            if (storedMode == "ignore") {
-                return "ignore"
-            }
-            return if (focusSessionActive) "locked" else storedMode
-        }
-    }
+        val blockingMode: String,
+        val blockedApps: List<String>,
+        val scheduleEnabled: Boolean,
+        val scheduleStart: String,
+        val scheduleEnd: String,
+        val softBlockIntervalMinutes: Int,
+    )
 }

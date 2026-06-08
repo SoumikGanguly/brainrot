@@ -2,6 +2,7 @@ import { Alert, AppState, AppStateStatus } from 'react-native';
 
 import { HistoricalDataService } from './HistoricalDataService';
 import { TelemetryService } from './TelemetryService';
+import type { ProtectionSource } from './TelemetryEvents';
 import { UnifiedUsageService } from './UnifiedUsageService';
 import { UsageService } from './UsageService';
 import { database, type AppSettings } from './database';
@@ -73,14 +74,16 @@ export class AppBlockingService {
   async setProtectionMode(
     packageName: string,
     appName: string,
-    protectionMode: ProtectionMode
+    protectionMode: ProtectionMode,
+    source: ProtectionSource = 'focus_tab'
   ): Promise<void> {
     if (protectionMode === 'ignore') {
-      await this.removeProtectedApp(packageName);
+      await this.removeProtectedApp(packageName, source);
       return;
     }
 
     const existing = this.protectedApps.get(packageName);
+    const previousMode = existing?.protectionMode;
     const settings = await database.getAppSettings();
     const matched =
       settings.find((item) => item.packageName === packageName) ||
@@ -99,14 +102,17 @@ export class AppBlockingService {
     await this.saveProtectedPackages(protectedPackages);
     await this.persistMonitoredPackagesFromSettings();
     await this.refreshDerivedData();
-    TelemetryService.capture('focus_protection_mode_changed', {
-      package_name: packageName,
-      protection_mode: protectionMode,
+    TelemetryService.track('protection_level_changed', {
+      app_name: appName || matched?.appName || UnifiedUsageService.getAppDisplayName(packageName),
+      old_level: previousMode,
+      new_level: protectionMode,
+      source,
     });
   }
 
   async addProtectedApps(
-    apps: Array<{ packageName: string; appName: string }>
+    apps: Array<{ packageName: string; appName: string }>,
+    source: ProtectionSource = 'focus_tab'
   ): Promise<void> {
     const existingSettings = await database.getAppSettings();
     const existingMap = new Map(existingSettings.map((setting) => [setting.packageName, setting]));
@@ -127,12 +133,16 @@ export class AppBlockingService {
     await this.saveProtectedPackages(protectedPackages);
     await this.persistMonitoredPackagesFromSettings();
     await this.refreshDerivedData();
-    TelemetryService.capture('focus_protected_apps_added', {
-      added_count: apps.length,
-    });
+    for (const app of apps) {
+      TelemetryService.track('app_added_to_protected', {
+        app_name: app.appName,
+        new_level: existingMap.get(app.packageName)?.protectionMode || 'monitor',
+        source,
+      });
+    }
   }
 
-  async removeProtectedApp(packageName: string): Promise<void> {
+  async removeProtectedApp(packageName: string, source: ProtectionSource = 'focus_tab'): Promise<void> {
     const existing = this.protectedApps.get(packageName);
     if (!existing) {
       return;
@@ -151,8 +161,10 @@ export class AppBlockingService {
     await this.saveProtectedPackages(protectedPackages);
     await this.persistMonitoredPackagesFromSettings();
     await this.refreshDerivedData();
-    TelemetryService.capture('focus_protected_app_removed', {
-      package_name: packageName,
+    TelemetryService.track('app_removed_from_protected', {
+      app_name: existing.appName,
+      old_level: existing.protectionMode,
+      source,
     });
   }
 
@@ -181,19 +193,26 @@ export class AppBlockingService {
     await database.setMeta(FOCUS_SESSION_STARTED_AT_KEY, Date.now().toString());
     await this.syncNativeConfig();
     await this.applyRuntimeBehavior();
-    TelemetryService.capture('focus_session_started', {
-      protected_count: activeProtectedApps.length,
+    TelemetryService.track('focus_mode_started', {
+      locked_app_count: activeProtectedApps.length,
+      apps_blocked: activeProtectedApps.length,
     });
     return true;
   }
 
   async endFocusSession(): Promise<void> {
+    const startedAt = parseInt((await database.getMeta(FOCUS_SESSION_STARTED_AT_KEY)) || '0', 10);
+    const activeApps = Array.from(this.protectedApps.values()).filter((app) => app.protectionMode !== 'ignore');
     this.focusSessionActive = false;
     await database.setMeta(FOCUS_SESSION_ACTIVE_KEY, 'false');
     await database.setMeta(FOCUS_SESSION_STARTED_AT_KEY, '');
     await this.syncNativeConfig();
     await this.applyRuntimeBehavior();
-    TelemetryService.capture('focus_session_ended');
+    TelemetryService.track('focus_mode_completed', {
+      duration_minutes: startedAt > 0 ? Math.max(1, Math.round((Date.now() - startedAt) / 60000)) : undefined,
+      locked_app_count: activeApps.length,
+      apps_blocked: activeApps.length,
+    });
   }
 
   async isFocusSessionActive(): Promise<boolean> {
@@ -213,6 +232,14 @@ export class AppBlockingService {
     }
 
     if (effectiveMode === 'locked') {
+      TelemetryService.track('blocking_debug', {
+        stage: 'launch_missed',
+        package_name: packageName,
+        app_name: appName,
+        protection_mode: effectiveMode,
+        reason: 'accessibility_missing',
+        source: 'js_fallback',
+      });
       Alert.alert(
         'Accessibility Required',
         'Locked protection needs Accessibility access on Android. Enable Accessibility to enforce Locked mode and Focus Sessions.'
@@ -227,6 +254,14 @@ export class AppBlockingService {
 
     const hasOverlayPermission = await UnifiedUsageService.hasOverlayPermission();
     if (!hasOverlayPermission) {
+      TelemetryService.track('blocking_debug', {
+        stage: 'launch_missed',
+        package_name: packageName,
+        app_name: appName,
+        protection_mode: effectiveMode,
+        reason: 'overlay_missing',
+        source: 'js_fallback',
+      });
       Alert.alert(
         'Overlay Permission Required',
         'Limit mode fallback needs Display over other apps permission.'
@@ -241,6 +276,13 @@ export class AppBlockingService {
 
     this.lastFallbackBlockAt = now;
     this.limitOverlayShownAt.set(packageName, now);
+    TelemetryService.track('blocking_debug', {
+      stage: 'fallback_enforcement',
+      package_name: packageName,
+      app_name: appName,
+      protection_mode: effectiveMode,
+      source: 'js_fallback',
+    });
     await UnifiedUsageService.showBlockingOverlay(
       packageName,
       appName || this.protectedApps.get(packageName)?.appName || UnifiedUsageService.getAppDisplayName(packageName),

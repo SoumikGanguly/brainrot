@@ -1,6 +1,7 @@
 import { BrainScoreService } from './BrainScore';
 import { HistoricalDataService } from './HistoricalDataService';
 import { UsageService } from './UsageService';
+import { TelemetryService } from './TelemetryService';
 import {
   database,
   type AppSession,
@@ -67,6 +68,7 @@ export class DataSyncService {
       await database.saveBlockEvents(blockEventRows);
       if (blockEventRows.length > 0) {
         await UsageService.clearPendingBlockEvents();
+        this.trackBlockTelemetry(blockEventRows);
       }
 
       await HistoricalDataService.getInstance().rebuildSummaryForDate(today, { force: true });
@@ -93,5 +95,55 @@ export class DataSyncService {
     }
     
     return Array.from(map.values());
+  }
+
+  private trackBlockTelemetry(events: BlockEvent[]): void {
+    const today = new Date().toISOString().split('T')[0];
+    const bypassCounts = new Map<string, number>();
+
+    for (const event of events) {
+      const messageType = event.blockType === 'hard_block' ? 'hard' : 'soft';
+      const pauseProps = {
+        app_name: event.appName,
+        daily_usage_ms: event.usageAtTriggerMs ?? undefined,
+        limit_strength: event.limitMs != null ? String(Math.round(event.limitMs / 60000)) : undefined,
+        message_type: messageType,
+      } as const;
+
+      if (event.action === 'blocked') {
+        if (messageType === 'hard') {
+          TelemetryService.track('lock_screen_shown', pauseProps);
+        } else {
+          TelemetryService.track('pause_screen_shown', pauseProps);
+        }
+        continue;
+      }
+
+      if (event.action === 'cooldown_started') {
+        TelemetryService.track('pause_screen_countdown_completed', pauseProps);
+        TelemetryService.track('pause_screen_continue_clicked', pauseProps);
+        continue;
+      }
+
+      if (event.action === 'abandoned') {
+        TelemetryService.track('pause_screen_exit_clicked', pauseProps);
+        continue;
+      }
+
+      if (event.action === 'bypassed') {
+        const nextCount = (bypassCounts.get(event.packageName) || 0) + 1;
+        bypassCounts.set(event.packageName, nextCount);
+        TelemetryService.track('emergency_pass_used', {
+          app_name: event.appName,
+          pass_count_remaining: Math.max(0, 2 - nextCount),
+        });
+        if (nextCount >= 2 && event.date === today) {
+          TelemetryService.track('emergency_passes_exhausted', {
+            app_name: event.appName,
+            pass_count_remaining: 0,
+          });
+        }
+      }
+    }
   }
 }

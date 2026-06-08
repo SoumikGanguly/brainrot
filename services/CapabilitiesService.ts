@@ -1,25 +1,29 @@
-import * as Notifications from 'expo-notifications';
-import { NotificationService } from './NotificationService';
-import { TelemetryService } from './TelemetryService';
-import { UnifiedUsageService } from './UnifiedUsageService';
+import * as Notifications from "expo-notifications";
+
+import {
+  buildPermissionTelemetry,
+  type PermissionTrigger,
+} from "@/services/TelemetryEvents";
+import { NotificationService } from "./NotificationService";
+import { TelemetryService } from "./TelemetryService";
+import { UnifiedUsageService } from "./UnifiedUsageService";
 
 export class CapabilitiesService {
   static async hasUsageAccess(): Promise<boolean> {
     return UnifiedUsageService.isUsageAccessGranted();
   }
 
-  static async ensureUsageAccess(): Promise<boolean> {
+  static async ensureUsageAccess(trigger: PermissionTrigger = "settings"): Promise<boolean> {
     if (await this.hasUsageAccess()) {
-      TelemetryService.capture('permission_grant_success', {
-        permission: 'usage_access',
-        source: 'already_granted',
+      TelemetryService.track("usage_access_granted", {
+        screen_name: trigger,
+        permission_result: "granted",
       });
       return true;
     }
 
-    TelemetryService.capture('permission_grant_failure', {
-      permission: 'usage_access',
-      source: 'redirect_to_settings',
+    TelemetryService.track("usage_access_prompt_shown", {
+      screen_name: trigger,
     });
     await UnifiedUsageService.openUsageAccessSettings();
     return false;
@@ -27,23 +31,21 @@ export class CapabilitiesService {
 
   static async hasNotificationPermission(): Promise<boolean> {
     const { status } = await Notifications.getPermissionsAsync();
-    return status === 'granted';
+    return status === "granted";
   }
 
-  static async ensureNotificationPermission(): Promise<boolean> {
+  static async ensureNotificationPermission(
+    trigger: PermissionTrigger = "settings"
+  ): Promise<boolean> {
     if (await this.hasNotificationPermission()) {
-      TelemetryService.capture('permission_grant_success', {
-        permission: 'notifications',
-        source: 'already_granted',
-      });
+      TelemetryService.track("notification_permission_granted", buildPermissionTelemetry(trigger));
       return true;
     }
 
     const granted = await NotificationService.requestPermission();
-    TelemetryService.capture(granted ? 'permission_grant_success' : 'permission_grant_failure', {
-      permission: 'notifications',
-      source: 'permission_prompt',
-    });
+    if (granted) {
+      TelemetryService.track("notification_permission_granted", buildPermissionTelemetry(trigger));
+    }
     return granted;
   }
 
@@ -51,19 +53,14 @@ export class CapabilitiesService {
     return UnifiedUsageService.hasOverlayPermission();
   }
 
-  static async ensureOverlayPermission(): Promise<boolean> {
+  static async ensureOverlayPermission(
+    trigger: PermissionTrigger = "settings"
+  ): Promise<boolean> {
     if (await this.hasOverlayPermission()) {
-      TelemetryService.capture('permission_grant_success', {
-        permission: 'overlay',
-        source: 'already_granted',
-      });
+      TelemetryService.track("overlay_permission_granted", buildPermissionTelemetry(trigger));
       return true;
     }
 
-    TelemetryService.capture('permission_grant_failure', {
-      permission: 'overlay',
-      source: 'redirect_to_settings',
-    });
     await UnifiedUsageService.requestOverlayPermission();
     return false;
   }
@@ -72,19 +69,15 @@ export class CapabilitiesService {
     return UnifiedUsageService.hasAccessibilityPermission();
   }
 
-  static async ensureAccessibilityPermission(): Promise<boolean> {
+  static async ensureAccessibilityPermission(
+    trigger: PermissionTrigger = "settings"
+  ): Promise<boolean> {
     if (await this.hasAccessibilityPermission()) {
-      TelemetryService.capture('permission_grant_success', {
-        permission: 'accessibility',
-        source: 'already_granted',
-      });
+      TelemetryService.track("accessibility_granted", buildPermissionTelemetry(trigger));
       return true;
     }
 
-    TelemetryService.capture('permission_grant_failure', {
-      permission: 'accessibility',
-      source: 'redirect_to_settings',
-    });
+    TelemetryService.track("accessibility_prompt_shown", buildPermissionTelemetry(trigger));
     await UnifiedUsageService.openAccessibilitySettings();
     return false;
   }
@@ -108,7 +101,8 @@ export class CapabilitiesService {
     return { needsManufacturerGuidance: false };
   }
 
-  static async openBackgroundReliabilitySettings(): Promise<boolean> {
+  static async openBackgroundReliabilitySettings(trigger: PermissionTrigger = "settings"): Promise<boolean> {
+    TelemetryService.track("accessibility_helper_opened", buildPermissionTelemetry(trigger));
     return UnifiedUsageService.openManufacturerSettings();
   }
 }

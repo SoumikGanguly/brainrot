@@ -2,11 +2,11 @@ import { Ionicons } from "@expo/vector-icons";
 import * as Haptics from "expo-haptics";
 import { router } from "expo-router";
 import React, {
-  useCallback,
-  useEffect,
-  useMemo,
-  useRef,
-  useState,
+	useCallback,
+	useEffect,
+	useMemo,
+	useRef,
+	useState,
 } from "react";
 import {
 	Alert,
@@ -20,9 +20,10 @@ import {
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 
-import { CapabilitiesService } from "@/services/CapabilitiesService";
 import { AppBlockingService } from "@/services/AppBlockingService";
+import { CapabilitiesService } from "@/services/CapabilitiesService";
 import { MonitoredAppsService } from "@/services/MonitoredAppsService";
+import { buildPermissionTelemetry } from "@/services/TelemetryEvents";
 import { TelemetryService } from "@/services/TelemetryService";
 import { TrialService } from "@/services/TrialService";
 import { UnifiedUsageService } from "@/services/UnifiedUsageService";
@@ -99,6 +100,20 @@ const SAMPLE_REPLAY = [
 	{ time: "10:58 PM", app: "Instagram", duration: "53m", color: "#EF4444" },
 ];
 
+function getOnboardingScreenName(step: number): string {
+	const names = [
+		"intro",
+		"brain_health",
+		"replay_preview",
+		"app_picker",
+		"focus_preview",
+		"notification_preview",
+		"usage_access",
+		"all_set",
+	] as const;
+	return names[step] || `step_${step}`;
+}
+
 export default function OnboardingFlow({
 	preview = false,
 }: OnboardingFlowProps) {
@@ -106,10 +121,10 @@ export default function OnboardingFlow({
 	const [usageGranted, setUsageGranted] = useState(false);
 	const [accessibilityGranted, setAccessibilityGranted] = useState(false);
 	const [loadingApps, setLoadingApps] = useState(true);
-	const [installedApps, setInstalledApps] =
-		useState<InstalledAppOption[]>(COMMON_APP_OPTIONS);
+	const [installedApps, setInstalledApps] = useState<InstalledAppOption[]>([]);
 	const [selectedPackages, setSelectedPackages] = useState<string[]>([]);
 	const [appSearchQuery, setAppSearchQuery] = useState("");
+	const [appsFallbackMode, setAppsFallbackMode] = useState(false);
 	const [permissionSuccess, setPermissionSuccess] = useState<
 		Record<"usage" | "accessibility", boolean>
 	>({
@@ -117,17 +132,15 @@ export default function OnboardingFlow({
 		accessibility: false,
 	});
 	const permissionPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+	const defaultSelectedPackagesRef = useRef<string[]>([]);
+	const onboardingTrackedRef = useRef(false);
 
 	const appOptions = useMemo(() => {
-		const merged = new Map<string, InstalledAppOption>();
-		for (const fallback of COMMON_APP_OPTIONS) {
-			merged.set(fallback.packageName, fallback);
+		if (installedApps.length > 0) {
+			return installedApps;
 		}
-		for (const app of installedApps) {
-			merged.set(app.packageName, app);
-		}
-		return Array.from(merged.values());
-	}, [installedApps]);
+		return appsFallbackMode ? COMMON_APP_OPTIONS : [];
+	}, [appsFallbackMode, installedApps]);
 
 	const selectedAppEntry = useMemo(() => {
 		return (
@@ -170,6 +183,10 @@ export default function OnboardingFlow({
 		]);
 
 		if (usage && !usageGranted) {
+			TelemetryService.track("usage_access_granted", {
+				screen_name: getOnboardingScreenName(currentStep),
+				permission_result: "granted",
+			});
 			setPermissionSuccess((previous) => ({ ...previous, usage: true }));
 			setTimeout(() => {
 				setPermissionSuccess((previous) => ({ ...previous, usage: false }));
@@ -177,6 +194,10 @@ export default function OnboardingFlow({
 		}
 
 		if (accessibility && !accessibilityGranted) {
+			TelemetryService.track(
+				"accessibility_granted",
+				buildPermissionTelemetry("onboarding"),
+			);
 			setPermissionSuccess((previous) => ({
 				...previous,
 				accessibility: true,
@@ -191,39 +212,50 @@ export default function OnboardingFlow({
 
 		setUsageGranted(usage);
 		setAccessibilityGranted(accessibility);
-	}, [accessibilityGranted, usageGranted]);
+	}, [accessibilityGranted, currentStep, usageGranted]);
 
 	const loadInstalledApps = useCallback(async () => {
 		setLoadingApps(true);
 		try {
 			const apps = await UnifiedUsageService.getAllInstalledApps();
-			const safeApps = apps.length > 0 ? apps : COMMON_APP_OPTIONS;
+			const safeApps = apps.length > 0 ? apps : [];
 			setInstalledApps(safeApps);
+			setAppsFallbackMode(safeApps.length === 0);
 			const defaultSelected = safeApps
 				.filter(
 					(app) =>
-						app.isRecommended || DEFAULT_MONITORED_PACKAGES.has(app.packageName),
+						app.isRecommended ||
+						DEFAULT_MONITORED_PACKAGES.has(app.packageName),
 				)
 				.map((app) => app.packageName);
-			setSelectedPackages(
+			defaultSelectedPackagesRef.current =
 				defaultSelected.length > 0
 					? Array.from(new Set(defaultSelected))
-					: safeApps.slice(0, Math.min(3, safeApps.length)).map((app) => app.packageName),
-			);
+					: safeApps
+							.slice(0, Math.min(3, safeApps.length))
+							.map((app) => app.packageName);
+			setSelectedPackages(defaultSelectedPackagesRef.current);
 		} catch (error) {
 			console.warn("Unable to load installed apps for onboarding:", error);
 			setInstalledApps(COMMON_APP_OPTIONS);
-			setSelectedPackages(
-				COMMON_APP_OPTIONS.filter((app) => app.isRecommended).map(
-					(app) => app.packageName,
-				),
-			);
+			setAppsFallbackMode(true);
+			defaultSelectedPackagesRef.current = COMMON_APP_OPTIONS.filter(
+				(app) => app.isRecommended,
+			).map((app) => app.packageName);
+			setSelectedPackages(defaultSelectedPackagesRef.current);
 		} finally {
 			setLoadingApps(false);
 		}
 	}, []);
 
 	useEffect(() => {
+		if (!preview && !onboardingTrackedRef.current) {
+			onboardingTrackedRef.current = true;
+			TelemetryService.track("onboarding_started", {
+				screen_name: getOnboardingScreenName(0),
+			});
+		}
+
 		let mounted = true;
 
 		const bootstrap = async () => {
@@ -262,6 +294,16 @@ export default function OnboardingFlow({
 			}
 		};
 	}, [loadInstalledApps, refreshPermissionState]);
+
+	useEffect(() => {
+		if (preview) {
+			return;
+		}
+
+		TelemetryService.track("onboarding_screen_viewed", {
+			screen_name: getOnboardingScreenName(currentStep),
+		});
+	}, [currentStep, preview]);
 
 	function clearPermissionPoll() {
 		if (permissionPollRef.current) {
@@ -315,19 +357,30 @@ export default function OnboardingFlow({
 	async function openUsageAccess() {
 		await triggerHaptic("medium");
 		startPermissionPolling();
-		const granted = await CapabilitiesService.ensureUsageAccess();
+		const granted = await CapabilitiesService.ensureUsageAccess("onboarding");
 		if (granted) {
 			setUsageGranted(true);
+			return;
 		}
+		TelemetryService.track("usage_access_denied", {
+			screen_name: getOnboardingScreenName(currentStep),
+			permission_result: "denied",
+		});
 	}
 
 	async function openAccessibility() {
 		await triggerHaptic("medium");
 		startPermissionPolling();
-		const granted = await CapabilitiesService.ensureAccessibilityPermission();
+		const granted =
+			await CapabilitiesService.ensureAccessibilityPermission("onboarding");
 		if (granted) {
 			setAccessibilityGranted(true);
+			return;
 		}
+		TelemetryService.track(
+			"accessibility_denied",
+			buildPermissionTelemetry("onboarding"),
+		);
 	}
 
 	async function finishOnboarding() {
@@ -384,17 +437,35 @@ export default function OnboardingFlow({
 					packageName: app.packageName,
 					appName: app.appName,
 				})),
+				"onboarding",
 			);
 
 			const notificationsGranted =
-				await CapabilitiesService.ensureNotificationPermission();
+				await CapabilitiesService.ensureNotificationPermission("onboarding");
 
-			TelemetryService.capture("onboarding_completed", {
-				selected_app: selectedAppEntry.appName,
-				protected_apps_count: protectedApps.length,
-				notifications_enabled: notificationsGranted,
-				usage_access_granted: usageGranted,
-				accessibility_granted: accessibilityGranted,
+			const defaultAppsRemovedCount = defaultSelectedPackagesRef.current.filter(
+				(packageName) => !selectedPackages.includes(packageName),
+			).length;
+
+			TelemetryService.track("apps_selected_onboarding", {
+				screen_name: getOnboardingScreenName(5),
+				selected_app_count: protectedApps.length,
+				default_apps_removed_count: defaultAppsRemovedCount,
+			});
+
+			TelemetryService.track("onboarding_completed", {
+				screen_name: getOnboardingScreenName(currentStep),
+				selected_app_count: protectedApps.length,
+				default_apps_removed_count: defaultAppsRemovedCount,
+				permission_result: [
+					usageGranted ? "usage_granted" : "usage_missing",
+					accessibilityGranted
+						? "accessibility_granted"
+						: "accessibility_missing",
+					notificationsGranted
+						? "notifications_granted"
+						: "notifications_missing",
+				].join(","),
 			});
 
 			goToApp();
@@ -561,6 +632,12 @@ export default function OnboardingFlow({
 								</Text>
 							) : (
 								<View className="max-h-[420px]">
+									{appsFallbackMode ? (
+										<Text className="mb-4 rounded-[18px] bg-amber-50 px-4 py-3 font-body text-secondary text-amber-800">
+											Installed apps couldn&apos;t be loaded right now, so this
+											fallback starter list is shown instead.
+										</Text>
+									) : null}
 									<ScrollView showsVerticalScrollIndicator={false}>
 										{filteredAppOptions.map((app) => {
 											const selected = selectedPackages.includes(
@@ -669,50 +746,26 @@ export default function OnboardingFlow({
 			case 7:
 				return (
 					<StepLayout
-						title="Enable Focus Protection"
-						body="This allows Brainrot to block distracting apps when limits are reached."
-						primaryLabel={
-							accessibilityGranted ? "Start Tracking" : "Enable Protection"
-						}
-						onPrimary={
-							accessibilityGranted
-								? () => void finishOnboarding()
-								: () => void openAccessibility()
-						}
-						secondaryLabel={
-							accessibilityGranted ? undefined : "I’ll set this up later"
-						}
-						onSecondary={
-							accessibilityGranted ? undefined : () => void finishOnboarding()
-						}
-						footer="We’ll guide you step by step"
+						title="You’re all set"
+						body="Your brain is now being protected."
+						primaryLabel="Start Tracking"
+						onPrimary={() => void finishOnboarding()}
+						footer="Your first replay will arrive tomorrow morning."
 					>
-						<View className="mt-5 rounded-[28px] bg-white px-5 py-5">
-							<View className="rounded-2xl bg-violet-50 px-4 py-4">
-								<Text
-									className="font-heading-semibold text-card-title"
-									style={{ color: BRAND_PURPLE }}
-								>
-									Without it, you won’t get:
-								</Text>
-								{["No blocking", "No cooldowns", "No accountability mode"].map(
-									(item) => (
-										<View key={item} className="mt-3 flex-row items-center">
-											<Ionicons name="close" size={16} color="#EF4444" />
-											<Text className="ml-3 font-body text-body text-slate-700">
-												{item}
-											</Text>
-										</View>
-									),
-								)}
-							</View>
-							<OnboardingArt source={ASSETS.blocking} height={208} />
+						<View className="mt-4 items-center">
+							<OnboardingArt
+								source={ASSETS.complete}
+								height={270}
+								bleed={1.14}
+							/>
 						</View>
-						{renderPermissionPill(
-							accessibilityGranted,
-							permissionSuccess.accessibility,
-							"Focus Protection enabled.",
-						)}
+						<View className="mt-4 -mx-5 items-center">
+							<OnboardingArt
+								source={ASSETS.completeCards}
+								height={262}
+								bleed={1.58}
+							/>
+						</View>
 					</StepLayout>
 				);
 

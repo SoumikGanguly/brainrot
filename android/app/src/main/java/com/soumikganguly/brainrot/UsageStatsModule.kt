@@ -181,7 +181,7 @@ class UsageStatsModule(reactContext: ReactApplicationContext) : ReactContextBase
         Log.d(TAG, "startBackgroundMonitoring() called with interval: $intervalMinutes")
         try {
             BackgroundUsageWorker.startPeriodicWork(reactApplicationContext, intervalMinutes.toLong())
-            ForegroundMonitoringService.start(reactApplicationContext, "UsageStatsModule.startBackgroundMonitoring")
+            ForegroundMonitoringService.start(reactApplicationContext)
             startRealtimeMonitoring()
         } catch (e: Exception) {
             Log.e(TAG, "Error starting background monitoring", e)
@@ -193,7 +193,7 @@ class UsageStatsModule(reactContext: ReactApplicationContext) : ReactContextBase
         Log.d(TAG, "stopBackgroundMonitoring() called")
         try {
             BackgroundUsageWorker.stopPeriodicWork(reactApplicationContext)
-            ForegroundMonitoringService.stop(reactApplicationContext, "UsageStatsModule.stopBackgroundMonitoring")
+            ForegroundMonitoringService.stop(reactApplicationContext)
             stopRealtimeMonitoring()
         } catch (e: Exception) {
             Log.e(TAG, "Error stopping background monitoring", e)
@@ -220,8 +220,7 @@ class UsageStatsModule(reactContext: ReactApplicationContext) : ReactContextBase
     @ReactMethod
     fun startFocusStatusService(promise: Promise) {
         try {
-            Log.d(TAG, "startFocusStatusService() called")
-            ForegroundMonitoringService.start(reactApplicationContext, "UsageStatsModule.startFocusStatusService")
+            ForegroundMonitoringService.start(reactApplicationContext)
             promise.resolve(true)
         } catch (e: Exception) {
             Log.e(TAG, "Error starting focus status service", e)
@@ -232,8 +231,7 @@ class UsageStatsModule(reactContext: ReactApplicationContext) : ReactContextBase
     @ReactMethod
     fun stopFocusStatusService(promise: Promise) {
         try {
-            Log.d(TAG, "stopFocusStatusService() called")
-            ForegroundMonitoringService.stop(reactApplicationContext, "UsageStatsModule.stopFocusStatusService")
+            ForegroundMonitoringService.stop(reactApplicationContext)
             promise.resolve(true)
         } catch (e: Exception) {
             Log.e(TAG, "Error stopping focus status service", e)
@@ -690,7 +688,6 @@ class UsageStatsModule(reactContext: ReactApplicationContext) : ReactContextBase
         val event = UsageEvents.Event()
         val usageMap = HashMap<String, Long>()
         val sessionStartTimes = HashMap<String, Long>()
-        var activePackage: String? = null
 
         while (events.hasNextEvent()) {
             events.getNextEvent(event)
@@ -700,15 +697,7 @@ class UsageStatsModule(reactContext: ReactApplicationContext) : ReactContextBase
 
             when (event.eventType) {
                 UsageEvents.Event.MOVE_TO_FOREGROUND -> {
-                    if (activePackage != null && activePackage != pkg) {
-                        val previousStartTs = sessionStartTimes.remove(activePackage)
-                        if (previousStartTs != null && event.timeStamp > previousStartTs) {
-                            val sessionDuration = event.timeStamp - previousStartTs
-                            usageMap[activePackage!!] = (usageMap[activePackage!!] ?: 0L) + sessionDuration
-                        }
-                    }
                     sessionStartTimes[pkg] = event.timeStamp
-                    activePackage = pkg
                 }
                 UsageEvents.Event.MOVE_TO_BACKGROUND -> {
                     val startTs = sessionStartTimes[pkg]
@@ -716,9 +705,6 @@ class UsageStatsModule(reactContext: ReactApplicationContext) : ReactContextBase
                         val sessionDuration = event.timeStamp - startTs
                         usageMap[pkg] = (usageMap[pkg] ?: 0L) + sessionDuration
                         sessionStartTimes.remove(pkg)
-                    }
-                    if (activePackage == pkg) {
-                        activePackage = null
                     }
                 }
             }
@@ -763,7 +749,6 @@ class UsageStatsModule(reactContext: ReactApplicationContext) : ReactContextBase
         val event = UsageEvents.Event()
         val sessionStartTimes = HashMap<String, Long>()
         val result = WritableNativeArray()
-        var activePackage: String? = null
 
         while (events.hasNextEvent()) {
             events.getNextEvent(event)
@@ -773,30 +758,17 @@ class UsageStatsModule(reactContext: ReactApplicationContext) : ReactContextBase
 
             when (event.eventType) {
                 UsageEvents.Event.MOVE_TO_FOREGROUND -> {
-                    if (activePackage != null && activePackage != pkg) {
-                        val previousStartTs = sessionStartTimes.remove(activePackage)
-                        if (previousStartTs != null && event.timeStamp > previousStartTs) {
-                            result.pushMap(buildSessionMap(activePackage!!, previousStartTs, event.timeStamp))
-                        }
-                    }
                     sessionStartTimes[pkg] = event.timeStamp
-                    activePackage = pkg
                 }
                 UsageEvents.Event.MOVE_TO_BACKGROUND -> {
                     val startTs = sessionStartTimes[pkg] ?: continue
                     if (event.timeStamp <= startTs) {
                         sessionStartTimes.remove(pkg)
-                        if (activePackage == pkg) {
-                            activePackage = null
-                        }
                         continue
                     }
 
                     result.pushMap(buildSessionMap(pkg, startTs, event.timeStamp))
                     sessionStartTimes.remove(pkg)
-                    if (activePackage == pkg) {
-                        activePackage = null
-                    }
                 }
             }
         }

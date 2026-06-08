@@ -4,8 +4,13 @@ export interface BrainScoreMetrics {
   totalDistractingMinutes: number;
   totalMonitoredOpens: number;
   longestSessionMinutes: number;
-  bypassCount: number;
-  successfulAvoidances: number;
+  lateNightMinutes?: number;
+  beforeLunchMinutes?: number;
+  limitDismissals?: number;
+  bypassCount?: number;
+  successfulAvoidances?: number;
+  improvementVsYesterdayMinutes?: number;
+  improvementVs7DayBaselineMinutes?: number;
 }
 
 export type BrainStateLevel = 'focused' | 'healthy' | 'foggy' | 'exhausted';
@@ -18,19 +23,84 @@ export function calculateBrainScore(
     if (input < 0) return 100;
     if (allowedMs <= 0) return 0;
 
-    const score = Math.max(0, Math.round(100 - (input / allowedMs) * 100));
+    const totalMinutes = input / 60000;
+    const score = Math.max(0, Math.round(100 - getProgressiveTimePenalty(totalMinutes)));
     return score;
   }
 
+  const lateNightMinutes = Math.max(0, input.lateNightMinutes || 0);
+  const beforeLunchMinutes = Math.max(0, input.beforeLunchMinutes || 0);
+  const limitDismissals = Math.max(0, input.limitDismissals || 0);
+  const bypassCount = Math.max(0, input.bypassCount || 0);
+  const successfulAvoidances = Math.max(0, input.successfulAvoidances || 0);
+  const improvementVsYesterdayMinutes = input.improvementVsYesterdayMinutes || 0;
+  const improvementVs7DayBaselineMinutes = input.improvementVs7DayBaselineMinutes || 0;
+
+  const timePenalty = clampPenalty(getProgressiveTimePenalty(input.totalDistractingMinutes), 100);
+  const opensPenalty = clampPenalty(Math.sqrt(input.totalMonitoredOpens / 30) * 12, 12);
+  const longestPenalty = clampPenalty(Math.sqrt(input.longestSessionMinutes / 60) * 8, 8);
+  const lateNightPenalty = clampPenalty(Math.sqrt(lateNightMinutes / 50) * 8, 8);
+  const beforeLunchPenalty = clampPenalty(Math.sqrt(beforeLunchMinutes / 45) * 4, 4);
+  const dismissalPenalty = clampPenalty(limitDismissals * 2.25, 6);
+  const bypassPenalty = clampPenalty(bypassCount * 4, 8);
+  const avoidanceBonus = clampBonus(successfulAvoidances * 1.2, 4);
+  const yesterdayBonus = clampBonus(
+    (improvementVsYesterdayMinutes / 15) * 2.2,
+    5,
+  );
+  const weeklyBonus = clampBonus(
+    (improvementVs7DayBaselineMinutes / 20) * 2.4,
+    5,
+  );
+
   const score =
-    100
-    - Math.min(input.totalDistractingMinutes / 3, 35)
-    - Math.min(input.totalMonitoredOpens * 0.8, 25)
-    - Math.min(input.longestSessionMinutes / 2, 20)
-    - input.bypassCount * 5
-    + input.successfulAvoidances * 2;
+    100 -
+    timePenalty -
+    opensPenalty -
+    longestPenalty -
+    lateNightPenalty -
+    beforeLunchPenalty -
+    dismissalPenalty -
+    bypassPenalty +
+    avoidanceBonus +
+    yesterdayBonus +
+    weeklyBonus;
 
   return Math.round(Math.max(0, Math.min(100, score)));
+}
+
+function clampPenalty(value: number, max: number): number {
+  return Math.max(0, Math.min(max, value));
+}
+
+function getProgressiveTimePenalty(totalDistractingMinutes: number): number {
+  const minutes = Math.max(0, totalDistractingMinutes);
+
+  if (minutes <= 60) {
+    return (minutes / 60) * 10;
+  }
+
+  if (minutes <= 120) {
+    return 10 + ((minutes - 60) / 60) * 15;
+  }
+
+  if (minutes <= 180) {
+    return 25 + ((minutes - 120) / 60) * 20;
+  }
+
+  if (minutes <= 240) {
+    return 45 + ((minutes - 180) / 60) * 20;
+  }
+
+  if (minutes <= 360) {
+    return 65 + ((minutes - 240) / 120) * 22;
+  }
+
+  return 87 + Math.min(13, ((minutes - 360) / 120) * 13);
+}
+
+function clampBonus(value: number, max: number): number {
+  return Math.max(0, Math.min(max, value));
 }
 
 export function getBrainStateLevel(score: number): BrainStateLevel {

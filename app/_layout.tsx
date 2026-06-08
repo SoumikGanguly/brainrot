@@ -39,6 +39,7 @@ export default Sentry.wrap(function RootLayout() {
     TelemetryService.initialize().catch((error) => {
       console.warn('Failed to initialize telemetry:', error);
     });
+    TelemetryService.track('app_opened', {});
     AuthService.initialize();
 
     database
@@ -71,6 +72,22 @@ export default Sentry.wrap(function RootLayout() {
     Notifications.getLastNotificationResponseAsync()
       .then((response) => {
         const route = response?.notification.request.content.data?.route;
+        const data = response?.notification.request.content.data as
+          | {
+              notification_type?: 'morning_insight' | 'weekly_report' | 'monthly_report' | 'permission_reminder';
+              insight_type?: string;
+              app_name?: string;
+              brain_score?: number;
+            }
+          | undefined;
+        if (data?.notification_type) {
+          TelemetryService.track('notification_opened', {
+            notification_type: data.notification_type,
+            insight_type: data.insight_type,
+            app_name: data.app_name,
+            brain_score: data.brain_score,
+          });
+        }
         handleNotificationRoute(route);
         if (route && Notifications.clearLastNotificationResponseAsync) {
           void Notifications.clearLastNotificationResponseAsync();
@@ -82,6 +99,22 @@ export default Sentry.wrap(function RootLayout() {
 
     const subscription = Notifications.addNotificationResponseReceivedListener((response) => {
       const route = response.notification.request.content.data?.route;
+      const data = response.notification.request.content.data as
+        | {
+            notification_type?: 'morning_insight' | 'weekly_report' | 'monthly_report' | 'permission_reminder';
+            insight_type?: string;
+            app_name?: string;
+            brain_score?: number;
+          }
+        | undefined;
+      if (data?.notification_type) {
+        TelemetryService.track('notification_opened', {
+          notification_type: data.notification_type,
+          insight_type: data.insight_type,
+          app_name: data.app_name,
+          brain_score: data.brain_score,
+        });
+      }
       handleNotificationRoute(route);
     });
 

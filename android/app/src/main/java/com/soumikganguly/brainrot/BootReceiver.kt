@@ -22,11 +22,10 @@ class BootReceiver : BroadcastReceiver() {
             val backgroundChecksEnabled = prefs.getBoolean("background_checks_enabled", true)
 
             if (!monitoringEnabled) {
-                Log.d("BootReceiver", "Skipping monitoring restore after $action because monitoring is disabled")
                 return
             }
 
-            ForegroundMonitoringService.start(context, "BootReceiver:$action")
+            ForegroundMonitoringService.start(context)
             if (backgroundChecksEnabled) {
                 BackgroundUsageWorker.startPeriodicWork(context, 15)
             }

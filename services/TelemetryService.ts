@@ -1,7 +1,9 @@
-import * as Sentry from '@sentry/react-native';
-import type { PostHogEventProperties } from '@posthog/core';
-import PostHog from 'posthog-react-native';
-import { database } from './database';
+import * as Sentry from "@sentry/react-native";
+import type { PostHogEventProperties } from "@posthog/core";
+import PostHog from "posthog-react-native";
+
+import type { TelemetryEventMap, TelemetryEventName } from "@/services/TelemetryEvents";
+import { database } from "./database";
 
 const sentryDsn = process.env.EXPO_PUBLIC_SENTRY_DSN;
 const telemetryConfig: Sentry.ReactNativeOptions = {
@@ -14,7 +16,7 @@ const telemetryConfig: Sentry.ReactNativeOptions = {
 };
 
 const posthogApiKey = process.env.EXPO_PUBLIC_POSTHOG_API_KEY;
-const posthogHost = process.env.EXPO_PUBLIC_POSTHOG_HOST || 'https://us.i.posthog.com';
+const posthogHost = process.env.EXPO_PUBLIC_POSTHOG_HOST || "https://us.i.posthog.com";
 
 export class TelemetryService {
   private static initialized = false;
@@ -38,7 +40,7 @@ export class TelemetryService {
   static async initialize(): Promise<void> {
     this.prime();
 
-    const analyticsEnabled = (await database.getMeta('analytics_enabled')) !== 'false';
+    const analyticsEnabled = (await database.getMeta("analytics_enabled")) !== "false";
     this.enabled = analyticsEnabled;
 
     if (!this.initialized) {
@@ -49,14 +51,14 @@ export class TelemetryService {
     this.setSentryUserContext(anonymousId);
     await this.ensurePostHogClient();
     this.identify(anonymousId, {
-      identity_type: 'anonymous_install',
+      identity_type: "anonymous_install",
     });
     await this.syncPostHogOptState();
   }
 
   static async setEnabled(enabled: boolean): Promise<void> {
     this.enabled = enabled;
-    await database.setMeta('analytics_enabled', enabled.toString());
+    await database.setMeta("analytics_enabled", enabled.toString());
     await this.ensurePostHogClient();
     await this.syncPostHogOptState();
   }
@@ -71,6 +73,28 @@ export class TelemetryService {
     }
 
     this.posthogClient.capture(event, properties);
+  }
+
+  static track<EventName extends TelemetryEventName>(
+    event: EventName,
+    properties: TelemetryEventMap[EventName]
+  ): void {
+    this.capture(event, properties as PostHogEventProperties);
+  }
+
+  static async trackOnce<EventName extends TelemetryEventName>(
+    metaKey: string,
+    event: EventName,
+    properties: TelemetryEventMap[EventName]
+  ): Promise<boolean> {
+    const existing = await database.getMeta(metaKey);
+    if (existing === "true") {
+      return false;
+    }
+
+    this.track(event, properties);
+    await database.setMeta(metaKey, "true");
+    return true;
   }
 
   static async screen(name: string, properties?: PostHogEventProperties): Promise<void> {
@@ -89,14 +113,13 @@ export class TelemetryService {
     this.posthogClient.identify(distinctId, properties);
   }
 
-  // Call this with a stable app user ID once authentication exists.
   static identifyAuthenticatedUser(userId: string, properties?: PostHogEventProperties): void {
     if (sentryDsn) {
       Sentry.setUser({ id: userId });
     }
 
     this.identify(userId, {
-      identity_type: 'authenticated_user',
+      identity_type: "authenticated_user",
       ...properties,
     });
   }
@@ -112,7 +135,7 @@ export class TelemetryService {
 
     if (this.enabled && this.posthogClient) {
       this.posthogClient.identify(anonymousId, {
-        identity_type: 'anonymous_install',
+        identity_type: "anonymous_install",
       });
     }
 
@@ -124,14 +147,16 @@ export class TelemetryService {
   }
 
   static captureException(error: Error | unknown, properties?: PostHogEventProperties): void {
-    if (sentryDsn) {
-      Sentry.withScope((scope) => {
-        if (properties) {
-          scope.setContext('error_metadata', this.sanitizeProperties(properties));
-        }
-        Sentry.captureException(error);
-      });
+    if (!sentryDsn) {
+      return;
     }
+
+    Sentry.withScope((scope) => {
+      if (properties) {
+        scope.setContext("error_metadata", this.sanitizeProperties(properties));
+      }
+      Sentry.captureException(error);
+    });
   }
 
   private static async ensurePostHogClient(): Promise<void> {
@@ -147,8 +172,8 @@ export class TelemetryService {
       disableSurveys: true,
       preloadFeatureFlags: false,
       sendFeatureFlagEvent: false,
-      persistence: 'file',
-      personProfiles: 'identified_only',
+      persistence: "file",
+      personProfiles: "identified_only",
     });
 
     await this.posthogClient.ready();
@@ -159,14 +184,14 @@ export class TelemetryService {
       return this.anonymousId;
     }
 
-    const existing = await database.getMeta('telemetry_anonymous_id');
+    const existing = await database.getMeta("telemetry_anonymous_id");
     if (existing) {
       this.anonymousId = existing;
       return existing;
     }
 
     const created = `anon_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
-    await database.setMeta('telemetry_anonymous_id', created);
+    await database.setMeta("telemetry_anonymous_id", created);
     this.anonymousId = created;
     return created;
   }

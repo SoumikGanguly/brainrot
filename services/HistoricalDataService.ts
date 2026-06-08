@@ -1,4 +1,5 @@
 import { database, type AppSession, type UsageData } from './database';
+import type { DailyInsightSignals } from './InsightTypes';
 import { UsageService } from './UsageService';
 import {
   calculateBrainScore,
@@ -11,7 +12,7 @@ interface AggregatedAppUsage extends UsageData {
 }
 
 const SUMMARY_INTEGRITY_WARNING_MS = 2 * 60 * 1000;
-const DAILY_SUMMARY_VERSION = 'v2';
+const DAILY_SUMMARY_VERSION = 'v3';
 
 export class HistoricalDataService {
   private static instance: HistoricalDataService;
@@ -72,12 +73,29 @@ export class HistoricalDataService {
       const longestSessionMs = monitoredSessions.reduce((max, session) => Math.max(max, session.durationMs), 0);
       const averageSessionMs = totalMonitoredOpens > 0 ? Math.round(totalScreenTime / totalMonitoredOpens) : 0;
       const topApp = monitoredUsage[0] ?? null;
+      const previousSummaries = await this.loadPreviousSummaries(dateStr, 7);
+      const insightSignals = this.buildInsightSignals(
+        monitoredSessions,
+        monitoredUsage,
+        blockEvents,
+        totalScreenTime,
+        totalMonitoredOpens,
+        longestSessionMs,
+        averageSessionMs,
+        previousSummaries
+      );
       const metrics: BrainScoreMetrics = {
         totalDistractingMinutes: totalScreenTime / 60000,
         totalMonitoredOpens,
         longestSessionMinutes: longestSessionMs / 60000,
-        bypassCount: blockEvents.filter((event) => event.action === 'bypassed').length,
-        successfulAvoidances: blockEvents.filter((event) => event.action === 'abandoned').length,
+        lateNightMinutes: insightSignals.lateNightUsageMs / 60000,
+        beforeLunchMinutes: insightSignals.beforeLunchUsageMs / 60000,
+        limitDismissals: insightSignals.limitDismissals,
+        bypassCount: insightSignals.bypassCount,
+        successfulAvoidances: insightSignals.abandonedCount,
+        improvementVsYesterdayMinutes: insightSignals.improvementVsYesterdayMs / 60000,
+        improvementVs7DayBaselineMinutes:
+          insightSignals.improvementVs7DayBaselineMs / 60000,
       };
       const focusScore = calculateBrainScore(metrics);
       const brainHealthStatus = getBrainStateLabel(focusScore);
@@ -101,6 +119,7 @@ export class HistoricalDataService {
         rawUsageTotalMs,
         integrityDeltaMs,
         summaryVersion: DAILY_SUMMARY_VERSION,
+        insightSignals,
       };
 
       if (sessionUsage.length > 0 && rawUsageAggregated.length > 0 && integrityDeltaMs > SUMMARY_INTEGRITY_WARNING_MS) {
@@ -213,6 +232,153 @@ export class HistoricalDataService {
       .sort((a, b) => b.totalTimeMs - a.totalTimeMs);
   }
 
+  private async loadPreviousSummaries(
+    dateStr: string,
+    trailingDays: number
+  ): Promise<Array<{ date: string; totalDistractingMs: number; totalMonitoredOpens: number }>> {
+    const dates = Array.from({ length: trailingDays }, (_, index) => {
+      const date = new Date(`${dateStr}T00:00:00`);
+      date.setDate(date.getDate() - (index + 1));
+      return date.toISOString().split('T')[0];
+    });
+
+    const summaries = await Promise.all(dates.map((date) => database.getDailySummary(date)));
+    return summaries
+      .filter((summary): summary is NonNullable<typeof summary> => summary !== null)
+      .map((summary) => ({
+        date: summary.date,
+        totalDistractingMs: summary.totalDistractingMs ?? summary.totalScreenTime,
+        totalMonitoredOpens: summary.totalMonitoredOpens ?? 0,
+      }));
+  }
+
+  private buildInsightSignals(
+    monitoredSessions: AppSession[],
+    monitoredUsage: AggregatedAppUsage[],
+    blockEvents: Awaited<ReturnType<typeof database.getBlockEventsForDate>>,
+    totalScreenTime: number,
+    totalMonitoredOpens: number,
+    longestSessionMs: number,
+    averageSessionMs: number,
+    previousSummaries: Array<{
+      date: string;
+      totalDistractingMs: number;
+      totalMonitoredOpens: number;
+    }>
+  ): DailyInsightSignals {
+    const firstSessionStartedAt = monitoredSessions[0]?.startedAt
+      ? new Date(monitoredSessions[0].startedAt).getTime()
+      : null;
+    const lastSessionEndedAt = monitoredSessions[monitoredSessions.length - 1]?.endedAt
+      ? new Date(monitoredSessions[monitoredSessions.length - 1].endedAt).getTime()
+      : null;
+    const awakeSpanMinutes =
+      firstSessionStartedAt && lastSessionEndedAt && lastSessionEndedAt > firstSessionStartedAt
+        ? Math.max(30, Math.round((lastSessionEndedAt - firstSessionStartedAt) / 60000))
+        : 0;
+
+    const usageByMoment = new Map<string, number>();
+    let lateNightUsageMs = 0;
+    let beforeLunchUsageMs = 0;
+    let wakeWindowUsageMs = 0;
+    let wakeWindowOpenCount = 0;
+
+    for (const session of monitoredSessions) {
+      const startedAt = new Date(session.startedAt).getTime();
+      const moment = this.getMomentLabel(session.startedAt);
+      usageByMoment.set(moment, (usageByMoment.get(moment) || 0) + session.durationMs);
+
+      if (moment === 'After bed') {
+        lateNightUsageMs += session.durationMs;
+      }
+
+      if (moment === 'Before lunch') {
+        beforeLunchUsageMs += session.durationMs;
+      }
+
+      if (
+        firstSessionStartedAt !== null &&
+        startedAt - firstSessionStartedAt <= 30 * 60 * 1000
+      ) {
+        wakeWindowUsageMs += session.durationMs;
+        wakeWindowOpenCount += 1;
+      }
+    }
+
+    const dominantMomentEntry = Array.from(usageByMoment.entries()).sort(
+      (a, b) => b[1] - a[1]
+    )[0];
+    const topAppPackage = monitoredUsage[0]?.packageName ?? null;
+    const topAppName = monitoredUsage[0]?.appName ?? null;
+    const topAppMs = monitoredUsage[0]?.totalTimeMs ?? 0;
+    const topAppOpenCount = topAppPackage
+      ? monitoredSessions.filter((session) => session.packageName === topAppPackage).length
+      : 0;
+    const yesterday = previousSummaries[0] || null;
+    const weeklyAverageMs =
+      previousSummaries.length > 0
+        ? previousSummaries.reduce((sum, item) => sum + item.totalDistractingMs, 0) /
+          previousSummaries.length
+        : 0;
+    const weeklyAverageOpens =
+      previousSummaries.length > 0
+        ? previousSummaries.reduce((sum, item) => sum + item.totalMonitoredOpens, 0) /
+          previousSummaries.length
+        : 0;
+
+    return {
+      totalDistractingMs: totalScreenTime,
+      totalMonitoredOpens,
+      longestSessionMs,
+      averageSessionMs,
+      lateNightUsageMs,
+      beforeLunchUsageMs,
+      wakeWindowUsageMs,
+      wakeWindowOpenCount,
+      awakeSpanMinutes,
+      distractionCadenceMinutes:
+        totalMonitoredOpens > 0 && awakeSpanMinutes > 0
+          ? Math.max(1, Math.round(awakeSpanMinutes / totalMonitoredOpens))
+          : 0,
+      topAppPackage,
+      topAppName,
+      topAppMs,
+      topAppOpenCount,
+      topAppSharePercent:
+        totalScreenTime > 0 ? Math.round((topAppMs / totalScreenTime) * 100) : 0,
+      limitDismissals: blockEvents.filter(
+        (event) =>
+          (event.blockType === 'soft' || event.blockType === 'limit') &&
+          (event.action === 'cooldown_started' || event.action === 'bypassed')
+      ).length,
+      bypassCount: blockEvents.filter((event) => event.action === 'bypassed').length,
+      abandonedCount: blockEvents.filter((event) => event.action === 'abandoned').length,
+      improvementVsYesterdayMs:
+        yesterday ? yesterday.totalDistractingMs - totalScreenTime : 0,
+      improvementVsYesterdayOpens:
+        yesterday ? yesterday.totalMonitoredOpens - totalMonitoredOpens : 0,
+      improvementVs7DayBaselineMs:
+        weeklyAverageMs > 0 ? Math.round(weeklyAverageMs - totalScreenTime) : 0,
+      improvementVs7DayBaselineOpens:
+        weeklyAverageOpens > 0 ? Math.round(weeklyAverageOpens - totalMonitoredOpens) : 0,
+      dominantMoment: dominantMomentEntry?.[0] ?? null,
+      dominantMomentPercent:
+        totalScreenTime > 0 && dominantMomentEntry
+          ? Math.round((dominantMomentEntry[1] / totalScreenTime) * 100)
+          : 0,
+    };
+  }
+
+  private getMomentLabel(isoTimestamp: string): string {
+    const hour = new Date(isoTimestamp).getHours();
+    if (hour >= 4 && hour < 7) return 'Early morning';
+    if (hour >= 7 && hour < 9) return 'Morning';
+    if (hour >= 9 && hour < 12) return 'Mid day';
+    if (hour >= 12 && hour < 14) return 'Before lunch';
+    if (hour >= 14 && hour < 22) return 'Evening';
+    return 'After bed';
+  }
+
   async saveTodaySummary(): Promise<void> {
     const today = new Date().toISOString().split('T')[0];
     await this.rebuildSummaryForDate(today);
@@ -224,7 +390,7 @@ export class HistoricalDataService {
     let summariesSkipped = 0;
     let errors = 0;
 
-    for (let i = 0; i < days; i++) {
+    for (let i = days - 1; i >= 0; i--) {
       const date = new Date();
       date.setDate(date.getDate() - i);
       const dateStr = date.toISOString().split('T')[0];

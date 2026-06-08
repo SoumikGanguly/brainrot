@@ -3,6 +3,7 @@ import {
   calculateBrainScore as utilCalculateBrainScore,
   getBrainStateLabel,
 } from '../utils/brainScore';
+import type { DailyInsightSignals } from './InsightTypes';
 
 // Types
 export interface UsageData {
@@ -57,6 +58,7 @@ export interface DailyUsage {
   rawUsageTotalMs?: number;
   integrityDeltaMs?: number;
   summaryVersion?: string;
+  insightSignals?: DailyInsightSignals;
 }
 
 export interface NotificationSettings {
@@ -117,6 +119,7 @@ interface DailySummaryRow {
   rawUsageTotalMs?: number | null;
   integrityDeltaMs?: number | null;
   summaryVersion?: string | null;
+  signalsJson?: string | null;
   appsJson: string;
 }
 
@@ -325,6 +328,7 @@ export class DatabaseService {
     this.ensureColumn('daily_summary', 'rawUsageTotalMs', 'INTEGER');
     this.ensureColumn('daily_summary', 'integrityDeltaMs', 'INTEGER');
     this.ensureColumn('daily_summary', 'summaryVersion', 'TEXT');
+    this.ensureColumn('daily_summary', 'signalsJson', 'TEXT');
     this.ensureColumn('app_settings', 'protectionMode', 'TEXT');
   }
 
@@ -612,7 +616,7 @@ export class DatabaseService {
           `SELECT date, totalScreenTime, brainScore, totalDistractingMs, totalMonitoredOpens,
                   longestSessionMs, averageSessionMs, topAppPackage, topAppName, topAppMs,
                   focusScore, brainHealthStatus, summarySource, sessionTotalMs,
-                  rawUsageTotalMs, integrityDeltaMs, summaryVersion, appsJson 
+                  rawUsageTotalMs, integrityDeltaMs, summaryVersion, signalsJson, appsJson 
            FROM daily_summary 
            WHERE date >= ? 
            ORDER BY date DESC`,
@@ -638,6 +642,7 @@ export class DatabaseService {
           rawUsageTotalMs: row.rawUsageTotalMs ?? 0,
           integrityDeltaMs: row.integrityDeltaMs ?? 0,
           summaryVersion: row.summaryVersion ?? undefined,
+          insightSignals: this.parseInsightSignals(row.signalsJson),
         }));
 
         resolve(results);
@@ -650,6 +655,21 @@ export class DatabaseService {
 
   private calculateBrainScore(totalUsageMs: number): number {
     return utilCalculateBrainScore(totalUsageMs);
+  }
+
+  private parseInsightSignals(value: string | null | undefined): DailyInsightSignals | undefined {
+    if (!value) {
+      return undefined;
+    }
+
+    try {
+      const parsed = JSON.parse(value);
+      return parsed && typeof parsed === 'object'
+        ? (parsed as DailyInsightSignals)
+        : undefined;
+    } catch {
+      return undefined;
+    }
   }
 
   async setMeta(key: string, value: string): Promise<void> {
@@ -818,13 +838,14 @@ export class DatabaseService {
         const appsJson = JSON.stringify(summary.apps || []);
         const totalDistractingMs = summary.totalDistractingMs ?? summary.totalScreenTime;
         const focusScore = summary.focusScore ?? summary.brainScore;
+        const signalsJson = JSON.stringify(summary.insightSignals || null);
         this.db.runSync(
           `INSERT OR REPLACE INTO daily_summary 
            (date, totalScreenTime, brainScore, totalDistractingMs, totalMonitoredOpens,
             longestSessionMs, averageSessionMs, topAppPackage, topAppName, topAppMs,
             focusScore, brainHealthStatus, summarySource, sessionTotalMs, rawUsageTotalMs,
-            integrityDeltaMs, summaryVersion, appsJson)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            integrityDeltaMs, summaryVersion, signalsJson, appsJson)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           [
             date,
             summary.totalScreenTime,
@@ -843,6 +864,7 @@ export class DatabaseService {
             summary.rawUsageTotalMs ?? summary.totalScreenTime,
             summary.integrityDeltaMs ?? 0,
             summary.summaryVersion ?? 'v2',
+            signalsJson,
             appsJson,
           ]
         );
@@ -863,7 +885,7 @@ export class DatabaseService {
           `SELECT date, totalScreenTime, brainScore, totalDistractingMs, totalMonitoredOpens,
                   longestSessionMs, averageSessionMs, topAppPackage, topAppName, topAppMs,
                   focusScore, brainHealthStatus, summarySource, sessionTotalMs,
-                  rawUsageTotalMs, integrityDeltaMs, summaryVersion, appsJson 
+                  rawUsageTotalMs, integrityDeltaMs, summaryVersion, signalsJson, appsJson 
            FROM daily_summary 
            WHERE date = ?`,
           [date]
@@ -894,6 +916,7 @@ export class DatabaseService {
           rawUsageTotalMs: row.rawUsageTotalMs ?? 0,
           integrityDeltaMs: row.integrityDeltaMs ?? 0,
           summaryVersion: row.summaryVersion ?? undefined,
+          insightSignals: this.parseInsightSignals(row.signalsJson),
         });
       } catch (error) {
         console.error('Error getting daily summary:', error);
@@ -937,8 +960,8 @@ export class DatabaseService {
              (date, totalScreenTime, brainScore, totalDistractingMs, totalMonitoredOpens,
               longestSessionMs, averageSessionMs, topAppPackage, topAppName, topAppMs,
               focusScore, brainHealthStatus, summarySource, sessionTotalMs, rawUsageTotalMs,
-              integrityDeltaMs, summaryVersion, appsJson)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+              integrityDeltaMs, summaryVersion, signalsJson, appsJson)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
           );
 
           try {
@@ -986,6 +1009,7 @@ export class DatabaseService {
                 total,
                 0,
                 'v2',
+                JSON.stringify(null),
                 appsJson
               ]);
               backfilled++;

@@ -46,27 +46,31 @@ const SYNC_LOOKBACK_DAYS = 90;
 
 export class CloudSyncService {
   static async syncAuthenticatedUser(user: User): Promise<void> {
-    const userRef = doc(firestore, 'users', user.uid);
-    const existingUserDoc = await getDoc(userRef);
+    try {
+      const userRef = doc(firestore, 'users', user.uid);
+      const existingUserDoc = await getDoc(userRef);
 
-    const localSnapshot = await this.getLocalSnapshot();
-    const hasMeaningfulLocalState =
-      localSnapshot.monitoredApps.some((app) => app.monitored) ||
-      localSnapshot.blockedApps.length > 0 ||
-      localSnapshot.dailySummaries.length > 0 ||
-      localSnapshot.appSessions.length > 0 ||
-      localSnapshot.blockEvents.length > 0;
+      const localSnapshot = await this.getLocalSnapshot();
+      const hasMeaningfulLocalState =
+        localSnapshot.monitoredApps.some((app) => app.monitored) ||
+        localSnapshot.blockedApps.length > 0 ||
+        localSnapshot.dailySummaries.length > 0 ||
+        localSnapshot.appSessions.length > 0 ||
+        localSnapshot.blockEvents.length > 0;
 
-    if (!existingUserDoc.exists()) {
-      await this.uploadSnapshot(user, localSnapshot, true);
-    } else if (!hasMeaningfulLocalState) {
-      await this.restoreSnapshot(user);
-    } else {
-      await this.uploadSnapshot(user, localSnapshot, false);
+      if (!existingUserDoc.exists()) {
+        await this.uploadSnapshot(user, localSnapshot, true);
+      } else if (!hasMeaningfulLocalState) {
+        await this.restoreSnapshot(user);
+      } else {
+        await this.uploadSnapshot(user, localSnapshot, false);
+      }
+
+      await database.setMeta('cloud_last_sync_at', Date.now().toString());
+      await database.setMeta('cloud_last_sync_uid', user.uid);
+    } catch (error) {
+      console.warn('Cloud sync failed:', error);
     }
-
-    await database.setMeta('cloud_last_sync_at', Date.now().toString());
-    await database.setMeta('cloud_last_sync_uid', user.uid);
   }
 
   private static async getLocalSnapshot() {
@@ -295,6 +299,7 @@ export class CloudSyncService {
         date: summary.date,
         brainScore: summary.brainScore,
         totalScreenTime: summary.totalScreenTime,
+        signalsJson: JSON.stringify(summary.insightSignals || null),
         appsJson: JSON.stringify(summary.apps || []),
         updatedAt: now,
       });
@@ -400,6 +405,7 @@ export class CloudSyncService {
         date: string;
         brainScore: number;
         totalScreenTime: number;
+        signalsJson?: string;
         appsJson: string;
       };
       const parsedApps = this.parseDailyApps(summary.appsJson, summary.date);
@@ -408,6 +414,7 @@ export class CloudSyncService {
         brainScore: summary.brainScore,
         totalScreenTime: summary.totalScreenTime,
         apps: parsedApps,
+        insightSignals: this.parseInsightSignals(summary.signalsJson),
       });
     }
 
@@ -557,6 +564,19 @@ export class CloudSyncService {
       }));
     } catch {
       return [];
+    }
+  }
+
+  private static parseInsightSignals(value?: string): DailyUsage['insightSignals'] {
+    if (!value) {
+      return undefined;
+    }
+
+    try {
+      const parsed = JSON.parse(value);
+      return parsed && typeof parsed === 'object' ? parsed : undefined;
+    } catch {
+      return undefined;
     }
   }
 }

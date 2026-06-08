@@ -1,4 +1,5 @@
 import { Ionicons } from "@expo/vector-icons";
+import { useLocalSearchParams, useRouter } from "expo-router";
 import { useEffect, useRef, useState } from "react";
 import {
   AppState,
@@ -11,12 +12,20 @@ import {
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 
+import ActionInsightCard from "@/components/ActionInsightCard";
+import { CapabilitiesService } from "@/services/CapabilitiesService";
 import { Card } from "../../components/Card";
 import { Header } from "../../components/Header";
+import SkeletonBlock from "@/components/SkeletonBlock";
 import {
   DailyInsightsService,
+  type DailyInsights,
   type ReplayEntry,
 } from "../../services/DailyInsightsService";
+import { InsightActionService } from "../../services/InsightActionService";
+import { InsightInvalidationService } from "../../services/InsightInvalidationService";
+import type { InsightCard } from "../../services/InsightTypes";
+import { TelemetryService } from "../../services/TelemetryService";
 import { type DailyUsage } from "../../services/database";
 import { DataSyncService } from "../../services/DataSyncService";
 import {
@@ -45,7 +54,7 @@ const replayMomentTheme = {
 	},
 	"Mid day": { dot: "#38BDF8", pillBackground: "#E0F2FE", pillText: "#0284C7" },
 	Evening: { dot: "#F9A8D4", pillBackground: "#FDE7F3", pillText: "#DB2777" },
-	"Before bed": {
+	"After bed": {
 		dot: "#C084FC",
 		pillBackground: "#F3E8FF",
 		pillText: "#A21CAF",
@@ -136,8 +145,10 @@ function getBrainExpression(score: number | null | undefined) {
 }
 
 export default function ReplayScreen() {
+	const router = useRouter();
+	const params = useLocalSearchParams<{ moment?: string }>();
 	const [loading, setLoading] = useState(true);
-	const [hasUsagePermission, setHasUsagePermission] = useState(false);
+	const [hasUsagePermission, setHasUsagePermission] = useState<boolean | null>(null);
 	const [manufacturerInfo, setManufacturerInfo] =
 		useState<ManufacturerPermissionInfo | null>(null);
 	const [summary, setSummary] = useState<DailyUsage | null>(null);
@@ -149,6 +160,7 @@ export default function ReplayScreen() {
 		totalTimeMs: number;
 		percentage: number;
 	} | null>(null);
+	const [replayInsightCards, setReplayInsightCards] = useState<InsightCard[]>([]);
 	const pendingPermissionCheck = useRef(false);
 	const appStateRef = useRef<AppStateStatus>(AppState.currentState);
 
@@ -189,6 +201,13 @@ export default function ReplayScreen() {
 		return () => subscription.remove();
 	}, [selectedDate]);
 
+	useEffect(() => {
+		const unsubscribe = InsightInvalidationService.subscribe(() => {
+			void loadReplayData(selectedDate);
+		});
+		return unsubscribe;
+	}, [selectedDate, params.moment]);
+
 	async function checkPermissionAndLoad(date: string) {
 		try {
 			if (UnifiedUsageService.isNativeModuleAvailable()) {
@@ -215,19 +234,29 @@ export default function ReplayScreen() {
 
 			const insights =
 				await DailyInsightsService.getInstance().getDailyInsights(date, {
-					forceSummaryRefresh: true,
+					allowInsightRegeneration: false,
+					preferPersistedInsights: true,
 				});
 
 			setSummary(insights.summary);
-			setReplayEntries(insights.replayEntries);
+			setReplayEntries(thisMomentFilteredEntries(insights, params.moment));
 			setWastedTimeMs(insights.wastedTimeMs);
 			setBiggestTimeLeak(insights.biggestTimeLeak);
+			setReplayInsightCards(insights.replayInsightCards);
+			TelemetryService.track("replay_viewed", {
+				date_type: date === getYesterdayDate() ? "yesterday" : "historical",
+				total_distraction_ms: insights.wastedTimeMs,
+				open_count: insights.summary?.totalMonitoredOpens ?? 0,
+				top_app: insights.biggestTimeLeak?.appName,
+				session_count: insights.replayEntries.length,
+			});
 		} catch (error) {
 			console.error("Error loading replay data:", error);
 			setSummary(null);
 			setReplayEntries([]);
 			setWastedTimeMs(0);
 			setBiggestTimeLeak(null);
+			setReplayInsightCards([]);
 		} finally {
 			setLoading(false);
 		}
@@ -236,13 +265,35 @@ export default function ReplayScreen() {
 	const emptyStateText = loading
 		? "Rebuilding your distraction trail..."
 		: "No monitored distraction sessions were recorded for this day.";
+	const showInsightSkeletons =
+		!loading &&
+		replayInsightCards.length === 0 &&
+		summary?.totalScreenTime &&
+		summary.totalScreenTime > 0;
+
+	useEffect(() => {
+		if (replayInsightCards.length === 0) {
+			return;
+		}
+
+		for (const insight of replayInsightCards) {
+			TelemetryService.track("insight_generated", {
+				insight_type: insight.category,
+				app_package: insight.relatedAppPackage || insight.subjectAppPackage || undefined,
+				app_name: undefined,
+				severity: insight.scoreBreakdown?.finalPriority >= 80 ? "high" : insight.scoreBreakdown?.finalPriority >= 50 ? "medium" : "low",
+				recommended_action: insight.action.type,
+				cta_type: insight.action.type,
+			});
+		}
+	}, [replayInsightCards]);
 
 	return (
 		<SafeAreaView className="flex-1 bg-bg">
 			<ScrollView className="flex-1" showsVerticalScrollIndicator={false}>
 				<Header title="Replay" />
 
-				{!hasUsagePermission && (
+				{hasUsagePermission === false && (
 					<Card className="mx-md mb-md border border-yellow-200 bg-yellow-50">
 						<View className="flex-row items-start">
 							<Ionicons
@@ -262,7 +313,7 @@ export default function ReplayScreen() {
 								<TouchableOpacity
 									onPress={async () => {
 										pendingPermissionCheck.current = true;
-										await UnifiedUsageService.openUsageAccessSettings();
+										await CapabilitiesService.ensureUsageAccess("replay");
 									}}
 									className="self-start rounded-lg bg-yellow-600 px-4 py-2"
 								>
@@ -282,7 +333,7 @@ export default function ReplayScreen() {
 										{manufacturerInfo.canOpenDirectly && (
 											<TouchableOpacity
 												onPress={async () => {
-													await UnifiedUsageService.openManufacturerSettings();
+													await CapabilitiesService.openBackgroundReliabilitySettings("replay");
 												}}
 												className="self-start rounded-lg bg-yellow-700 px-3 py-2"
 											>
@@ -312,28 +363,16 @@ export default function ReplayScreen() {
 					</Text>
 				</Card>
 
-				<Card className="mx-md mb-md">
-					<View className="flex-row items-center justify-between">
-						<View className="flex-1 pr-md">
-							<Text className="font-heading-bold text-section text-text">
-								You wasted
-							</Text>
-							<Text className="mt-sm text-4xl font-bold text-danger">
-								{formatTime(wastedTimeMs)}
-							</Text>
-							<Text className="mt-2 font-body text-secondary text-muted">
-								opening apps{" "}
-								{summary?.totalMonitoredOpens ?? replayEntries.length} times
-							</Text>
-						</View>
-						<View className="flex-row items-center">
-							<ExpressionBadge
-								source={replayExpressions.disappointed}
-								size={100}
-							/>
-						</View>
-					</View>
-				</Card>
+				{params.moment ? (
+					<Card className="mx-md mb-md border border-[#E7DFFD] bg-[#F5F1FF] px-4 py-4">
+						<Text className="font-heading-semibold text-card-title text-text">
+							Showing {params.moment} replay
+						</Text>
+						<Text className="mt-2 font-body text-secondary text-muted">
+							These are the distraction sessions from that time window.
+						</Text>
+					</Card>
+				) : null}
 
 				<Card className="mx-md mb-md">
 					<Text className="mb-md font-heading-bold text-section text-text">
@@ -434,6 +473,35 @@ export default function ReplayScreen() {
 					)}
 				</Card>
 
+				{replayInsightCards.map((insight) => (
+					<View key={insight.id} className="mx-md">
+						<ActionInsightCard
+							insight={insight}
+							surface="replay"
+							onPress={() =>
+								void (async () => {
+									await InsightActionService.execute(insight.action, router, "replay_cta");
+								})()
+							}
+						/>
+					</View>
+				))}
+
+				{showInsightSkeletons
+					? Array.from({ length: 2 }).map((_, index) => (
+							<Card
+								key={`insight-skeleton-${index}`}
+								className="mx-md mb-md border border-[#E7DFFD] bg-white px-5 py-5"
+							>
+								<SkeletonBlock className="h-5 w-32" />
+								<SkeletonBlock className="mt-4 h-8 w-4/5" />
+								<SkeletonBlock className="mt-3 h-4 w-full" />
+								<SkeletonBlock className="mt-2 h-4 w-3/4" />
+								<SkeletonBlock className="mt-4 h-11 w-36 rounded-2xl" />
+							</Card>
+					  ))
+					: null}
+
 				<View className="mx-md mb-xl flex-row">
 					<Card className="mr-sm flex-1 px-5 py-5">
 						<Text className="font-heading-bold text-card-title text-text">
@@ -499,6 +567,20 @@ export default function ReplayScreen() {
 			</ScrollView>
 		</SafeAreaView>
 	);
+}
+
+function thisMomentFilteredEntries(
+	insights: DailyInsights,
+	selectedMoment?: string,
+): ReplayEntry[] {
+	if (!selectedMoment) {
+		return insights.replayEntries;
+	}
+
+	const matchingEntries = insights.replayEntries.filter(
+		(entry) => entry.moment === selectedMoment,
+	);
+	return matchingEntries.length > 0 ? matchingEntries : insights.replayEntries;
 }
 
 function AppBadge({
