@@ -1,6 +1,6 @@
 import { NativeModules, Platform } from 'react-native';
 import { database } from './database';
-import type { DailyUsage } from './database';
+import type { DailyUsage, ProtectionContext } from './database';
 
 const { UsageStatsModule } = NativeModules;
 
@@ -37,8 +37,35 @@ export interface BlockEventData {
   limitMs?: number | null;
   usageAtTriggerMs?: number | null;
   action: 'blocked' | 'bypassed' | 'cooldown_started' | 'accountability_requested' | 'abandoned';
+  protectionContext?: ProtectionContext | null;
   resolvedAt?: string | null;
   source?: string;
+}
+
+export interface MonitoringDiagnostics {
+  usageAccessGranted: boolean;
+  overlayPermissionGranted: boolean;
+  accessibilityGranted: boolean;
+  monitoringEnabled: boolean;
+  backgroundChecksEnabled: boolean;
+  realtimeMonitoringEnabled: boolean;
+  realtimeLoopRunning: boolean;
+  blockingConfig: string;
+  monitoredApps: string;
+  pendingBlockEvents: number;
+  brainScore: number;
+  brainStatus: string;
+  dailySummaryDate: string;
+  dailySummarySource: string;
+  dailySummaryUpdatedAt: number;
+  lastBlockingFailureReason: string;
+  lastBlockingFailurePackage: string;
+  lastBlockingFailureAt: number;
+  usageQueryCount: number;
+  eventQueryCount: number;
+  foregroundQueryCount: number;
+  batteryPercent: number;
+  batteryCharging: boolean;
 }
 
 export class UsageService {
@@ -612,13 +639,37 @@ export class UsageService {
    static async showBlockingOverlay(
     packageName: string,
     appName: string,
-    blockMode: 'soft' | 'hard'
+    blockMode: 'soft' | 'hard',
+    protectionContext: ProtectionContext = 'js_fallback'
   ): Promise<void> {
     try {
+      if (UsageStatsModule?.showBlockingOverlayWithContext) {
+        await UsageStatsModule.showBlockingOverlayWithContext(
+          packageName,
+          appName,
+          blockMode,
+          protectionContext
+        );
+        return;
+      }
+
       await UsageStatsModule.showBlockingOverlay(packageName, appName, blockMode);
     } catch (error) {
       console.error('Error showing blocking overlay:', error);
       throw error;
+    }
+  }
+
+  static async getMonitoringDiagnostics(): Promise<MonitoringDiagnostics | null> {
+    try {
+      if (Platform.OS !== 'android' || !UsageStatsModule?.getMonitoringDiagnostics) {
+        return null;
+      }
+
+      return await UsageStatsModule.getMonitoringDiagnostics();
+    } catch (error) {
+      console.error('Error getting monitoring diagnostics:', error);
+      return null;
     }
   }
 

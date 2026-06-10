@@ -1,14 +1,12 @@
 package com.soumikganguly.brainrot
 
-import androidx.core.content.ContextCompat
-
 import android.app.AppOpsManager
 import android.app.usage.UsageEvents
 import android.app.usage.UsageStatsManager
 import android.content.Context
 import android.content.Intent
-import android.content.pm.ApplicationInfo
 import android.content.pm.PackageManager
+import android.os.BatteryManager
 import android.os.Build
 import android.net.Uri
 import android.os.Handler
@@ -167,6 +165,7 @@ class UsageStatsModule(reactContext: ReactApplicationContext) : ReactContextBase
                 return
             }
 
+            incrementDailyCounter("usage_query_count")
             val usageData = getUsageDataSince(startTimeMs.toLong())
             promise.resolve(usageData)
         } catch (e: Exception) {
@@ -209,6 +208,7 @@ class UsageStatsModule(reactContext: ReactApplicationContext) : ReactContextBase
                 return
             }
 
+            incrementDailyCounter("event_query_count")
             val sessionData = getSessionDataSince(startTimeMs.toLong())
             promise.resolve(sessionData)
         } catch (e: Exception) {
@@ -286,6 +286,7 @@ class UsageStatsModule(reactContext: ReactApplicationContext) : ReactContextBase
                 return
             }
             
+            incrementDailyCounter("foreground_query_count")
             val usageStatsManager = reactApplicationContext.getSystemService(Context.USAGE_STATS_SERVICE) as UsageStatsManager
             val currentTime = System.currentTimeMillis()
             
@@ -395,9 +396,21 @@ class UsageStatsModule(reactContext: ReactApplicationContext) : ReactContextBase
     // BLOCKING OVERLAY METHODS
     @ReactMethod
     fun showBlockingOverlay(packageName: String, appName: String, blockMode: String, promise: Promise) {
+        showBlockingOverlayWithContext(packageName, appName, blockMode, "js_fallback", promise)
+    }
+
+    @ReactMethod
+    fun showBlockingOverlayWithContext(
+        packageName: String,
+        appName: String,
+        blockMode: String,
+        protectionContext: String,
+        promise: Promise
+    ) {
         try {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
                 if (!Settings.canDrawOverlays(reactApplicationContext)) {
+                    recordRecoverableFailure("overlay_missing", packageName)
                     promise.reject("NO_OVERLAY_PERMISSION", "Overlay permission required")
                     return
                 }
@@ -407,6 +420,7 @@ class UsageStatsModule(reactContext: ReactApplicationContext) : ReactContextBase
             intent.putExtra("blocked_app", appName)
             intent.putExtra("block_mode", blockMode)
             intent.putExtra("package_name", packageName)
+            intent.putExtra("protection_context", protectionContext)
             
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                 reactApplicationContext.startForegroundService(intent)
@@ -416,6 +430,7 @@ class UsageStatsModule(reactContext: ReactApplicationContext) : ReactContextBase
             
             promise.resolve(true)
         } catch (e: Exception) {
+            recordRecoverableFailure("overlay_start_failed", packageName)
             promise.reject("OVERLAY_ERROR", e.message)
         }
     }
@@ -569,6 +584,48 @@ class UsageStatsModule(reactContext: ReactApplicationContext) : ReactContextBase
         }
     }
 
+    @ReactMethod
+    fun getMonitoringDiagnostics(promise: Promise) {
+        try {
+            val prefs = reactApplicationContext.getSharedPreferences("brainrot_prefs", Context.MODE_PRIVATE)
+            val today = getLocalDateString(System.currentTimeMillis())
+            val pendingBlockEvents = runCatching {
+                JSONArray(prefs.getString("pending_block_events", "[]") ?: "[]").length()
+            }.getOrDefault(0)
+            val brainState = usageChecker.getCurrentBrainState(forceRefresh = false)
+            val battery = getBatteryDiagnostics()
+
+            val result = WritableNativeMap()
+            result.putBoolean("usageAccessGranted", checkUsageStatsPermission())
+            result.putBoolean("overlayPermissionGranted", hasOverlayPermission())
+            result.putBoolean("accessibilityGranted", isAccessibilityGranted())
+            result.putBoolean("monitoringEnabled", prefs.getBoolean("monitoring_enabled", false))
+            result.putBoolean("backgroundChecksEnabled", prefs.getBoolean("background_checks_enabled", false))
+            result.putBoolean("realtimeMonitoringEnabled", prefs.getBoolean("realtime_monitoring_enabled", false))
+            result.putBoolean("realtimeLoopRunning", isRealtimeMonitoring)
+            result.putString("blockingConfig", prefs.getString("blocking_config", "{}") ?: "{}")
+            result.putString("monitoredApps", prefs.getString("monitored_apps", "[]") ?: "[]")
+            result.putInt("pendingBlockEvents", pendingBlockEvents)
+            result.putInt("brainScore", brainState.score)
+            result.putString("brainStatus", brainState.status)
+            result.putString("dailySummaryDate", prefs.getString("daily_summary_date", "") ?: "")
+            result.putString("dailySummarySource", prefs.getString("daily_summary_source", "") ?: "")
+            result.putDouble("dailySummaryUpdatedAt", prefs.getLong("daily_summary_updated_at", 0L).toDouble())
+            result.putString("lastBlockingFailureReason", prefs.getString("last_blocking_failure_reason", "") ?: "")
+            result.putString("lastBlockingFailurePackage", prefs.getString("last_blocking_failure_package", "") ?: "")
+            result.putDouble("lastBlockingFailureAt", prefs.getLong("last_blocking_failure_at", 0L).toDouble())
+            result.putInt("usageQueryCount", prefs.getInt("usage_query_count_$today", 0))
+            result.putInt("eventQueryCount", prefs.getInt("event_query_count_$today", 0))
+            result.putInt("foregroundQueryCount", prefs.getInt("foreground_query_count_$today", 0))
+            result.putDouble("batteryPercent", battery.first.toDouble())
+            result.putBoolean("batteryCharging", battery.second)
+            promise.resolve(result)
+        } catch (e: Exception) {
+            Log.e(TAG, "Error getting monitoring diagnostics", e)
+            promise.reject("GET_MONITORING_DIAGNOSTICS_ERROR", e.message)
+        }
+    }
+
     // GET SYNCED MONITORED APPS (for debugging)
     @ReactMethod
     fun getSyncedMonitoredApps(promise: Promise) {
@@ -613,24 +670,6 @@ class UsageStatsModule(reactContext: ReactApplicationContext) : ReactContextBase
         Log.d(TAG, "Realtime monitoring started")
     }
 
-    private fun hasUsageStatsPermission(): Boolean {
-        val appOps = reactApplicationContext.getSystemService(Context.APP_OPS_SERVICE) as AppOpsManager
-        val mode = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            appOps.unsafeCheckOpNoThrow(
-                AppOpsManager.OPSTR_GET_USAGE_STATS,
-                android.os.Process.myUid(),
-                reactApplicationContext.packageName
-            )
-        } else {
-            appOps.checkOpNoThrow(
-                AppOpsManager.OPSTR_GET_USAGE_STATS,
-                android.os.Process.myUid(),
-                reactApplicationContext.packageName
-            )
-        }
-        return mode == AppOpsManager.MODE_ALLOWED
-    }
-
     private fun hasOverlayPermission(): Boolean {
         return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
             Settings.canDrawOverlays(reactApplicationContext)
@@ -649,6 +688,7 @@ class UsageStatsModule(reactContext: ReactApplicationContext) : ReactContextBase
 
     private fun checkCurrentForegroundApp() {
         try {
+            incrementDailyCounter("foreground_query_count")
             val usageStatsManager = reactApplicationContext.getSystemService(Context.USAGE_STATS_SERVICE) as UsageStatsManager
             val currentTime = System.currentTimeMillis()
             val events = usageStatsManager.queryEvents(currentTime - 10000, currentTime)
@@ -846,5 +886,52 @@ class UsageStatsModule(reactContext: ReactApplicationContext) : ReactContextBase
             Log.e(TAG, "Exception in permission check", e)
             false
         }
+    }
+
+    private fun isAccessibilityGranted(): Boolean {
+        return try {
+            val enabled = Settings.Secure.getInt(
+                reactApplicationContext.contentResolver,
+                Settings.Secure.ACCESSIBILITY_ENABLED,
+                0
+            ) == 1
+            val expected = "${reactApplicationContext.packageName}/${BrainrotAccessibilityService::class.java.name}"
+            val services = Settings.Secure.getString(
+                reactApplicationContext.contentResolver,
+                Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES
+            ) ?: ""
+            enabled && services.contains(expected, ignoreCase = true)
+        } catch (_: Exception) {
+            false
+        }
+    }
+
+    private fun incrementDailyCounter(name: String) {
+        val prefs = reactApplicationContext.getSharedPreferences("brainrot_prefs", Context.MODE_PRIVATE)
+        val today = getLocalDateString(System.currentTimeMillis())
+        val key = "${name}_$today"
+        prefs.edit().putInt(key, prefs.getInt(key, 0) + 1).apply()
+    }
+
+    private fun getBatteryDiagnostics(): Pair<Int, Boolean> {
+        return try {
+            val batteryManager = reactApplicationContext.getSystemService(Context.BATTERY_SERVICE) as BatteryManager
+            val percent = batteryManager.getIntProperty(BatteryManager.BATTERY_PROPERTY_CAPACITY).coerceIn(0, 100)
+            val status = batteryManager.getIntProperty(BatteryManager.BATTERY_PROPERTY_STATUS)
+            val charging = status == BatteryManager.BATTERY_STATUS_CHARGING ||
+                status == BatteryManager.BATTERY_STATUS_FULL
+            Pair(percent, charging)
+        } catch (_: Exception) {
+            Pair(-1, false)
+        }
+    }
+
+    private fun recordRecoverableFailure(reason: String, packageName: String) {
+        reactApplicationContext.getSharedPreferences("brainrot_prefs", Context.MODE_PRIVATE)
+            .edit()
+            .putString("last_blocking_failure_reason", reason)
+            .putString("last_blocking_failure_package", packageName)
+            .putLong("last_blocking_failure_at", System.currentTimeMillis())
+            .apply()
     }
 }

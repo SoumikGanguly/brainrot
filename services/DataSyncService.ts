@@ -59,6 +59,7 @@ export class DataSyncService {
         limitMs: event.limitMs ?? null,
         usageAtTriggerMs: event.usageAtTriggerMs ?? null,
         action: event.action,
+        protectionContext: event.protectionContext ?? null,
         resolvedAt: event.resolvedAt ?? null,
         source: event.source || 'native_overlay',
       }));
@@ -72,6 +73,7 @@ export class DataSyncService {
       }
 
       await HistoricalDataService.getInstance().rebuildSummaryForDate(today, { force: true });
+      await database.setMeta('last_successful_usage_sync_at', Date.now().toString());
       const summary = await database.getDailySummary(today);
       await UsageService.syncDailySummaryToNative(summary);
       BrainScoreService.getInstance().invalidateCache(today);
@@ -108,6 +110,7 @@ export class DataSyncService {
         daily_usage_ms: event.usageAtTriggerMs ?? undefined,
         limit_strength: event.limitMs != null ? String(Math.round(event.limitMs / 60000)) : undefined,
         message_type: messageType,
+        protection_context: event.protectionContext ?? undefined,
       } as const;
 
       if (event.action === 'blocked') {

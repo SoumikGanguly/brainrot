@@ -329,6 +329,7 @@ export class CloudSyncService {
         limitMs: event.limitMs ?? null,
         usageAtTriggerMs: event.usageAtTriggerMs ?? null,
         action: event.action,
+        protectionContext: event.protectionContext ?? null,
         resolvedAt: event.resolvedAt ?? null,
         source: event.source ?? 'native_overlay',
         updatedAt: now,
@@ -445,6 +446,7 @@ export class CloudSyncService {
         usageAtTriggerMs:
           event.usageAtTriggerMs != null ? this.parseNumber(event.usageAtTriggerMs, 0) : null,
         action: event.action,
+        protectionContext: event.protectionContext ?? null,
         resolvedAt: event.resolvedAt ?? null,
         source: event.source || 'native_overlay',
       } satisfies BlockEvent;

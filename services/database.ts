@@ -25,6 +25,8 @@ export interface AppSession {
   wasMonitored: boolean;
 }
 
+export type ProtectionContext = 'limit_mode' | 'locked_mode' | 'focus_session' | 'js_fallback';
+
 export interface BlockEvent {
   id?: number;
   date: string;
@@ -35,6 +37,7 @@ export interface BlockEvent {
   limitMs?: number | null;
   usageAtTriggerMs?: number | null;
   action: 'blocked' | 'bypassed' | 'cooldown_started' | 'accountability_requested' | 'abandoned';
+  protectionContext?: ProtectionContext | null;
   resolvedAt?: string | null;
   source?: string;
 }
@@ -163,6 +166,7 @@ interface BlockEventRow {
   limitMs?: number | null;
   usageAtTriggerMs?: number | null;
   action: BlockEvent['action'];
+  protectionContext?: ProtectionContext | null;
   resolvedAt?: string | null;
   source?: string | null;
 }
@@ -330,6 +334,7 @@ export class DatabaseService {
     this.ensureColumn('daily_summary', 'summaryVersion', 'TEXT');
     this.ensureColumn('daily_summary', 'signalsJson', 'TEXT');
     this.ensureColumn('app_settings', 'protectionMode', 'TEXT');
+    this.ensureColumn('block_events', 'protectionContext', 'TEXT');
   }
 
   private ensureColumn(tableName: string, columnName: string, definition: string): void {
@@ -513,8 +518,8 @@ export class DatabaseService {
         this.db.withTransactionSync(() => {
           const stmt = this.db.prepareSync(
             `INSERT OR REPLACE INTO block_events
-             (date, packageName, appName, triggeredAt, blockType, limitMs, usageAtTriggerMs, action, resolvedAt, source)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+             (date, packageName, appName, triggeredAt, blockType, limitMs, usageAtTriggerMs, action, protectionContext, resolvedAt, source)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
           );
 
           try {
@@ -528,6 +533,7 @@ export class DatabaseService {
                 event.limitMs ?? null,
                 event.usageAtTriggerMs ?? null,
                 event.action,
+                event.protectionContext ?? null,
                 event.resolvedAt ?? null,
                 event.source ?? 'native_overlay',
               ]);
@@ -549,7 +555,7 @@ export class DatabaseService {
     return new Promise((resolve, reject) => {
       try {
         const rows = this.db.getAllSync(
-          `SELECT id, date, packageName, appName, triggeredAt, blockType, limitMs, usageAtTriggerMs, action, resolvedAt, source
+          `SELECT id, date, packageName, appName, triggeredAt, blockType, limitMs, usageAtTriggerMs, action, protectionContext, resolvedAt, source
            FROM block_events
            WHERE date = ?
            ORDER BY triggeredAt ASC`,
@@ -566,6 +572,7 @@ export class DatabaseService {
           limitMs: row.limitMs ?? null,
           usageAtTriggerMs: row.usageAtTriggerMs ?? null,
           action: row.action,
+          protectionContext: row.protectionContext ?? null,
           resolvedAt: row.resolvedAt ?? null,
           source: row.source ?? 'native_overlay',
         })));

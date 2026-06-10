@@ -1,3 +1,4 @@
+/* eslint-disable react-hooks/immutability, react-hooks/set-state-in-effect */
 import { Ionicons } from "@expo/vector-icons";
 import { useLocalSearchParams, useRouter } from "expo-router";
 import { useEffect, useRef, useState } from "react";
@@ -36,6 +37,8 @@ import { getBrainStateLevel } from "../../utils/brainScore";
 import { formatTime } from "../../utils/time";
 
 const TIMELINE_MAX_HEIGHT = 430;
+type ReplayEventFilter = "all" | "session" | "short_open" | "blocked" | "emergency_pass";
+type ReplayTimeFilter = "all" | "morning" | "day" | "evening" | "night";
 const replayMomentTheme = {
 	"Early morning": {
 		dot: "#F59E0B",
@@ -152,7 +155,11 @@ export default function ReplayScreen() {
 	const [manufacturerInfo, setManufacturerInfo] =
 		useState<ManufacturerPermissionInfo | null>(null);
 	const [summary, setSummary] = useState<DailyUsage | null>(null);
+	const [allReplayEntries, setAllReplayEntries] = useState<ReplayEntry[]>([]);
 	const [replayEntries, setReplayEntries] = useState<ReplayEntry[]>([]);
+	const [eventFilter, setEventFilter] = useState<ReplayEventFilter>("all");
+	const [timeFilter, setTimeFilter] = useState<ReplayTimeFilter>("all");
+	const [appFilter, setAppFilter] = useState("all");
 	const [wastedTimeMs, setWastedTimeMs] = useState(0);
 	const [biggestTimeLeak, setBiggestTimeLeak] = useState<{
 		packageName: string;
@@ -239,7 +246,9 @@ export default function ReplayScreen() {
 				});
 
 			setSummary(insights.summary);
-			setReplayEntries(thisMomentFilteredEntries(insights, params.moment));
+			const entries = thisMomentFilteredEntries(insights, params.moment);
+			setAllReplayEntries(entries);
+			setReplayEntries(applyReplayFilters(entries, eventFilter, timeFilter, appFilter));
 			setWastedTimeMs(insights.wastedTimeMs);
 			setBiggestTimeLeak(insights.biggestTimeLeak);
 			setReplayInsightCards(insights.replayInsightCards);
@@ -253,6 +262,7 @@ export default function ReplayScreen() {
 		} catch (error) {
 			console.error("Error loading replay data:", error);
 			setSummary(null);
+			setAllReplayEntries([]);
 			setReplayEntries([]);
 			setWastedTimeMs(0);
 			setBiggestTimeLeak(null);
@@ -270,6 +280,11 @@ export default function ReplayScreen() {
 		replayInsightCards.length === 0 &&
 		summary?.totalScreenTime &&
 		summary.totalScreenTime > 0;
+	const appFilterOptions = buildAppFilterOptions(allReplayEntries);
+
+	useEffect(() => {
+		setReplayEntries(applyReplayFilters(allReplayEntries, eventFilter, timeFilter, appFilter));
+	}, [allReplayEntries, eventFilter, timeFilter, appFilter]);
 
 	useEffect(() => {
 		if (replayInsightCards.length === 0) {
@@ -378,6 +393,35 @@ export default function ReplayScreen() {
 					<Text className="mb-md font-heading-bold text-section text-text">
 						Session Replay
 					</Text>
+					<View className="mb-3">
+						<FilterRow
+							options={[
+								{ key: "all", label: "All" },
+								{ key: "session", label: "Sessions" },
+								{ key: "short_open", label: "Short opens" },
+								{ key: "blocked", label: "Blocks" },
+								{ key: "emergency_pass", label: "Passes" },
+							]}
+							selected={eventFilter}
+							onSelect={(value) => setEventFilter(value as ReplayEventFilter)}
+						/>
+						<FilterRow
+							options={[
+								{ key: "all", label: "Any time" },
+								{ key: "morning", label: "Morning" },
+								{ key: "day", label: "Day" },
+								{ key: "evening", label: "Evening" },
+								{ key: "night", label: "Night" },
+							]}
+							selected={timeFilter}
+							onSelect={(value) => setTimeFilter(value as ReplayTimeFilter)}
+						/>
+						<FilterRow
+							options={appFilterOptions}
+							selected={appFilter}
+							onSelect={setAppFilter}
+						/>
+					</View>
 					{replayEntries.length === 0 ? (
 						<Text className="font-body text-body text-muted">
 							{emptyStateText}
@@ -391,6 +435,7 @@ export default function ReplayScreen() {
 							{replayEntries.map((entry, index) => {
 								const visual = getAppVisual(entry.appName, entry.packageName);
 								const momentTheme = getReplayMomentTheme(entry.moment);
+								const entryLabel = getReplayEntryLabel(entry);
 								const startTime = new Date(entry.startedAt).toLocaleTimeString(
 									[],
 									{
@@ -446,11 +491,14 @@ export default function ReplayScreen() {
 													className="ml-3 font-heading-bold text-card-title"
 													style={{ color: visual.bg }}
 												>
-													+{formatTime(entry.durationMs)}
+													{entry.durationMs > 0 ? `+${formatTime(entry.durationMs)}` : entryLabel.short}
 												</Text>
 											</View>
 
-											<View className="mt-3 flex-row justify-end">
+											<View className="mt-3 flex-row items-center justify-between">
+												<Text className="flex-1 pr-3 font-body text-secondary text-muted">
+													{entryLabel.long}
+												</Text>
 												<View
 													className="rounded-full px-3 py-1"
 													style={{
@@ -581,6 +629,118 @@ function thisMomentFilteredEntries(
 		(entry) => entry.moment === selectedMoment,
 	);
 	return matchingEntries.length > 0 ? matchingEntries : insights.replayEntries;
+}
+
+function applyReplayFilters(
+	entries: ReplayEntry[],
+	eventFilter: ReplayEventFilter,
+	timeFilter: ReplayTimeFilter,
+	appFilter: string,
+): ReplayEntry[] {
+	return entries.filter((entry) => {
+		if (eventFilter !== "all") {
+			if (eventFilter === "blocked") {
+				if (!["blocked", "cooldown"].includes(entry.eventType)) {
+					return false;
+				}
+			} else if (entry.eventType !== eventFilter) {
+				return false;
+			}
+		}
+
+		if (timeFilter !== "all" && !isInTimeFilter(entry, timeFilter)) {
+			return false;
+		}
+
+		if (appFilter !== "all" && entry.packageName !== appFilter) {
+			return false;
+		}
+
+		return true;
+	});
+}
+
+function isInTimeFilter(entry: ReplayEntry, timeFilter: ReplayTimeFilter): boolean {
+	const hour = new Date(entry.startedAt).getHours();
+	if (timeFilter === "morning") return hour >= 4 && hour < 12;
+	if (timeFilter === "day") return hour >= 12 && hour < 17;
+	if (timeFilter === "evening") return hour >= 17 && hour < 22;
+	return hour >= 22 || hour < 4;
+}
+
+function buildAppFilterOptions(entries: ReplayEntry[]): Array<{ key: string; label: string }> {
+	const options = new Map<string, string>();
+	for (const entry of entries) {
+		if (!options.has(entry.packageName)) {
+			options.set(entry.packageName, entry.appName);
+		}
+	}
+	return [
+		{ key: "all", label: "All apps" },
+		...Array.from(options.entries())
+			.sort((a, b) => a[1].localeCompare(b[1]))
+			.slice(0, 6)
+			.map(([key, label]) => ({ key, label })),
+	];
+}
+
+function getReplayEntryLabel(entry: ReplayEntry): { short: string; long: string } {
+	if (entry.eventType === "short_open") {
+		return { short: "Short", long: `Short open: ${formatTime(entry.durationMs)}` };
+	}
+	if (entry.eventType === "emergency_pass") {
+		return { short: "Pass", long: "Emergency pass used" };
+	}
+	if (entry.eventType === "cooldown") {
+		return { short: "Pause", long: "Limit cooldown completed" };
+	}
+	if (entry.eventType === "blocked") {
+		if (entry.protectionContext === "focus_session") {
+			return { short: "Focus", long: "Focus Session blocked the open" };
+		}
+		return { short: "Block", long: entry.action === "abandoned" ? "Blocked open abandoned" : "Blocked open" };
+	}
+	return { short: "Session", long: "Distracting session" };
+}
+
+function FilterRow({
+	options,
+	selected,
+	onSelect,
+}: {
+	options: Array<{ key: string; label: string }>;
+	selected: string;
+	onSelect: (value: string) => void;
+}) {
+	return (
+		<ScrollView
+			horizontal
+			showsHorizontalScrollIndicator={false}
+			className="mb-2"
+		>
+			{options.map((option) => {
+				const active = option.key === selected;
+				return (
+					<TouchableOpacity
+						key={option.key}
+						onPress={() => onSelect(option.key)}
+						className={`mr-2 rounded-full border px-3 py-2 ${
+							active ? "border-accent bg-accent" : "border-slate-200 bg-white"
+						}`}
+					>
+						<Text
+							className={`font-body-semibold text-secondary ${
+								active ? "text-white" : "text-muted"
+							}`}
+							numberOfLines={1}
+						>
+							{option.label}
+						</Text>
+					</TouchableOpacity>
+				);
+			})}
+		</ScrollView>
+	);
 }
 
 function AppBadge({

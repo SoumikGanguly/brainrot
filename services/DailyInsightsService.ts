@@ -19,6 +19,10 @@ export interface ReplayEntry {
   endedAt: string;
   durationMs: number;
   moment: DayMoment;
+  eventType: 'session' | 'short_open' | 'blocked' | 'emergency_pass' | 'cooldown';
+  action?: BlockEvent['action'];
+  blockType?: string;
+  protectionContext?: BlockEvent['protectionContext'];
 }
 
 export interface DailyInsights {
@@ -68,7 +72,7 @@ export class DailyInsightsService {
   ): Promise<DailyInsights> {
     const {
       forceSummaryRefresh = false,
-      minSessionDurationMs = 60000,
+      minSessionDurationMs = 0,
       allowInsightRegeneration = true,
       preferPersistedInsights = true,
     } = options;
@@ -84,8 +88,14 @@ export class DailyInsightsService {
       InsightMemoryService.getPersistedInsights(date),
     ]);
 
-    const replayEntries = this.buildReplayEntries(sessions);
-    const wastedTimeMs = replayEntries.reduce((sum, entry) => sum + entry.durationMs, 0);
+    const replayEntries = this.buildReplayEntries(sessions, blockEvents);
+    const wastedTimeMs = replayEntries.reduce(
+      (sum, entry) =>
+        entry.eventType === 'session' || entry.eventType === 'short_open'
+          ? sum + entry.durationMs
+          : sum,
+      0
+    );
     const biggestTimeLeak = this.buildBiggestTimeLeak(summary, replayEntries, wastedTimeMs);
     const isToday = date === this.getTodayDateString();
     const shouldUsePersistedOnly =
@@ -153,12 +163,12 @@ export class DailyInsightsService {
     );
   }
 
-  buildReplayEntries(sessions: AppSession[]): ReplayEntry[] {
+  buildReplayEntries(sessions: AppSession[], blockEvents: BlockEvent[] = []): ReplayEntry[] {
     const sortedSessions = [...sessions].sort(
       (a, b) => new Date(a.startedAt).getTime() - new Date(b.startedAt).getTime()
     );
 
-    return sortedSessions.map((session) => {
+    const sessionEntries = sortedSessions.map((session) => {
       return {
         packageName: session.packageName,
         appName: session.appName,
@@ -166,8 +176,34 @@ export class DailyInsightsService {
         endedAt: session.endedAt,
         durationMs: session.durationMs,
         moment: this.getMomentLabel(session.startedAt),
+        eventType: session.durationMs < 60000 ? 'short_open' : 'session',
       };
     });
+
+    const blockEntries = blockEvents.map((event) => {
+      const eventType =
+        event.action === 'bypassed'
+          ? 'emergency_pass'
+          : event.action === 'cooldown_started'
+            ? 'cooldown'
+            : 'blocked';
+      return {
+        packageName: event.packageName,
+        appName: event.appName,
+        startedAt: event.triggeredAt,
+        endedAt: event.resolvedAt || event.triggeredAt,
+        durationMs: 0,
+        moment: this.getMomentLabel(event.triggeredAt),
+        eventType,
+        action: event.action,
+        blockType: event.blockType,
+        protectionContext: event.protectionContext ?? null,
+      } satisfies ReplayEntry;
+    });
+
+    return [...sessionEntries, ...blockEntries].sort(
+      (a, b) => new Date(a.startedAt).getTime() - new Date(b.startedAt).getTime()
+    ) as ReplayEntry[];
   }
 
   private buildBiggestTimeLeak(
@@ -188,7 +224,7 @@ export class DailyInsightsService {
     }
 
     const appTotals = new Map<string, { appName: string; totalTimeMs: number }>();
-    for (const entry of replayEntries) {
+    for (const entry of replayEntries.filter((entry) => entry.eventType === 'session' || entry.eventType === 'short_open')) {
       const existing = appTotals.get(entry.packageName);
       appTotals.set(entry.packageName, {
         appName: entry.appName,

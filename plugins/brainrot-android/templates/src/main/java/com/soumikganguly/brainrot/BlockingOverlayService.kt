@@ -56,8 +56,16 @@ class BlockingOverlayService : Service() {
         val blockedApp = intent?.getStringExtra("blocked_app") ?: "App"
         val blockMode = intent?.getStringExtra("block_mode") ?: "soft"
         val packageName = intent?.getStringExtra("package_name") ?: ""
+        val protectionContext = intent?.getStringExtra("protection_context")
+            ?: if (blockMode == "hard") "locked_mode" else "limit_mode"
 
-        showBlockingOverlay(blockedApp, blockMode, packageName)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M && !android.provider.Settings.canDrawOverlays(this)) {
+            recordRecoverableFailure("overlay_missing", packageName)
+            stopSelf()
+            return START_NOT_STICKY
+        }
+
+        showBlockingOverlay(blockedApp, blockMode, packageName, protectionContext)
         return START_NOT_STICKY
     }
 
@@ -87,7 +95,7 @@ class BlockingOverlayService : Service() {
             .build()
     }
 
-    private fun showBlockingOverlay(appName: String, mode: String, packageName: String) {
+    private fun showBlockingOverlay(appName: String, mode: String, packageName: String, protectionContext: String) {
         windowManager = getSystemService(WINDOW_SERVICE) as WindowManager
         removeOverlay()
 
@@ -111,17 +119,18 @@ class BlockingOverlayService : Service() {
             }
         }
 
-        overlayView = createOverlayView(appName, mode, packageName)
+        overlayView = createOverlayView(appName, mode, packageName, protectionContext)
 
         try {
             windowManager?.addView(overlayView, layoutParams)
         } catch (e: Exception) {
-            e.printStackTrace()
+            Log.e(TAG, "Failed to add blocking overlay", e)
+            recordRecoverableFailure("overlay_start_failed", packageName)
             stopSelf()
         }
     }
 
-    private fun createOverlayView(appName: String, mode: String, packageName: String): View {
+    private fun createOverlayView(appName: String, mode: String, packageName: String, protectionContext: String): View {
         val snapshot = getUsageSnapshot(packageName)
         val remainingBypasses = getRemainingBypasses(packageName)
         val brainState = getBrainState()
@@ -132,7 +141,8 @@ class BlockingOverlayService : Service() {
             limitMs = if (mode == "soft") getSoftBlockIntervalMinutes() * 60 * 1000L else null,
             usageAtTriggerMs = snapshot.totalTodayMs,
             action = "blocked",
-            resolvedAt = null
+            resolvedAt = null,
+            protectionContext = protectionContext
         )
         val overlay = FrameLayout(this).apply {
             setBackgroundColor(Color.parseColor("#99000000"))
@@ -227,7 +237,7 @@ class BlockingOverlayService : Service() {
 
         if (mode == "hard") {
             val lockInfo = buildText(
-                text = getLockEndText(),
+                text = getLockEndText(protectionContext),
                 sizeSp = 14f,
                 color = tertiaryText,
                 bottomMarginDp = 22,
@@ -255,7 +265,8 @@ class BlockingOverlayService : Service() {
                     limitMs = getSoftBlockIntervalMinutes() * 60 * 1000L,
                     usageAtTriggerMs = snapshot.totalTodayMs,
                     action = "cooldown_started",
-                    resolvedAt = nowIso()
+                    resolvedAt = nowIso(),
+                    protectionContext = protectionContext
                 )
                 launchBlockedApp(packageName)
                 removeOverlay()
@@ -278,7 +289,8 @@ class BlockingOverlayService : Service() {
                         limitMs = getSoftBlockIntervalMinutes() * 60 * 1000L,
                         usageAtTriggerMs = snapshot.totalTodayMs,
                         action = "abandoned",
-                        resolvedAt = nowIso()
+                        resolvedAt = nowIso(),
+                        protectionContext = protectionContext
                     )
                     goHomeAndClose()
                 }
@@ -298,7 +310,8 @@ class BlockingOverlayService : Service() {
                         limitMs = null,
                         usageAtTriggerMs = snapshot.totalTodayMs,
                         action = "abandoned",
-                        resolvedAt = nowIso()
+                        resolvedAt = nowIso(),
+                        protectionContext = protectionContext
                     )
                     goHomeAndClose()
                 }
@@ -313,21 +326,22 @@ class BlockingOverlayService : Service() {
                     topMarginDp = 12,
                     minHeightDp = 46
                 ) {
-                    activateEmergencyPass(packageName)
-                    logBlockEvent(
-                        packageName = packageName,
-                        appName = appName,
-                        blockType = "hard_block",
-                        limitMs = null,
-                        usageAtTriggerMs = snapshot.totalTodayMs,
-                        action = "bypassed",
-                        resolvedAt = nowIso()
-                    )
-                    launchBlockedApp(packageName)
-                    removeOverlay()
-                    stopSelf()
-                }
-            )
+                        activateEmergencyPass(packageName)
+                        logBlockEvent(
+                            packageName = packageName,
+                            appName = appName,
+                            blockType = "hard_block",
+                            limitMs = null,
+                            usageAtTriggerMs = snapshot.totalTodayMs,
+                            action = "bypassed",
+                            resolvedAt = nowIso(),
+                            protectionContext = protectionContext
+                        )
+                        launchBlockedApp(packageName)
+                        removeOverlay()
+                        stopSelf()
+                    }
+                )
             }
 
             card.addView(
@@ -343,7 +357,8 @@ class BlockingOverlayService : Service() {
                         limitMs = null,
                         usageAtTriggerMs = snapshot.totalTodayMs,
                         action = "accountability_requested",
-                        resolvedAt = nowIso()
+                        resolvedAt = nowIso(),
+                        protectionContext = protectionContext
                     )
                     val launchIntent = packageManager.getLaunchIntentForPackage(applicationContext.packageName)
                     launchIntent?.let {
@@ -630,30 +645,23 @@ class BlockingOverlayService : Service() {
     private fun getSoftBlockIntervalMinutes(): Int {
         val prefs = getSharedPreferences("brainrot_prefs", MODE_PRIVATE)
         val configString = prefs.getString("blocking_config", "{}") ?: "{}"
-        return runCatching { JSONObject(configString).optInt("softBlockIntervalMinutes", 15) }
+        return runCatching {
+            val config = JSONObject(configString)
+            if (config.has("limitIntervalMinutes")) {
+                config.optInt("limitIntervalMinutes", 15)
+            } else {
+                config.optInt("softBlockIntervalMinutes", 15)
+            }
+        }
             .getOrDefault(15)
             .coerceAtLeast(1)
     }
 
-    private fun getLockEndText(): String {
-        val prefs = getSharedPreferences("brainrot_prefs", MODE_PRIVATE)
-        val configString = prefs.getString("blocking_config", "{}") ?: "{}"
-        val config = runCatching { JSONObject(configString) }.getOrNull() ?: return "Locked until you change your settings"
-
-        if (!config.optBoolean("scheduleEnabled", false)) {
-            return "Locked until you change your settings"
+    private fun getLockEndText(protectionContext: String): String {
+        return when (protectionContext) {
+            "focus_session" -> "Locked until your Focus Session ends"
+            else -> "Locked until you change your protection settings"
         }
-
-        val end = config.optString("scheduleEnd", "06:00")
-        return "Locked until ${formatClockTime(end)}"
-    }
-
-    private fun formatClockTime(value: String): String {
-        return runCatching {
-            val parser = SimpleDateFormat("HH:mm", Locale.US)
-            val formatter = SimpleDateFormat("h:mm a", Locale.US)
-            formatter.format(parser.parse(value) ?: Date())
-        }.getOrDefault(value)
     }
 
     private data class UsageSnapshot(
@@ -739,7 +747,14 @@ class BlockingOverlayService : Service() {
     private fun getRemainingBypasses(packageName: String): Int {
         val prefs = getSharedPreferences("brainrot_prefs", MODE_PRIVATE)
         val configString = prefs.getString("blocking_config", "{}") ?: "{}"
-        val bypassLimit = runCatching { JSONObject(configString).optInt("bypassLimit", 0) }.getOrDefault(0)
+        val bypassLimit = runCatching {
+            val config = JSONObject(configString)
+            if (config.has("lockedPassesPerDay")) {
+                config.optInt("lockedPassesPerDay", 2)
+            } else {
+                config.optInt("bypassLimit", 2)
+            }
+        }.getOrDefault(2).coerceAtLeast(0)
         val today = SimpleDateFormat("yyyy-MM-dd", Locale.US).format(Date())
         val currentCount = prefs.getInt("bypass_count_${packageName}_$today", 0)
         return (bypassLimit - currentCount).coerceAtLeast(0)
@@ -758,6 +773,10 @@ class BlockingOverlayService : Service() {
         val today = SimpleDateFormat("yyyy-MM-dd", Locale.US).format(Date())
         val key = "bypass_count_${packageName}_$today"
         val currentCount = prefs.getInt(key, 0)
+        if (getRemainingBypasses(packageName) <= 0) {
+            Log.w(TAG, "Emergency pass ignored because no passes remain for $packageName")
+            return
+        }
         prefs.edit()
             .putInt(key, currentCount + 1)
             .putString("emergency_pass_pending_package", packageName)
@@ -783,7 +802,8 @@ class BlockingOverlayService : Service() {
         limitMs: Long?,
         usageAtTriggerMs: Long?,
         action: String,
-        resolvedAt: String?
+        resolvedAt: String?,
+        protectionContext: String
     ) {
         try {
             val prefs = getSharedPreferences("brainrot_prefs", MODE_PRIVATE)
@@ -798,6 +818,7 @@ class BlockingOverlayService : Service() {
                 if (limitMs != null) put("limitMs", limitMs) else put("limitMs", JSONObject.NULL)
                 if (usageAtTriggerMs != null) put("usageAtTriggerMs", usageAtTriggerMs) else put("usageAtTriggerMs", JSONObject.NULL)
                 put("action", action)
+                put("protectionContext", protectionContext)
                 if (resolvedAt != null) put("resolvedAt", resolvedAt) else put("resolvedAt", JSONObject.NULL)
                 put("source", "native_overlay")
             }
@@ -812,6 +833,15 @@ class BlockingOverlayService : Service() {
         } catch (error: Exception) {
             Log.e(TAG, "Failed to queue block event", error)
         }
+    }
+
+    private fun recordRecoverableFailure(reason: String, packageName: String) {
+        getSharedPreferences("brainrot_prefs", MODE_PRIVATE)
+            .edit()
+            .putString("last_blocking_failure_reason", reason)
+            .putString("last_blocking_failure_package", packageName)
+            .putLong("last_blocking_failure_at", System.currentTimeMillis())
+            .apply()
     }
 
     private fun nowIso(): String {

@@ -1,12 +1,11 @@
 import { NativeModules, Platform } from 'react-native';
 
-import { database } from './database';
+import { database, type ProtectionContext } from './database';
 
 const UsageStatsModule = NativeModules.UsageStatsModule;
 
 /**
- * Unified Usage Service - Combines UsageService and UsageMonitoringService
- * Eliminates duplicate functionality and provides a single API for usage tracking
+ * Unified Usage Service - single API for usage tracking, permissions, and native monitoring.
  */
 export class UnifiedUsageService {
   private static instance: UnifiedUsageService;
@@ -493,13 +492,37 @@ export class UnifiedUsageService {
   static async showBlockingOverlay(
     packageName: string,
     appName: string,
-    blockMode: 'soft' | 'hard'
+    blockMode: 'soft' | 'hard',
+    protectionContext: ProtectionContext = 'js_fallback'
   ): Promise<void> {
     if (!this.isNativeModuleAvailable()) {
       throw new Error('Blocking overlay only available on Android');
     }
 
+    if (UsageStatsModule.showBlockingOverlayWithContext) {
+      await UsageStatsModule.showBlockingOverlayWithContext(
+        packageName,
+        appName,
+        blockMode,
+        protectionContext
+      );
+      return;
+    }
+
     await UsageStatsModule.showBlockingOverlay(packageName, appName, blockMode);
+  }
+
+  static async getMonitoringDiagnostics(): Promise<MonitoringDiagnostics | null> {
+    if (!this.isNativeModuleAvailable() || !UsageStatsModule.getMonitoringDiagnostics) {
+      return null;
+    }
+
+    try {
+      return await UsageStatsModule.getMonitoringDiagnostics();
+    } catch (error) {
+      console.error('Error getting monitoring diagnostics:', error);
+      return null;
+    }
   }
 
   static async startFloatingScore(
@@ -882,4 +905,30 @@ export interface BlockingConfigPayload {
   blockingEnabled: boolean;
   limitIntervalMinutes: number;
   lockedPassesPerDay: number;
+}
+
+export interface MonitoringDiagnostics {
+  usageAccessGranted: boolean;
+  overlayPermissionGranted: boolean;
+  accessibilityGranted: boolean;
+  monitoringEnabled: boolean;
+  backgroundChecksEnabled: boolean;
+  realtimeMonitoringEnabled: boolean;
+  realtimeLoopRunning: boolean;
+  blockingConfig: string;
+  monitoredApps: string;
+  pendingBlockEvents: number;
+  brainScore: number;
+  brainStatus: string;
+  dailySummaryDate: string;
+  dailySummarySource: string;
+  dailySummaryUpdatedAt: number;
+  lastBlockingFailureReason: string;
+  lastBlockingFailurePackage: string;
+  lastBlockingFailureAt: number;
+  usageQueryCount: number;
+  eventQueryCount: number;
+  foregroundQueryCount: number;
+  batteryPercent: number;
+  batteryCharging: boolean;
 }

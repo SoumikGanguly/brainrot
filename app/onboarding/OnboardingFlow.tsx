@@ -1,3 +1,4 @@
+/* eslint-disable react-hooks/set-state-in-effect */
 import { Ionicons } from "@expo/vector-icons";
 import * as Haptics from "expo-haptics";
 import { router } from "expo-router";
@@ -428,6 +429,7 @@ export default function OnboardingFlow({
 				),
 				database.setMeta("onboarding_protection_level", "monitor"),
 				database.setMeta("onboarding_completed", "true"),
+				database.setMeta("onboarding_completed_at", Date.now().toString()),
 			]);
 
 			const blockingService = AppBlockingService.getInstance();

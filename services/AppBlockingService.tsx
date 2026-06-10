@@ -286,7 +286,8 @@ export class AppBlockingService {
     await UnifiedUsageService.showBlockingOverlay(
       packageName,
       appName || this.protectedApps.get(packageName)?.appName || UnifiedUsageService.getAppDisplayName(packageName),
-      'soft'
+      'soft',
+      'js_fallback'
     );
   }
 

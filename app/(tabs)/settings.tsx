@@ -1,3 +1,4 @@
+/* eslint-disable react-hooks/immutability, react-hooks/set-state-in-effect, react/no-unescaped-entities */
 import { Ionicons } from "@expo/vector-icons";
 import * as Google from "expo-auth-session/providers/google";
 import { router } from "expo-router";
@@ -22,14 +23,22 @@ import FocusEducationModal, {
 	type FocusEducationStep,
 } from "@/components/FocusEducationModal";
 import { Header } from "@/components/Header";
+import PermissionRecoveryCard from "@/components/PermissionRecoveryCard";
 import SkeletonBlock from "@/components/SkeletonBlock";
 import { AuthService } from "@/services/AuthService";
 import { CapabilitiesService } from "@/services/CapabilitiesService";
 import { DailyInsightsService } from "@/services/DailyInsightsService";
+import { LoginNudgeService, type LoginNudge } from "@/services/LoginNudgeService";
+import { MonitoringDiagnosticsService } from "@/services/MonitoringDiagnosticsService";
+import {
+	PermissionHealthService,
+	type PermissionNudge,
+} from "@/services/PermissionHealthService";
 import type { InsightCard } from "@/services/InsightTypes";
 import { TelemetryService } from "@/services/TelemetryService";
 import {
 	UnifiedUsageService,
+	type MonitoringDiagnostics,
 	type ManufacturerPermissionInfo,
 } from "@/services/UnifiedUsageService";
 import { database } from "@/services/database";
@@ -81,6 +90,15 @@ export default function SettingsScreen() {
 		useState<FocusEducationStep>("accessibility");
 	const [manufacturerInfo, setManufacturerInfo] =
 		useState<ManufacturerPermissionInfo | null>(null);
+	const [permissionNudges, setPermissionNudges] = useState<PermissionNudge[]>([]);
+	const [loginNudge, setLoginNudge] = useState<LoginNudge | null>(null);
+	const [monitoringDiagnostics, setMonitoringDiagnostics] =
+		useState<MonitoringDiagnostics | null>(null);
+	const [qaInsightMeta, setQaInsightMeta] = useState({
+		summarySource: "missing",
+		integrityDeltaMs: 0,
+		insightSource: "missing",
+	});
 	const [insightPreviewSections, setInsightPreviewSections] = useState<
 		{
 			title: string;
@@ -172,6 +190,11 @@ export default function SettingsScreen() {
 				accessibility,
 				notifications,
 				nextManufacturerInfo,
+				permissionHealth,
+				nextLoginNudge,
+				nextDiagnostics,
+				todaySummary,
+				todayInsights,
 			] = await Promise.all([
 				UnifiedUsageService.getInstalledApps(),
 				database.getMonitoredPackages(),
@@ -180,6 +203,16 @@ export default function SettingsScreen() {
 				CapabilitiesService.hasAccessibilityPermission(),
 				CapabilitiesService.hasNotificationPermission(),
 				UnifiedUsageService.getManufacturerInfo(),
+				PermissionHealthService.getPermissionHealth().catch(() => null),
+				LoginNudgeService.getLoginNudge().catch(() => null),
+				MonitoringDiagnosticsService.getDiagnostics().catch(() => null),
+				database.getDailySummary(new Date().toISOString().split("T")[0]),
+				DailyInsightsService.getInstance()
+					.getDailyInsights(new Date().toISOString().split("T")[0], {
+						allowInsightRegeneration: false,
+						preferPersistedInsights: true,
+					})
+					.catch(() => null),
 			]);
 
 			setApps(
@@ -198,6 +231,14 @@ export default function SettingsScreen() {
 					? nextManufacturerInfo
 					: null,
 			);
+			setPermissionNudges(permissionHealth?.nudges || []);
+			setLoginNudge(nextLoginNudge?.shouldShow ? nextLoginNudge : null);
+			setMonitoringDiagnostics(nextDiagnostics);
+			setQaInsightMeta({
+				summarySource: todaySummary?.summarySource || "missing",
+				integrityDeltaMs: todaySummary?.integrityDeltaMs ?? 0,
+				insightSource: todayInsights?.insightLoadState || "missing",
+			});
 			setState({
 				monitoringEnabled:
 					(await database.getMeta("monitoring_enabled")) === "true",
@@ -832,6 +873,50 @@ export default function SettingsScreen() {
 					)}
 				</Card>
 
+				{loginNudge ? (
+					<Card className="mx-md mb-md border border-[#D8E6FF] bg-[#F3F8FF]">
+						<Text className="font-heading-semibold text-card-title text-text">
+							{loginNudge.title}
+						</Text>
+						<Text className="mt-2 font-body text-secondary text-muted">
+							{loginNudge.body}
+						</Text>
+						<View className="mt-4 flex-row">
+							<TouchableOpacity
+								onPress={() => void signInWithGoogle()}
+								disabled={accountActionLoading || !request}
+								className="mr-2 rounded-xl bg-[#2563EB] px-4 py-2"
+							>
+								<Text className="font-heading-semibold text-secondary text-white">
+									{accountActionLoading ? "Connecting..." : loginNudge.ctaLabel}
+								</Text>
+							</TouchableOpacity>
+							<TouchableOpacity
+								onPress={() => void LoginNudgeService.dismiss().then(refresh)}
+								className="rounded-xl border border-slate-200 px-4 py-2"
+							>
+								<Text className="font-heading-semibold text-secondary text-muted">
+									Not now
+								</Text>
+							</TouchableOpacity>
+						</View>
+					</Card>
+				) : null}
+
+				{permissionNudges.map((nudge) => (
+					<PermissionRecoveryCard
+						key={nudge.id}
+						nudge={nudge}
+						onFix={() =>
+							void PermissionHealthService.runNudgeAction(nudge).finally(refresh)
+						}
+						onRecheck={() => void refresh()}
+						onDismiss={() =>
+							void PermissionHealthService.dismissNudge(nudge.id).then(refresh)
+						}
+					/>
+				))}
+
 				<Card className="mx-md mb-md">
 					<Text className="mb-sm font-heading-bold text-section text-text">
 						Focus Tracking
@@ -980,6 +1065,90 @@ export default function SettingsScreen() {
 				{__DEV__ && (
 					<Card className="mx-md mb-md bg-gray-50">
 						<Text className="mb-sm font-heading-bold text-section text-text">
+							Dev QA Dashboard
+						</Text>
+						{monitoringDiagnostics ? (
+							<View>
+								<DiagnosticRow
+									label="Permission Health"
+									value={[
+										monitoringDiagnostics.usageAccessGranted ? "Usage OK" : "Usage missing",
+										monitoringDiagnostics.accessibilityGranted ? "Access OK" : "Access missing",
+										monitoringDiagnostics.overlayPermissionGranted ? "Overlay OK" : "Overlay missing",
+									].join(" · ")}
+								/>
+								<DiagnosticRow
+									label="Native Blocking Config"
+									value={compactJson(monitoringDiagnostics.blockingConfig)}
+								/>
+								<DiagnosticRow
+									label="Last Summary Sync"
+									value={`${monitoringDiagnostics.dailySummaryDate || "none"} · ${
+										monitoringDiagnostics.dailySummarySource || "missing"
+									}`}
+								/>
+								<DiagnosticRow
+									label="Summary Integrity"
+									value={`${qaInsightMeta.summarySource} · delta ${formatDuration(Math.abs(qaInsightMeta.integrityDeltaMs))}`}
+								/>
+								<DiagnosticRow
+									label="Last Insight Source"
+									value={qaInsightMeta.insightSource}
+								/>
+								<DiagnosticRow
+									label="Pending Block Events"
+									value={String(monitoringDiagnostics.pendingBlockEvents)}
+								/>
+								<DiagnosticRow
+									label="Monitoring"
+									value={[
+										monitoringDiagnostics.monitoringEnabled ? "enabled" : "off",
+										monitoringDiagnostics.backgroundChecksEnabled ? "background" : "no background",
+										monitoringDiagnostics.realtimeMonitoringEnabled ? "realtime" : "no realtime",
+										monitoringDiagnostics.realtimeLoopRunning ? "loop running" : "loop stopped",
+									].join(" · ")}
+								/>
+								<DiagnosticRow
+									label="Battery"
+									value={`${monitoringDiagnostics.batteryPercent}% · ${
+										monitoringDiagnostics.batteryCharging ? "charging" : "not charging"
+									}`}
+								/>
+								<DiagnosticRow
+									label="Query Counts"
+									value={`usage ${monitoringDiagnostics.usageQueryCount} · events ${monitoringDiagnostics.eventQueryCount} · fg ${monitoringDiagnostics.foregroundQueryCount}`}
+								/>
+								<DiagnosticRow
+									label="Last Blocking Failure"
+									value={monitoringDiagnostics.lastBlockingFailureReason || "none"}
+								/>
+								<DiagnosticRow
+									label="Telemetry Buffer"
+									value={TelemetryService.getDebugEvents()
+										.slice(0, 6)
+										.map((event) => event.event)
+										.join(" · ") || "empty"}
+								/>
+							</View>
+						) : (
+							<Text className="font-body text-secondary text-muted">
+								Native diagnostics unavailable on this platform/build.
+							</Text>
+						)}
+						<TouchableOpacity
+							onPress={() => void refresh()}
+							className="mt-sm rounded-lg bg-white border border-gray-200 px-4 py-3 items-center"
+						>
+							<Text className="font-heading-semibold text-secondary text-text">
+								Refresh QA Dashboard
+							</Text>
+						</TouchableOpacity>
+					</Card>
+				)}
+
+				{__DEV__ && (
+					<Card className="mx-md mb-md bg-gray-50">
+						<Text className="mb-sm font-heading-bold text-section text-text">
 							Dev Diagnostics
 						</Text>
 						<Text className="mb-md font-body text-secondary text-muted">
@@ -1075,6 +1244,27 @@ function PermissionRow({
 			</View>
 		</View>
 	);
+}
+
+function DiagnosticRow({ label, value }: { label: string; value: string }) {
+	return (
+		<View className="border-b border-gray-200 py-2 last:border-b-0">
+			<Text className="font-heading-semibold text-secondary text-text">
+				{label}
+			</Text>
+			<Text className="mt-1 font-body text-secondary text-muted">
+				{value}
+			</Text>
+		</View>
+	);
+}
+
+function compactJson(value: string): string {
+	try {
+		return JSON.stringify(JSON.parse(value));
+	} catch {
+		return value || "{}";
+	}
 }
 
 function ToggleRow({

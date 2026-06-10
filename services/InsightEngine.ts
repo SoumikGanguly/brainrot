@@ -38,6 +38,7 @@ const CATEGORY_PRIORS: Record<InsightCard['category'], number> = {
   pattern: 3,
   comparison: 3,
   intervention: 2,
+  success: 2,
   improvement: 1,
   behavioral: 2,
 };
@@ -90,6 +91,8 @@ export class InsightEngine {
 
     const intervention = this.buildInterventionInsight(signals, input.protectionModes);
     if (intervention) candidates.push(intervention);
+
+    candidates.push(...this.buildInterventionSuccessInsights(input.blockEvents));
 
     const improvement = this.buildImprovementInsight(signals);
     if (improvement) candidates.push(improvement);
@@ -358,6 +361,85 @@ export class InsightEngine {
       actionability: 54,
       confidence: 84,
     });
+  }
+
+  private static buildInterventionSuccessInsights(blockEvents: BlockEvent[]): CandidateSpec[] {
+    const action = { type: 'open_focus_screen' } satisfies InsightAction;
+    const candidates: CandidateSpec[] = [];
+    const abandoned = blockEvents.filter((event) => event.action === 'abandoned');
+    const bypassed = blockEvents.filter((event) => event.action === 'bypassed');
+    const focusBlocks = blockEvents.filter(
+      (event) => event.protectionContext === 'focus_session' && event.action === 'blocked'
+    );
+    const cooldowns = blockEvents.filter(
+      (event) => event.protectionContext === 'limit_mode' && event.action === 'cooldown_started'
+    );
+
+    if (abandoned.length > 0) {
+      candidates.push(this.createCandidate({
+        id: 'success-abandoned-blocks',
+        category: 'success',
+        headline: `You walked away ${abandoned.length} ${abandoned.length === 1 ? 'time' : 'times'}.`,
+        subtext: 'Those are real interrupted impulses, not vague motivation.',
+        actionLabel: 'Open Focus',
+        action,
+        actionKey: this.getActionKey(action),
+        evidenceStrength: Math.min(100, abandoned.length * 18),
+        severity: this.scale(abandoned.length / 6, 22, 56),
+        actionability: 48,
+        confidence: 92,
+      }));
+    }
+
+    if (focusBlocks.length > 0) {
+      candidates.push(this.createCandidate({
+        id: 'success-focus-blocks',
+        category: 'success',
+        headline: `Focus Session protected you ${focusBlocks.length} ${focusBlocks.length === 1 ? 'time' : 'times'}.`,
+        subtext: 'That is the lock doing exactly what you asked it to do.',
+        actionLabel: 'Open Focus',
+        action,
+        actionKey: this.getActionKey(action),
+        evidenceStrength: Math.min(100, focusBlocks.length * 16),
+        severity: this.scale(focusBlocks.length / 8, 24, 58),
+        actionability: 44,
+        confidence: 94,
+      }));
+    }
+
+    if (cooldowns.length > 0) {
+      candidates.push(this.createCandidate({
+        id: 'success-limit-cooldowns',
+        category: 'success',
+        headline: `Limit Mode made you pause ${cooldowns.length} ${cooldowns.length === 1 ? 'time' : 'times'}.`,
+        subtext: 'Each cooldown is a chance for the urge to lose momentum.',
+        actionLabel: 'Open Focus',
+        action,
+        actionKey: this.getActionKey(action),
+        evidenceStrength: Math.min(100, cooldowns.length * 14),
+        severity: this.scale(cooldowns.length / 8, 20, 54),
+        actionability: 46,
+        confidence: 90,
+      }));
+    }
+
+    if (bypassed.length > 0) {
+      candidates.push(this.createCandidate({
+        id: 'intervention-emergency-passes',
+        category: 'intervention',
+        headline: `You used ${bypassed.length} emergency ${bypassed.length === 1 ? 'pass' : 'passes'}.`,
+        subtext: 'If that was not a true emergency, Lock Mode needs a tighter plan.',
+        actionLabel: 'Open Focus',
+        action,
+        actionKey: this.getActionKey(action),
+        evidenceStrength: Math.min(100, bypassed.length * 20),
+        severity: this.scale(bypassed.length / 2, 38, 76),
+        actionability: 58,
+        confidence: 92,
+      }));
+    }
+
+    return candidates;
   }
 
   private static buildBehavioralInsight(

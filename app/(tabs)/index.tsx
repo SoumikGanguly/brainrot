@@ -1,4 +1,4 @@
-import { Ionicons } from "@expo/vector-icons";
+/* eslint-disable react-hooks/immutability, react-hooks/refs, react/no-unescaped-entities */
 import { useFocusEffect, useRouter } from "expo-router";
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import {
@@ -17,12 +17,12 @@ import {
 import { SafeAreaView } from "react-native-safe-area-context";
 
 import ActionInsightCard from "@/components/ActionInsightCard";
+import PermissionRecoveryCard from "@/components/PermissionRecoveryCard";
 import SkeletonBlock from "@/components/SkeletonBlock";
 import { Card } from "../../components/Card";
 import { database, type DailyUsage } from "../../services/database";
 
 import { AppBlockingService } from "@/services/AppBlockingService";
-import { CapabilitiesService } from "@/services/CapabilitiesService";
 import { DailyResetService } from "@/services/DailyResetService";
 import { DailyInsightsService, type DailyInsights } from "@/services/DailyInsightsService";
 import { DataSyncService } from "@/services/DataSyncService";
@@ -30,12 +30,17 @@ import { HistoryRefreshCoordinator } from "@/services/HistoryRefreshCoordinator"
 import { InsightActionService } from "@/services/InsightActionService";
 import { InsightInvalidationService } from "@/services/InsightInvalidationService";
 import { NotificationService } from "@/services/NotificationService";
+import { LoginNudgeService, type LoginNudge } from "@/services/LoginNudgeService";
+import {
+	PermissionHealthService,
+	type PermissionNudge,
+} from "@/services/PermissionHealthService";
+import { MonitoringDiagnosticsService } from "@/services/MonitoringDiagnosticsService";
 import { PurchaseService } from "@/services/PurchaseService";
 import { TelemetryService } from "@/services/TelemetryService";
 import { TrialService } from "@/services/TrialService";
 import {
 	UnifiedUsageService,
-	type ManufacturerPermissionInfo,
 } from "@/services/UnifiedUsageService";
 import {
 	getBrainStateLabel,
@@ -93,8 +98,8 @@ export default function HomeScreen() {
 	});
 	const [loading, setLoading] = useState(true);
 	const [hasUsagePermission, setHasUsagePermission] = useState<boolean | null>(null);
-	const [manufacturerInfo, setManufacturerInfo] =
-		useState<ManufacturerPermissionInfo | null>(null);
+	const [permissionNudges, setPermissionNudges] = useState<PermissionNudge[]>([]);
+	const [loginNudge, setLoginNudge] = useState<LoginNudge | null>(null);
 	const pendingPermissionCheck = useRef(false);
 	const appStateRef = useRef<AppStateStatus>(AppState.currentState);
 	const paywallLoggedRef = useRef<"trial" | "expired" | null>(null);
@@ -133,6 +138,7 @@ export default function HomeScreen() {
 				await blockingService.initialize();
 
 				DailyResetService.getInstance().initialize();
+				await MonitoringDiagnosticsService.sampleDailyTelemetry();
 
 				isInitialized = true;
 				thisQueueBackgroundInitialization();
@@ -183,19 +189,7 @@ export default function HomeScreen() {
 			});
 		};
 
-		const loadManufacturerInfo = async () => {
-			try {
-				const info = await UnifiedUsageService.getManufacturerInfo();
-				if (info?.needsSpecialPermission) {
-					setManufacturerInfo(info);
-				}
-			} catch (error) {
-				console.warn("Failed to load manufacturer info:", error);
-			}
-		};
-
 		void initializeAllServices();
-		void loadManufacturerInfo();
 
 		const handleAppStateChange = async (nextAppState: AppStateStatus) => {
 			if (
@@ -342,6 +336,7 @@ export default function HomeScreen() {
 		setBrainState(getBrainStateLabel(nextScore));
 		setTrialInfo(trial);
 		setLoading(false);
+		await refreshNudges();
 	};
 
 	async function refreshHomeDataInBackground() {
@@ -387,11 +382,23 @@ export default function HomeScreen() {
 			setBrainScore(nextScore);
 			setBrainState(getBrainStateLabel(nextScore));
 			setTrialInfo(trial);
+			await refreshNudges();
 		} catch (error) {
 			console.log(`Critical error: ${String(error)}`);
 		} finally {
 			homeRefreshInFlightRef.current = false;
 		}
+	}
+
+	async function refreshNudges() {
+		const [permissionHealth, nextLoginNudge] = await Promise.all([
+			PermissionHealthService.getPermissionHealth().catch(() => null),
+			LoginNudgeService.getLoginNudge().catch(() => null),
+		]);
+		if (permissionHealth) {
+			setPermissionNudges(permissionHealth.nudges.slice(0, 2));
+		}
+		setLoginNudge(nextLoginNudge?.shouldShow ? nextLoginNudge : null);
 	}
 
 	async function loadHomeData(
@@ -501,7 +508,7 @@ export default function HomeScreen() {
 				brain_status: brainState,
 			});
 		}
-	}, [brainScore, brainState, hasUsagePermission, loading, manufacturerInfo, todayInsights?.summary?.apps?.length, yesterdaySummary?.totalScreenTime]);
+	}, [brainScore, brainState, hasUsagePermission, loading, todayInsights?.summary?.apps?.length, yesterdaySummary?.totalScreenTime]);
 
 	useEffect(() => {
 		if (!primaryInsight) {
@@ -620,73 +627,49 @@ export default function HomeScreen() {
 					</Card>
 				)}
 
-				{hasUsagePermission === false && (
-					<Card className="mx-md mb-md border border-yellow-200 bg-yellow-50">
-						<View className="flex-row items-start">
-							<Ionicons
-								name="warning"
-								size={22}
-								color="#D97706"
-								style={{ marginRight: 12, marginTop: 2 }}
-							/>
-							<View className="flex-1">
-								<Text className="mb-1 font-heading-semibold text-card-title text-yellow-800">
-									Usage Access Required
-								</Text>
-								<Text className="mb-3 font-body text-secondary text-yellow-700">
-									Grant usage access permission so Brainrot can track your score
-									and build your replay.
-								</Text>
-								<TouchableOpacity
-									onPress={async () => {
-										try {
-											pendingPermissionCheck.current = true;
-											await CapabilitiesService.ensureUsageAccess("home");
-										} catch (error) {
-											console.error("Failed to open settings:", error);
-											pendingPermissionCheck.current = false;
-										}
-									}}
-									className="self-start rounded-lg bg-yellow-600 px-4 py-2"
-								>
-									<Text className="font-heading-semibold text-secondary text-white">
-										Grant Permission
-									</Text>
-								</TouchableOpacity>
+				{permissionNudges.map((nudge) => (
+					<PermissionRecoveryCard
+						key={nudge.id}
+						nudge={nudge}
+						onFix={() => {
+							pendingPermissionCheck.current = true;
+							void PermissionHealthService.runNudgeAction(nudge).finally(refreshNudges);
+						}}
+						onRecheck={() => void refreshNudges()}
+						onDismiss={() => {
+							void PermissionHealthService.dismissNudge(nudge.id).then(refreshNudges);
+						}}
+					/>
+				))}
 
-								{manufacturerInfo?.needsSpecialPermission && (
-									<View className="mt-3 rounded-lg border border-yellow-200 bg-yellow-100 p-3">
-										<Text className="mb-1 font-heading-semibold text-secondary text-yellow-900">
-											{manufacturerInfo.title}
-										</Text>
-										<Text className="mb-2 font-body text-secondary text-yellow-800">
-											{manufacturerInfo.instructions}
-										</Text>
-										{manufacturerInfo.canOpenDirectly && (
-											<TouchableOpacity
-												onPress={async () => {
-													try {
-														await CapabilitiesService.openBackgroundReliabilitySettings("home");
-													} catch (oemError) {
-														console.warn(
-															"Failed to open OEM settings:",
-															oemError,
-														);
-													}
-												}}
-												className="self-start rounded-lg bg-yellow-700 px-3 py-2"
-											>
-												<Text className="font-heading-semibold text-secondary text-white">
-													Open OEM Settings
-												</Text>
-											</TouchableOpacity>
-										)}
-									</View>
-								)}
-							</View>
+				{loginNudge ? (
+					<Card className="mx-md mb-md border border-[#D8E6FF] bg-[#F3F8FF]">
+						<Text className="font-heading-semibold text-card-title text-text">
+							{loginNudge.title}
+						</Text>
+						<Text className="mt-2 font-body text-secondary text-muted">
+							{loginNudge.body}
+						</Text>
+						<View className="mt-4 flex-row">
+							<TouchableOpacity
+								onPress={() => router.push("/(tabs)/settings")}
+								className="mr-2 rounded-xl bg-[#2563EB] px-4 py-2"
+							>
+								<Text className="font-heading-semibold text-secondary text-white">
+									{loginNudge.ctaLabel}
+								</Text>
+							</TouchableOpacity>
+							<TouchableOpacity
+								onPress={() => void LoginNudgeService.dismiss().then(refreshNudges)}
+								className="rounded-xl border border-slate-200 px-4 py-2"
+							>
+								<Text className="font-heading-semibold text-secondary text-muted">
+									Not now
+								</Text>
+							</TouchableOpacity>
 						</View>
 					</Card>
-				)}
+				) : null}
 
 				{trialInfo.isActive && !trialInfo.expired && (
 					<Card className="mx-md mb-xl border border-[#E7DFFD] bg-[#F7F3FF]">

@@ -24,6 +24,11 @@ export class TelemetryService {
   private static enabled = true;
   private static posthogClient: PostHog | null = null;
   private static anonymousId: string | null = null;
+  private static debugEvents: Array<{
+    event: string;
+    properties?: PostHogEventProperties;
+    capturedAt: number;
+  }> = [];
 
   static prime(): void {
     if (this.sentryPrimed || !sentryDsn) {
@@ -68,6 +73,7 @@ export class TelemetryService {
   }
 
   static capture(event: string, properties?: PostHogEventProperties): void {
+    this.recordDebugEvent(event, properties);
     if (!this.enabled || !this.posthogClient) {
       return;
     }
@@ -98,6 +104,7 @@ export class TelemetryService {
   }
 
   static async screen(name: string, properties?: PostHogEventProperties): Promise<void> {
+    this.recordDebugEvent(`screen:${name}`, properties);
     if (!this.enabled || !this.posthogClient) {
       return;
     }
@@ -106,6 +113,10 @@ export class TelemetryService {
   }
 
   static identify(distinctId: string, properties?: PostHogEventProperties): void {
+    this.recordDebugEvent('identify', {
+      distinct_id_preview: distinctId.slice(0, 12),
+      ...properties,
+    });
     if (!this.enabled || !this.posthogClient) {
       return;
     }
@@ -147,6 +158,7 @@ export class TelemetryService {
   }
 
   static captureException(error: Error | unknown, properties?: PostHogEventProperties): void {
+    this.recordDebugEvent('exception_captured', properties);
     if (!sentryDsn) {
       return;
     }
@@ -157,6 +169,14 @@ export class TelemetryService {
       }
       Sentry.captureException(error);
     });
+  }
+
+  static getDebugEvents(): Array<{
+    event: string;
+    properties?: PostHogEventProperties;
+    capturedAt: number;
+  }> {
+    return [...this.debugEvents];
   }
 
   private static async ensurePostHogClient(): Promise<void> {
@@ -177,6 +197,17 @@ export class TelemetryService {
     });
 
     await this.posthogClient.ready();
+  }
+
+  private static recordDebugEvent(event: string, properties?: PostHogEventProperties): void {
+    this.debugEvents = [
+      {
+        event,
+        properties,
+        capturedAt: Date.now(),
+      },
+      ...this.debugEvents,
+    ].slice(0, 40);
   }
 
   private static async getAnonymousId(): Promise<string> {

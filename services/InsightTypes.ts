@@ -4,6 +4,7 @@ export type InsightCategory =
   | 'pattern'
   | 'comparison'
   | 'intervention'
+  | 'success'
   | 'improvement'
   | 'behavioral';
 

@@ -348,7 +348,10 @@ export class HistoricalDataService {
         totalScreenTime > 0 ? Math.round((topAppMs / totalScreenTime) * 100) : 0,
       limitDismissals: blockEvents.filter(
         (event) =>
-          (event.blockType === 'soft' || event.blockType === 'limit') &&
+          (event.protectionContext === 'limit_mode' ||
+            event.blockType === 'soft_block' ||
+            event.blockType === 'soft' ||
+            event.blockType === 'limit') &&
           (event.action === 'cooldown_started' || event.action === 'bypassed')
       ).length,
       bypassCount: blockEvents.filter((event) => event.action === 'bypassed').length,

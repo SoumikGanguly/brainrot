@@ -65,14 +65,6 @@ export class NotificationService {
     return status === 'granted';
   }
 
-  static async scheduleUsageAlert(
-    _appName: string,
-    _usageTime: string,
-    _intensity: 'mild' | 'normal' | 'harsh' | 'critical'
-  ): Promise<boolean> {
-    return false;
-  }
-
   static async ensureDefaultSchedules(): Promise<void> {
     try {
       const notificationsEnabled = await database.getMeta('notifications_enabled');

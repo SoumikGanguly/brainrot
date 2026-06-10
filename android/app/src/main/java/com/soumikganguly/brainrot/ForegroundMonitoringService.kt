@@ -20,20 +20,34 @@ class ForegroundMonitoringService : Service() {
     private var notificationHandler: Handler? = null
     private var notificationRunnable: Runnable? = null
     private var usageChecker: UsageChecker? = null
+    private var foregroundStarted = false
 
     override fun onCreate() {
         super.onCreate()
         Log.d(TAG, "ForegroundMonitoringService created")
+        createNotificationChannel()
+        startForegroundSafely(buildBootstrapNotification())
         usageChecker = UsageChecker(this)
     }
     
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        createNotificationChannel()
-
-        startForeground(NOTIFICATION_ID, buildNotification())
+        startForegroundSafely(buildNotification())
         startNotificationLoop()
         
         return START_STICKY
+    }
+
+    private fun buildBootstrapNotification(): Notification {
+        return NotificationCompat.Builder(this, CHANNEL_ID)
+            .setContentTitle("Brainrot is monitoring")
+            .setContentText("Preparing your focus status")
+            .setSmallIcon(R.drawable.ic_notification)
+            .setPriority(NotificationCompat.PRIORITY_LOW)
+            .setSilent(true)
+            .setOnlyAlertOnce(true)
+            .setOngoing(true)
+            .setShowWhen(false)
+            .build()
     }
 
     private fun buildNotification(): Notification {
@@ -52,6 +66,23 @@ class ForegroundMonitoringService : Service() {
             .setOngoing(true)
             .setShowWhen(false)
             .build()
+    }
+
+    private fun startForegroundSafely(notification: Notification) {
+        try {
+            if (!foregroundStarted) {
+                startForeground(NOTIFICATION_ID, notification)
+                foregroundStarted = true
+                return
+            }
+
+            val notificationManager =
+                getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+            notificationManager.notify(NOTIFICATION_ID, notification)
+        } catch (error: Exception) {
+            Log.e(TAG, "Failed to promote monitoring service to foreground", error)
+            stopSelf()
+        }
     }
 
     private fun formatDuration(durationMs: Long): String {
@@ -121,6 +152,7 @@ class ForegroundMonitoringService : Service() {
     override fun onDestroy() {
         super.onDestroy()
         Log.d(TAG, "Service destroyed")
+        foregroundStarted = false
         stopNotificationLoop()
     }
     
