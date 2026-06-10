@@ -3,7 +3,7 @@ import { Ionicons } from "@expo/vector-icons";
 import * as Google from "expo-auth-session/providers/google";
 import { router } from "expo-router";
 import type { User } from "firebase/auth";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
 	Alert,
 	AppState,
@@ -14,7 +14,6 @@ import {
 	Text,
 	TouchableOpacity,
 	View,
-	type AlertButton,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 
@@ -23,17 +22,13 @@ import FocusEducationModal, {
 	type FocusEducationStep,
 } from "@/components/FocusEducationModal";
 import { Header } from "@/components/Header";
-import PermissionRecoveryCard from "@/components/PermissionRecoveryCard";
+import PermissionCoachBottomSheet from "@/components/PermissionCoachBottomSheet";
 import SkeletonBlock from "@/components/SkeletonBlock";
 import { AuthService } from "@/services/AuthService";
 import { CapabilitiesService } from "@/services/CapabilitiesService";
 import { DailyInsightsService } from "@/services/DailyInsightsService";
 import { LoginNudgeService, type LoginNudge } from "@/services/LoginNudgeService";
 import { MonitoringDiagnosticsService } from "@/services/MonitoringDiagnosticsService";
-import {
-	PermissionHealthService,
-	type PermissionNudge,
-} from "@/services/PermissionHealthService";
 import type { InsightCard } from "@/services/InsightTypes";
 import { TelemetryService } from "@/services/TelemetryService";
 import {
@@ -51,15 +46,7 @@ type PermissionState = {
 	accessibility: boolean | null;
 	notifications: boolean | null;
 };
-type ViewApp = {
-	packageName: string;
-	appName: string;
-	isRecommended: boolean;
-	isCurrentlyMonitored: boolean;
-};
-
 export default function SettingsScreen() {
-	const [apps, setApps] = useState<ViewApp[]>([]);
 	const [permissions, setPermissions] = useState<PermissionState>({
 		usage: false,
 		overlay: false,
@@ -71,9 +58,6 @@ export default function SettingsScreen() {
 	);
 	const [accountActionLoading, setAccountActionLoading] = useState(false);
 	const [state, setState] = useState({
-		monitoringEnabled: false,
-		backgroundChecksEnabled: true,
-		realtimeMonitoringEnabled: false,
 		analyticsEnabled: true,
 		lastCloudSyncAt: 0,
 	});
@@ -90,10 +74,22 @@ export default function SettingsScreen() {
 		useState<FocusEducationStep>("accessibility");
 	const [manufacturerInfo, setManufacturerInfo] =
 		useState<ManufacturerPermissionInfo | null>(null);
-	const [permissionNudges, setPermissionNudges] = useState<PermissionNudge[]>([]);
 	const [loginNudge, setLoginNudge] = useState<LoginNudge | null>(null);
 	const [monitoringDiagnostics, setMonitoringDiagnostics] =
 		useState<MonitoringDiagnostics | null>(null);
+	const [settingsHelperSheet, setSettingsHelperSheet] = useState<{
+		title: string;
+		body: string;
+		helperText: string;
+		primaryLabel: string;
+		secondaryLabel?: string;
+		onPrimary: () => void;
+		onSecondary?: () => void;
+		tone?: "accent" | "warning";
+	} | null>(null);
+	const pendingSettingsHelperRef = useRef<
+		"notifications" | "usage" | "accessibility" | "overlay" | null
+	>(null);
 	const [qaInsightMeta, setQaInsightMeta] = useState({
 		summarySource: "missing",
 		integrityDeltaMs: 0,
@@ -106,7 +102,7 @@ export default function SettingsScreen() {
 			insights: InsightCard[];
 		}[]
 	>([]);
-	const [analyticsLabelTapCount, setAnalyticsLabelTapCount] = useState(0);
+	const [, setAnalyticsLabelTapCount] = useState(0);
 	const [request, response, promptAsync] = Google.useIdTokenAuthRequest({
 		webClientId: firebaseGoogleClientIds.webClientId,
 		androidClientId: firebaseGoogleClientIds.androidClientId,
@@ -183,27 +179,21 @@ export default function SettingsScreen() {
 		}
 		try {
 			const [
-				installedApps,
-				monitoredPackages,
 				usage,
 				overlay,
 				accessibility,
 				notifications,
 				nextManufacturerInfo,
-				permissionHealth,
 				nextLoginNudge,
 				nextDiagnostics,
 				todaySummary,
 				todayInsights,
 			] = await Promise.all([
-				UnifiedUsageService.getInstalledApps(),
-				database.getMonitoredPackages(),
 				CapabilitiesService.hasUsageAccess(),
 				CapabilitiesService.hasOverlayPermission(),
 				CapabilitiesService.hasAccessibilityPermission(),
 				CapabilitiesService.hasNotificationPermission(),
 				UnifiedUsageService.getManufacturerInfo(),
-				PermissionHealthService.getPermissionHealth().catch(() => null),
 				LoginNudgeService.getLoginNudge().catch(() => null),
 				MonitoringDiagnosticsService.getDiagnostics().catch(() => null),
 				database.getDailySummary(new Date().toISOString().split("T")[0]),
@@ -214,24 +204,24 @@ export default function SettingsScreen() {
 					})
 					.catch(() => null),
 			]);
-
-			setApps(
-				installedApps
-					.map((app) => ({
-						packageName: app.packageName,
-						appName: app.appName,
-						isRecommended: !!(app as { isRecommended?: boolean }).isRecommended,
-						isCurrentlyMonitored: monitoredPackages.includes(app.packageName),
-					}))
-					.sort((a, b) => a.appName.localeCompare(b.appName)),
-			);
 			setPermissions({ usage, overlay, accessibility, notifications });
+			const pendingHelper = pendingSettingsHelperRef.current;
+			const pendingSatisfied =
+				(pendingHelper === "notifications" && notifications) ||
+				(pendingHelper === "usage" && usage) ||
+				(pendingHelper === "accessibility" && accessibility) ||
+				(pendingHelper === "overlay" && overlay);
+			if (pendingHelper && pendingSatisfied) {
+				pendingSettingsHelperRef.current = null;
+				setTimeout(() => {
+					void maybeShowSettingsHelper(pendingHelper);
+				}, 200);
+			}
 			setManufacturerInfo(
 				nextManufacturerInfo?.needsSpecialPermission
 					? nextManufacturerInfo
 					: null,
 			);
-			setPermissionNudges(permissionHealth?.nudges || []);
 			setLoginNudge(nextLoginNudge?.shouldShow ? nextLoginNudge : null);
 			setMonitoringDiagnostics(nextDiagnostics);
 			setQaInsightMeta({
@@ -240,12 +230,6 @@ export default function SettingsScreen() {
 				insightSource: todayInsights?.insightLoadState || "missing",
 			});
 			setState({
-				monitoringEnabled:
-					(await database.getMeta("monitoring_enabled")) === "true",
-				backgroundChecksEnabled:
-					(await database.getMeta("background_checks_enabled")) !== "false",
-				realtimeMonitoringEnabled:
-					(await database.getMeta("realtime_monitoring_enabled")) === "true",
 				analyticsEnabled:
 					(await database.getMeta("analytics_enabled")) !== "false",
 				lastCloudSyncAt: parseInt(
@@ -257,75 +241,6 @@ export default function SettingsScreen() {
 			setLoading(false);
 			setInitialLoadComplete(true);
 		}
-	};
-
-	const guardedUsageToggle = async (work: () => Promise<void>) => {
-		const granted = await CapabilitiesService.ensureUsageAccess("settings");
-		if (!granted) {
-			Alert.alert(
-				"Usage Access Required",
-				"This feature stays off until Usage Access is enabled.",
-			);
-			await refresh();
-			return;
-		}
-		await work();
-	};
-
-	const maybeShowBackgroundGuidance = async () => {
-		const guidance =
-			await CapabilitiesService.getBackgroundReliabilityGuidance();
-		if (!guidance.needsManufacturerGuidance) {
-			return;
-		}
-
-		const buttons: AlertButton[] = [{ text: "OK" }];
-		if (guidance.canOpenDirectly) {
-			buttons.unshift({
-				text: "Open OEM Settings",
-				onPress: () => {
-					void CapabilitiesService.openBackgroundReliabilitySettings("settings");
-				},
-			});
-		}
-
-		Alert.alert(
-			guidance.title || "Background Reliability",
-			guidance.instructions ||
-				"Your phone may require extra battery optimization changes for reliable background checks.",
-			buttons,
-		);
-	};
-
-	const updateMonitoringToggle = async (
-		key:
-			| "monitoring_enabled"
-			| "background_checks_enabled"
-			| "realtime_monitoring_enabled",
-		value: boolean,
-	) => {
-		if (value) {
-			await guardedUsageToggle(async () => {
-				await database.setMeta(key, "true");
-				if (key !== "monitoring_enabled") {
-					await database.setMeta("monitoring_enabled", "true");
-				}
-				const service = UnifiedUsageService.getInstance();
-				await service.startMonitoring();
-				await service.applyMonitoringSettings();
-				if (key !== "monitoring_enabled") {
-					await maybeShowBackgroundGuidance();
-				}
-			});
-		} else {
-			await database.setMeta(key, "false");
-			if (key === "monitoring_enabled") {
-				await UnifiedUsageService.getInstance().stopMonitoring();
-			} else {
-				await UnifiedUsageService.getInstance().applyMonitoringSettings();
-			}
-		}
-		await refresh();
 	};
 
 	const previewBlockingScreen = async (mode: "soft" | "hard") => {
@@ -662,6 +577,128 @@ export default function SettingsScreen() {
 		setFocusEducationPreviewStep("accessibility");
 	};
 
+	const maybeShowSettingsHelper = async (
+		helperKey: "notifications" | "usage" | "accessibility" | "overlay",
+	) => {
+		const seenKey = `settings_permission_helper_seen_${helperKey}`;
+		if ((await database.getMeta(seenKey)) === "true") {
+			return;
+		}
+
+		const permissionCopy = {
+			notifications: {
+				title: "Notifications are ready",
+				body: "Brainrot can now send replay reminders and keep the fixed status notification visible while tracking.",
+				helperText:
+					manufacturerInfo?.needsSpecialPermission &&
+					monitoringDiagnostics?.lockScreenNotificationGuidanceNeeded
+						? "If your phone hides the fixed notification on the lock screen, allow lock-screen notifications for Brainrot too."
+						: "You can manage reminder intensity later from Settings if you want fewer nudges.",
+			},
+			usage: {
+				title: "Score and replay can now update",
+				body: "With app usage access enabled, Brainrot can rebuild your daily score, replay, and progress view from Android usage data.",
+				helperText:
+					"Keep monitoring on so Brainrot can refresh this data even when the app is closed.",
+			},
+			accessibility: {
+				title: "Protection is ready",
+				body: "Accessibility now lets Lock Mode and Focus Sessions catch distractions as they open.",
+				helperText:
+					manufacturerInfo?.needsSpecialPermission
+						? "Your phone may still need background or autostart help for the protection flow to stay reliable."
+						: "You can preview the blocking flow anytime from the Focus tab.",
+			},
+			overlay: {
+				title: "Pause screens can appear now",
+				body: "Brainrot can now show Limit Mode pause screens and other protective overlays over distracting apps.",
+				helperText:
+					"Limit Mode works best when battery restrictions are relaxed so the overlay service can stay ready.",
+			},
+		}[helperKey];
+
+		await database.setMeta(seenKey, "true");
+		await CapabilitiesService.recordPermissionHelperExposure("settings");
+		setSettingsHelperSheet({
+			...permissionCopy,
+			primaryLabel: "Got it",
+			onPrimary: () => {
+				setSettingsHelperSheet(null);
+			},
+		});
+	};
+
+	const handlePermissionGrant = async (
+		helperKey: "notifications" | "usage" | "accessibility" | "overlay",
+		action: () => Promise<boolean>,
+	) => {
+		pendingSettingsHelperRef.current = helperKey;
+		const granted = await action();
+		await refresh();
+		if (granted) {
+			pendingSettingsHelperRef.current = null;
+			await maybeShowSettingsHelper(helperKey);
+		}
+	};
+
+	const openReliabilityHelper = (topic: "battery" | "oem" | "lockscreen") => {
+		if (topic === "battery") {
+			setSettingsHelperSheet({
+				title: "Keep background tracking alive",
+				body: "Battery restrictions can pause Brainrot in the background, which delays score, replay, and fixed-notification updates.",
+				helperText:
+					"Allow unrestricted battery for Brainrot so background checks stay reliable all day.",
+				primaryLabel: "Open battery settings",
+				secondaryLabel: "Later",
+				tone: "warning",
+				onPrimary: () => {
+					setSettingsHelperSheet(null);
+					void CapabilitiesService.requestBatteryOptimizationExemption("settings").then(
+						() => void refresh(),
+					);
+				},
+				onSecondary: () => setSettingsHelperSheet(null),
+			});
+			return;
+		}
+
+		if (topic === "lockscreen") {
+			setSettingsHelperSheet({
+				title: "Show the fixed notification on the lock screen",
+				body: "Some phones hide Brainrot notifications on the lock screen until you allow them manually.",
+				helperText:
+					"Open your phone's app settings for Brainrot and allow lock-screen notifications if the fixed status notification is missing there.",
+				primaryLabel: manufacturerInfo?.canOpenDirectly ? "Open app settings" : "Review steps",
+				secondaryLabel: "Later",
+				onPrimary: () => {
+					setSettingsHelperSheet(null);
+					void CapabilitiesService.openBackgroundReliabilitySettings("settings");
+				},
+				onSecondary: () => setSettingsHelperSheet(null),
+			});
+			return;
+		}
+
+		setSettingsHelperSheet({
+			title: manufacturerInfo?.title || "Keep Brainrot running reliably",
+			body: "Some phones need extra background or autostart settings even after the main permissions are granted.",
+			helperText:
+				manufacturerInfo?.instructions ||
+				"Review your phone-specific settings so Brainrot can keep tracking and blocking reliably.",
+			primaryLabel: manufacturerInfo?.canOpenDirectly ? "Open OEM settings" : "Got it",
+			secondaryLabel: manufacturerInfo?.canOpenDirectly ? "Later" : undefined,
+			onPrimary: () => {
+				setSettingsHelperSheet(null);
+				if (manufacturerInfo?.canOpenDirectly) {
+					void CapabilitiesService.openBackgroundReliabilitySettings("settings");
+				}
+			},
+			onSecondary: manufacturerInfo?.canOpenDirectly
+				? () => setSettingsHelperSheet(null)
+				: undefined,
+		});
+	};
+
 	return (
 		<SafeAreaView className="flex-1 bg-bg">
 			<FocusEducationModal
@@ -674,6 +711,18 @@ export default function SettingsScreen() {
 				onClose={closeFocusEducationPreview}
 				onPrimary={advanceFocusEducationPreview}
 				onSecondary={closeFocusEducationPreview}
+			/>
+			<PermissionCoachBottomSheet
+				visible={settingsHelperSheet !== null}
+				title={settingsHelperSheet?.title || ""}
+				body={settingsHelperSheet?.body || ""}
+				helperText={settingsHelperSheet?.helperText || ""}
+				primaryLabel={settingsHelperSheet?.primaryLabel || "Got it"}
+				secondaryLabel={settingsHelperSheet?.secondaryLabel}
+				onClose={() => setSettingsHelperSheet(null)}
+				onPrimary={() => settingsHelperSheet?.onPrimary()}
+				onSecondary={settingsHelperSheet?.onSecondary}
+				tone={settingsHelperSheet?.tone || "accent"}
 			/>
 			<Modal
 				visible={insightsPreviewVisible}
@@ -903,89 +952,87 @@ export default function SettingsScreen() {
 					</Card>
 				) : null}
 
-				{permissionNudges.map((nudge) => (
-					<PermissionRecoveryCard
-						key={nudge.id}
-						nudge={nudge}
-						onFix={() =>
-							void PermissionHealthService.runNudgeAction(nudge).finally(refresh)
-						}
-						onRecheck={() => void refresh()}
-						onDismiss={() =>
-							void PermissionHealthService.dismissNudge(nudge.id).then(refresh)
-						}
-					/>
-				))}
-
-				<Card className="mx-md mb-md">
-					<Text className="mb-sm font-heading-bold text-section text-text">
-						Focus Tracking
-					</Text>
-					<ToggleRow
-						label="Enable Monitoring"
-						value={state.monitoringEnabled}
-						onValueChange={(value) =>
-							updateMonitoringToggle("monitoring_enabled", value)
-						}
-					/>
-					<ToggleRow
-						label="Background Checks"
-						value={state.backgroundChecksEnabled}
-						onValueChange={(value) =>
-							updateMonitoringToggle("background_checks_enabled", value)
-						}
-					/>
-					<ToggleRow
-						label="Real-time Monitoring"
-						value={state.realtimeMonitoringEnabled}
-						onValueChange={(value) =>
-							updateMonitoringToggle("realtime_monitoring_enabled", value)
-						}
-					/>
-					<Text className="mt-sm font-body text-secondary text-muted">
-						Background reliability may require battery optimization exemptions
-						on some devices.
-					</Text>
-				</Card>
-
 				<Card className="mx-md mb-md">
 					<Text className="mb-sm font-heading-bold text-section text-text">
 						Permissions
 					</Text>
 					<PermissionRow
-						label="Notifications"
+						label="Allow notifications"
+						description="Shows replay reminders and the fixed focus status notification."
 						granted={permissions.notifications}
 						onPress={() =>
-							CapabilitiesService.ensureNotificationPermission().then(
-								() => void refresh(),
+							void handlePermissionGrant("notifications", () =>
+								CapabilitiesService.ensureNotificationPermission("settings"),
 							)
 						}
 					/>
 					<PermissionRow
-						label="Usage Access"
+						label="App usage access"
+						description="Lets Brainrot build your score and replay from Android usage data."
 						granted={permissions.usage}
 						onPress={() =>
-							CapabilitiesService.ensureUsageAccess("settings").then(() => void refresh())
+							void handlePermissionGrant("usage", () =>
+								CapabilitiesService.ensureUsageAccess("settings"),
+							)
 						}
 					/>
 					<PermissionRow
-						label="Accessibility"
+						label="Protection access"
+						description="Needed for Lock Mode and Focus Sessions to catch distractions as they open."
 						granted={permissions.accessibility}
 						onPress={() =>
-							CapabilitiesService.ensureAccessibilityPermission("settings").then(
-								() => void refresh(),
+							void handlePermissionGrant("accessibility", () =>
+								CapabilitiesService.ensureAccessibilityPermission("settings"),
 							)
 						}
 					/>
 					<PermissionRow
-						label="Display Over Other Apps"
+						label="Show pause screens over apps"
+						description="Needed for Limit Mode pause screens and protective overlays."
 						granted={permissions.overlay}
 						onPress={() =>
-							CapabilitiesService.ensureOverlayPermission("settings").then(
-								() => void refresh(),
-							)
+							void handlePermissionGrant("overlay", async () => {
+								await CapabilitiesService.ensureOverlayPermission("settings");
+								return CapabilitiesService.hasOverlayPermission();
+							})
 						}
 					/>
+					{(monitoringDiagnostics?.batteryOptimizationIgnored === false ||
+						manufacturerInfo?.needsSpecialPermission ||
+						monitoringDiagnostics?.lockScreenNotificationGuidanceNeeded) && (
+						<View className="mt-sm rounded-2xl border border-[#E7DFFD] bg-[#FAF7FF] px-4 py-4">
+							<Text className="font-heading-semibold text-card-title text-text">
+								Phone-specific help
+							</Text>
+							<Text className="mt-1 font-body text-secondary text-muted">
+								Your core permissions are fine. These extra steps only help your phone keep tracking and notifications reliable.
+							</Text>
+							{monitoringDiagnostics?.batteryOptimizationIgnored === false ? (
+								<PermissionAdviceRow
+									label="Allow unrestricted battery"
+									description="Stops your phone from pausing Brainrot in the background."
+									actionLabel="Review"
+									onPress={() => openReliabilityHelper("battery")}
+								/>
+							) : null}
+							{manufacturerInfo?.needsSpecialPermission ? (
+								<PermissionAdviceRow
+									label="Review phone-specific background steps"
+									description="Some OEMs still need autostart, pop-up, or background allowances after the main permissions are granted."
+									actionLabel={manufacturerInfo.canOpenDirectly ? "Open" : "Review"}
+									onPress={() => openReliabilityHelper("oem")}
+								/>
+							) : null}
+							{monitoringDiagnostics?.lockScreenNotificationGuidanceNeeded ? (
+								<PermissionAdviceRow
+									label="Allow lock-screen notifications"
+									description="Useful if the fixed Brainrot notification disappears on your lock screen."
+									actionLabel="Review"
+									onPress={() => openReliabilityHelper("lockscreen")}
+								/>
+							) : null}
+						</View>
+					)}
 				</Card>
 
 				<Card className="mx-md mb-md">
@@ -1112,11 +1159,23 @@ export default function SettingsScreen() {
 									label="Battery"
 									value={`${monitoringDiagnostics.batteryPercent}% · ${
 										monitoringDiagnostics.batteryCharging ? "charging" : "not charging"
+									} · ${
+										monitoringDiagnostics.batteryOptimizationIgnored
+											? "unrestricted"
+											: "optimized"
 									}`}
 								/>
 								<DiagnosticRow
 									label="Query Counts"
 									value={`usage ${monitoringDiagnostics.usageQueryCount} · events ${monitoringDiagnostics.eventQueryCount} · fg ${monitoringDiagnostics.foregroundQueryCount}`}
+								/>
+								<DiagnosticRow
+									label="Last Realtime Event"
+									value={`${
+										monitoringDiagnostics.lastRealtimeEventType || "none"
+									} · ${
+										monitoringDiagnostics.lastRealtimeEventPackage || "n/a"
+									} · repairs ${monitoringDiagnostics.sessionRepairCount}`}
 								/>
 								<DiagnosticRow
 									label="Last Blocking Failure"
@@ -1214,19 +1273,30 @@ export default function SettingsScreen() {
 
 function PermissionRow({
 	label,
+	description,
 	granted,
 	onPress,
+	actionLabel = "Grant",
 }: {
 	label: string;
+	description?: string;
 	granted: boolean | null;
 	onPress: () => void;
+	actionLabel?: string;
 }) {
 	return (
 		<View className="py-sm border-b border-gray-100 last:border-b-0">
 			<View className="flex-row items-center justify-between">
-				<Text className="font-heading-semibold text-card-title text-text">
-					{label}
-				</Text>
+				<View className="flex-1 pr-sm">
+					<Text className="font-heading-semibold text-card-title text-text">
+						{label}
+					</Text>
+					{description ? (
+						<Text className="mt-1 font-body text-secondary text-muted">
+							{description}
+						</Text>
+					) : null}
+				</View>
 				{granted === null ? (
 					<SkeletonBlock className="h-10 w-20 rounded-lg" />
 				) : granted ? (
@@ -1237,10 +1307,45 @@ function PermissionRow({
 						className="rounded-lg bg-accent px-4 py-2"
 					>
 						<Text className="font-heading-semibold text-secondary text-white">
-							Grant
+							{actionLabel}
 						</Text>
 					</TouchableOpacity>
 				)}
+			</View>
+		</View>
+	);
+}
+
+function PermissionAdviceRow({
+	label,
+	description,
+	actionLabel,
+	onPress,
+}: {
+	label: string;
+	description: string;
+	actionLabel: string;
+	onPress: () => void;
+}) {
+	return (
+		<View className="border-t border-[#E7DFFD] pt-4 first:border-t-0 first:pt-3">
+			<View className="flex-row items-center justify-between">
+				<View className="flex-1 pr-sm">
+					<Text className="font-heading-semibold text-card-title text-text">
+						{label}
+					</Text>
+					<Text className="mt-1 font-body text-secondary text-muted">
+						{description}
+					</Text>
+				</View>
+				<TouchableOpacity
+					onPress={onPress}
+					className="rounded-lg border border-[#D9CCFF] bg-white px-4 py-2"
+				>
+					<Text className="font-heading-semibold text-secondary text-accent">
+						{actionLabel}
+					</Text>
+				</TouchableOpacity>
 			</View>
 		</View>
 	);
@@ -1269,11 +1374,13 @@ function compactJson(value: string): string {
 
 function ToggleRow({
 	label,
+	description,
 	value,
 	onValueChange,
 	onLabelPress,
 }: {
 	label: string;
+	description?: string;
 	value: boolean;
 	onValueChange: (value: boolean) => void;
 	onLabelPress?: () => void;
@@ -1281,17 +1388,24 @@ function ToggleRow({
 	return (
 		<View className="py-sm border-b border-gray-100 last:border-b-0">
 			<View className="flex-row items-center justify-between">
-				{onLabelPress ? (
-					<TouchableOpacity onPress={onLabelPress} activeOpacity={0.85}>
+				<View className="flex-1 pr-sm">
+					{onLabelPress ? (
+						<TouchableOpacity onPress={onLabelPress} activeOpacity={0.85}>
+							<Text className="font-heading-semibold text-card-title text-text">
+								{label}
+							</Text>
+						</TouchableOpacity>
+					) : (
 						<Text className="font-heading-semibold text-card-title text-text">
 							{label}
 						</Text>
-					</TouchableOpacity>
-				) : (
-					<Text className="font-heading-semibold text-card-title text-text">
-						{label}
-					</Text>
-				)}
+					)}
+					{description ? (
+						<Text className="mt-1 font-body text-secondary text-muted">
+							{description}
+						</Text>
+					) : null}
+				</View>
 				<Switch
 					value={value}
 					onValueChange={onValueChange}

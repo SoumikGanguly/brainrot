@@ -9,6 +9,7 @@ import {
 	AppStateStatus,
 	Dimensions,
 	Image,
+	ImageBackground,
 	InteractionManager,
 	Modal,
 	ScrollView,
@@ -28,7 +29,6 @@ import { database } from "../../services/database";
 
 import { CapabilitiesService } from "@/services/CapabilitiesService";
 import {
-	DailyInsightsService,
 	type ReplayEntry,
 } from "@/services/DailyInsightsService";
 import {
@@ -49,6 +49,7 @@ import {
 	ManufacturerPermissionInfo,
 	UnifiedUsageService,
 } from "@/services/UnifiedUsageService";
+import { ReplayLoaderService } from "@/services/ReplayLoaderService";
 import {
 	calculateBrainScore,
 	getScoreColor,
@@ -458,6 +459,34 @@ function buildMonthlyAppStats(
 		.sort((a, b) => b.totalTimeMs - a.totalTimeMs);
 }
 
+function buildDayDetailPlaceholder(
+	date: string,
+	cachedDay?: DailyData,
+): DayDetailData {
+	const topApp = cachedDay?.apps[0];
+
+	return {
+		date,
+		totalScreenTime: cachedDay?.totalScreenTime ?? 0,
+		brainScore: cachedDay?.brainScore ?? 0,
+		brainHealthStatus: cachedDay?.brainHealthStatus,
+		apps: cachedDay?.apps ?? [],
+		totalMonitoredOpens: cachedDay?.totalMonitoredOpens ?? 0,
+		replayEntries: [],
+		biggestTimeLeak: topApp
+			? {
+					packageName: topApp.packageName,
+					appName: topApp.appName,
+					totalTimeMs: topApp.totalTimeMs,
+					percentage:
+						(cachedDay?.totalScreenTime ?? 0) > 0
+							? Math.round((topApp.totalTimeMs / cachedDay!.totalScreenTime) * 100)
+							: 0,
+				}
+			: null,
+	};
+}
+
 export default function Calendar() {
 	const router = useRouter();
 	const [historicalData, setHistoricalData] = useState<DailyData[]>([]);
@@ -468,6 +497,7 @@ export default function Calendar() {
 	const [periodInsightIndex, setPeriodInsightIndex] = useState(0);
 	const [showModal, setShowModal] = useState(false);
 	const [showAppsSheet, setShowAppsSheet] = useState(false);
+	const [selectedDayLoading, setSelectedDayLoading] = useState(false);
 	const [loading, setLoading] = useState(true);
 	const [currentMonth, setCurrentMonth] = useState(new Date());
 	const [statsView, setStatsView] = useState<"week" | "month">("week");
@@ -487,7 +517,9 @@ export default function Calendar() {
 	);
 	const pendingPermissionCheck = useRef(false);
 	const appStateRef = useRef<AppStateStatus>(AppState.currentState);
+	const selectedDayRequestRef = useRef(0);
 	const coordinator = HistoryRefreshCoordinator.getInstance();
+	const statsPageWidth = Math.max(statsCardWidth - 32, 1);
 	const statsPagerRef = useRef<ScrollView | null>(null);
 	const trackedInsightViewRef = useRef<string | null>(null);
 	const selectedPeriodInsight = periodInsightDeck[periodInsightIndex] || null;
@@ -609,8 +641,10 @@ export default function Calendar() {
 			}
 		};
 
-		checkPermissionAndLoadData();
-		loadManufacturerInfo();
+		void Promise.resolve().then(() => {
+			void checkPermissionAndLoadData();
+			void loadManufacturerInfo();
+		});
 
 		const unsubscribeCoordinator = coordinator.subscribe(
 			(event: HistoryRefreshEvent) => {
@@ -679,10 +713,10 @@ export default function Calendar() {
 		}
 
 		statsPagerRef.current.scrollTo({
-			x: statsView === "week" ? 0 : statsCardWidth,
+			x: statsView === "week" ? 0 : statsPageWidth,
 			animated: true,
 		});
-	}, [statsCardWidth, statsView]);
+	}, [statsCardWidth, statsPageWidth, statsView]);
 
 	const syncStatsView = (
 		nextView: "week" | "month",
@@ -696,61 +730,60 @@ export default function Calendar() {
 		}
 
 		statsPagerRef.current.scrollTo({
-			x: nextView === "week" ? 0 : statsCardWidth,
+			x: nextView === "week" ? 0 : statsPageWidth,
 			animated,
 		});
 	};
 
-	const openDayDetail = async (dateStr: string) => {
-		try {
-			const cachedDay = historicalData.find((entry) => entry.date === dateStr);
-			if (cachedDay) {
-				setSelectedDay({
-					...cachedDay,
-					totalMonitoredOpens: 0,
-					replayEntries: [],
-					biggestTimeLeak: cachedDay.apps[0]
-						? {
-								packageName: cachedDay.apps[0].packageName,
-								appName: cachedDay.apps[0].appName,
-								totalTimeMs: cachedDay.apps[0].totalTimeMs,
-								percentage:
-									cachedDay.totalScreenTime > 0
-										? Math.round(
-												(cachedDay.apps[0].totalTimeMs /
-													cachedDay.totalScreenTime) *
-													100,
-											)
-										: 0,
-							}
-						: null,
-				});
-				setShowModal(true);
-			}
+	const closeDayDetail = () => {
+		selectedDayRequestRef.current += 1;
+		setSelectedDayLoading(false);
+		setShowModal(false);
+	};
 
-			const insights =
-				await DailyInsightsService.getInstance().getDailyInsights(dateStr, {
-					forceSummaryRefresh: !cachedDay,
-					allowInsightRegeneration: false,
-					preferPersistedInsights: true,
-				});
-			const summary = insights.summary;
+	const openDayDetail = async (dateStr: string) => {
+		const requestId = selectedDayRequestRef.current + 1;
+		selectedDayRequestRef.current = requestId;
+		const cachedDay = historicalData.find((entry) => entry.date === dateStr);
+		const placeholder = buildDayDetailPlaceholder(dateStr, cachedDay);
+
+		setSelectedDay(placeholder);
+		setSelectedDayLoading(true);
+		setShowModal(true);
+
+		try {
+			const replayDay = await ReplayLoaderService.loadDay(dateStr, {
+				selectedMoment: undefined,
+			});
+			if (selectedDayRequestRef.current !== requestId) {
+				return;
+			}
+			const summary = replayDay.summary;
 
 			setSelectedDay({
 				date: dateStr,
-				totalScreenTime: summary?.totalScreenTime || 0,
+				totalScreenTime: summary?.totalScreenTime ?? 0,
 				brainScore: summary?.focusScore ?? summary?.brainScore ?? 0,
 				brainHealthStatus: summary?.brainHealthStatus,
-				apps: summary?.apps || [],
+				apps: summary?.apps ?? [],
 				totalMonitoredOpens:
-					summary?.totalMonitoredOpens ?? insights.replayEntries.length,
-				replayEntries: insights.replayEntries,
-				biggestTimeLeak: insights.biggestTimeLeak,
+					summary?.totalMonitoredOpens ?? replayDay.replayEntries.length,
+				replayEntries: replayDay.replayEntries,
+				biggestTimeLeak: replayDay.biggestTimeLeak,
 			} as DayDetailData);
-			setShowModal(true);
 		} catch (error) {
+			if (selectedDayRequestRef.current !== requestId) {
+				return;
+			}
 			console.error("Error loading day detail:", error);
+			if (!cachedDay) {
+				setShowModal(false);
+			}
 			Alert.alert("Error", "Could not load day details. Please try again.");
+		} finally {
+			if (selectedDayRequestRef.current === requestId) {
+				setSelectedDayLoading(false);
+			}
 		}
 	};
 
@@ -925,8 +958,8 @@ export default function Calendar() {
 
 				week.push({
 					date: dateStr,
-					score: dayData?.brainScore || (isCurrentMonth ? 100 : 0),
-					screenTime: dayData?.totalScreenTime || 0,
+					score: dayData?.brainScore ?? (isCurrentMonth ? 100 : 0),
+					screenTime: dayData?.totalScreenTime ?? 0,
 					isToday: dateStr === formatLocalDate(today),
 					hasData: !!dayData,
 					dayOfMonth: currentDate.getDate(),
@@ -974,7 +1007,7 @@ export default function Calendar() {
 						0,
 					);
 					total = total || rawTotal;
-					score = score || calculateBrainScore(rawTotal);
+					score = score ?? calculateBrainScore(rawTotal);
 				}
 
 				const screenTimeMinutes = Math.round(total / (1000 * 60));
@@ -1229,28 +1262,24 @@ export default function Calendar() {
 					}}
 				>
 					<View className="mb-md flex-row rounded-full bg-slate-100 p-1">
-						<TouchableOpacity
-							onPress={() => syncStatsView("week")}
+						<View
 							className={`flex-1 rounded-full px-4 py-3 ${statsView === "week" ? "bg-white" : ""}`}
-							activeOpacity={0.9}
 						>
 							<Text
 								className={`text-center font-heading-semibold ${statsView === "week" ? "text-accent" : "text-slate-500"}`}
 							>
 								This Week
 							</Text>
-						</TouchableOpacity>
-						<TouchableOpacity
-							onPress={() => syncStatsView("month")}
+						</View>
+						<View
 							className={`flex-1 rounded-full px-4 py-3 ${statsView === "month" ? "bg-white" : ""}`}
-							activeOpacity={0.9}
 						>
 							<Text
 								className={`text-center font-heading-semibold ${statsView === "month" ? "text-accent" : "text-slate-500"}`}
 							>
 								This Month
 							</Text>
-						</TouchableOpacity>
+						</View>
 					</View>
 					<ScrollView
 						ref={statsPagerRef}
@@ -1267,7 +1296,7 @@ export default function Calendar() {
 							}
 
 							const nextView =
-								event.nativeEvent.contentOffset.x >= statsCardWidth / 2
+								event.nativeEvent.contentOffset.x >= statsPageWidth / 2
 									? "month"
 									: "week";
 							if (nextView !== statsView) {
@@ -1289,11 +1318,11 @@ export default function Calendar() {
 						] as const).map((item) => (
 							<TouchableOpacity
 								key={item.key}
-								style={{ width: Math.max(statsCardWidth, 1) }}
+								style={{ width: statsPageWidth }}
 								className="px-2"
 								activeOpacity={0.96}
 								disabled={item.key !== statsView}
-								onPress={() => openPeriodInsight(statsView)}
+								onPress={() => openPeriodInsight(item.key)}
 							>
 								<View className="flex-row justify-between">
 									<View className="items-center flex-1">
@@ -1675,7 +1704,7 @@ export default function Calendar() {
 				visible={showModal}
 				animationType="slide"
 				presentationStyle="pageSheet"
-				onRequestClose={() => setShowModal(false)}
+				onRequestClose={closeDayDetail}
 			>
 				<SafeAreaView className="flex-1 bg-bg">
 					<View className="flex-row items-center justify-between p-md border-b border-gray-200">
@@ -1698,7 +1727,7 @@ export default function Calendar() {
 							)}
 						</View>
 						<TouchableOpacity
-							onPress={() => setShowModal(false)}
+							onPress={closeDayDetail}
 							className="p-sm"
 						>
 							<Ionicons name="close" size={24} color="#64748B" />
@@ -1707,7 +1736,11 @@ export default function Calendar() {
 
 					{selectedDay && (
 						<ScrollView className="flex-1 p-md">
-							<Card className="mb-md">
+							{selectedDayLoading ? (
+								<DayDetailSkeleton />
+							) : (
+								<>
+									<Card className="mb-md">
 								<View className="flex-row items-center justify-between">
 									<View className="flex-1 pr-md">
 										<Text className="font-heading-bold text-section text-text">
@@ -1951,6 +1984,8 @@ export default function Calendar() {
 									})
 								)}
 							</Card>
+								</>
+							)}
 						</ScrollView>
 					)}
 				</SafeAreaView>
@@ -2050,68 +2085,119 @@ function CalendarPeriodInsightScreen({
 			: insight.heroVariant === "night"
 				? require("../../assets/insight_cards/insight_night.png")
 				: null;
+	const periodLabel = insight.periodType === "week" ? "This Week" : "This Month";
+	const headline = (
+		<Text className="font-heading-bold text-3xl leading-[38px] text-white">
+			{insight.headlineSegments.map((segment, index) => (
+				<Text
+					key={`${segment.text}-${index}`}
+					style={segment.color ? { color: segment.color } : undefined}
+				>
+					{segment.text}
+				</Text>
+			))}
+		</Text>
+	);
 
 	return (
 		<SafeAreaView className="flex-1 bg-white">
-			<View className="flex-row items-center justify-between px-md py-sm">
-				<View>
-					<Text className="font-body-semibold text-secondary text-muted">
-						{insight.periodType === "week" ? "This Week" : "This Month"}
-					</Text>
-					{totalInsights > 1 ? (
-						<Text className="mt-1 font-body text-secondary text-slate-400">
-							Preview {currentIndex + 1} of {totalInsights}
-						</Text>
-					) : null}
-				</View>
-				<TouchableOpacity onPress={onClose} className="p-sm">
-					<Ionicons name="close" size={24} color="#64748B" />
-				</TouchableOpacity>
-			</View>
-
 			<ScrollView className="flex-1 px-md" showsVerticalScrollIndicator={false}>
-				<View className="items-center pt-sm">
-					<Text className="text-center font-heading-bold text-3xl leading-[38px] text-slate-900">
-						{insight.headlineSegments.map((segment, index) => (
-							<Text
-								key={`${segment.text}-${index}`}
-								style={segment.color ? { color: segment.color } : undefined}
-							>
-								{segment.text}
-							</Text>
-						))}
-					</Text>
-				</View>
-
-				<View className="mt-lg items-center">
-					{heroImage ? (
-						<Image
-							source={heroImage}
-							style={{ width: "108%", height: 190 }}
-							resizeMode="contain"
-						/>
-					) : (
-						<View className="items-center justify-center">
-							<View className="rounded-[34px] bg-white px-7 py-7 shadow-sm">
-								<AppBadge
-									appName={insight.relatedAppName || "App"}
-									packageName={insight.relatedAppPackage || "app"}
-									size={92}
-								/>
+				{heroImage ? (
+					<ImageBackground
+						source={heroImage}
+						resizeMode="cover"
+						className="mt-sm overflow-hidden rounded-[32px] bg-slate-900"
+						style={{ minHeight: 320 }}
+					>
+						<View className="absolute inset-0 bg-slate-900/35" />
+						<View className="flex-row items-start justify-between px-md py-md">
+							<View className="flex-1 pr-md">
+								<Text className="font-body-semibold text-secondary text-white/80">
+									{periodLabel}
+								</Text>
+								{totalInsights > 1 ? (
+									<Text className="mt-1 font-body text-secondary text-white/70">
+										Preview {currentIndex + 1} of {totalInsights}
+									</Text>
+								) : null}
 							</View>
-							{insight.metricValue ? (
-								<View className="-mt-5 ml-24 rounded-full border border-slate-200 bg-white px-4 py-2 shadow-sm">
-									<Text className="font-heading-bold text-card-title text-slate-900">
-										{insight.metricValue}
-									</Text>
-									<Text className="font-body text-xs text-slate-500">
-										{insight.metricLabel || "opens"}
-									</Text>
-								</View>
-							) : null}
+							<TouchableOpacity
+								onPress={onClose}
+								className="rounded-full bg-white/20 p-sm"
+							>
+								<Ionicons name="close" size={22} color="#FFFFFF" />
+							</TouchableOpacity>
 						</View>
-					)}
-				</View>
+						<View className="flex-1 justify-end px-md pb-xl pt-lg">
+							{headline}
+							<Text className="mt-4 max-w-[92%] font-body text-body leading-7 text-white/90">
+								{insight.summaryText}
+							</Text>
+						</View>
+					</ImageBackground>
+				) : (
+					<View
+						className="mt-sm overflow-hidden rounded-[32px] bg-[#F5F0FF]"
+						style={{ minHeight: 320 }}
+					>
+						<View className="flex-row items-start justify-between px-md py-md">
+							<View className="flex-1 pr-md">
+								<Text className="font-body-semibold text-secondary text-accent">
+									{periodLabel}
+								</Text>
+								{totalInsights > 1 ? (
+									<Text className="mt-1 font-body text-secondary text-slate-500">
+										Preview {currentIndex + 1} of {totalInsights}
+									</Text>
+								) : null}
+							</View>
+							<TouchableOpacity
+								onPress={onClose}
+								className="rounded-full bg-white/90 p-sm"
+							>
+								<Ionicons name="close" size={22} color="#64748B" />
+							</TouchableOpacity>
+						</View>
+						<View className="flex-1 justify-between px-md pb-xl pt-md">
+							<View>
+								<Text className="font-heading-bold text-3xl leading-[38px] text-slate-900">
+									{insight.headlineSegments.map((segment, index) => (
+										<Text
+											key={`${segment.text}-${index}`}
+											style={
+												segment.color ? { color: segment.color } : undefined
+											}
+										>
+											{segment.text}
+										</Text>
+									))}
+								</Text>
+								<Text className="mt-4 max-w-[92%] font-body text-body leading-7 text-slate-600">
+									{insight.summaryText}
+								</Text>
+							</View>
+							<View className="mt-lg flex-row items-end justify-between">
+								<View className="rounded-[28px] bg-white px-6 py-6 shadow-sm">
+									<AppBadge
+										appName={insight.relatedAppName || "App"}
+										packageName={insight.relatedAppPackage || "app"}
+										size={88}
+									/>
+								</View>
+								{insight.metricValue ? (
+									<View className="rounded-full border border-[#E7DFFD] bg-white px-4 py-3 shadow-sm">
+										<Text className="font-heading-bold text-card-title text-slate-900">
+											{insight.metricValue}
+										</Text>
+										<Text className="font-body text-xs text-slate-500">
+											{insight.metricLabel || "opens"}
+										</Text>
+									</View>
+								) : null}
+							</View>
+						</View>
+					</View>
+				)}
 
 				{totalInsights > 1 ? (
 					<View className="mt-md flex-row items-center justify-center">
@@ -2139,10 +2225,6 @@ function CalendarPeriodInsightScreen({
 						</TouchableOpacity>
 					</View>
 				) : null}
-
-				<Text className="mt-md text-center font-body text-body leading-7 text-slate-700">
-					{insight.summaryText}
-				</Text>
 
 				<View className="mt-lg rounded-[26px] border border-slate-200 bg-white px-5 py-5">
 					<Text className="font-heading-semibold text-card-title text-slate-900">
@@ -2285,6 +2367,79 @@ function CalendarInsightEvidenceView({
 				))}
 			</View>
 		</View>
+	);
+}
+
+function DayDetailSkeleton() {
+	return (
+		<>
+			<Card className="mb-md">
+				<View className="flex-row items-center justify-between">
+					<View className="flex-1 pr-md">
+						<SkeletonBlock className="h-7 w-32" />
+						<SkeletonBlock className="mt-4 h-12 w-28" />
+						<SkeletonBlock className="mt-3 h-4 w-40" />
+					</View>
+					<SkeletonBlock className="h-24 w-24 rounded-3xl" />
+				</View>
+			</Card>
+
+			<View className="mb-md flex-row">
+				<Card className="mr-sm flex-1 px-5 py-5">
+					<SkeletonBlock className="h-5 w-28" />
+					<SkeletonBlock className="mt-4 h-11 w-20" />
+					<SkeletonBlock className="mt-3 h-4 w-24" />
+				</Card>
+				<Card className="ml-sm flex-1 px-5 py-5">
+					<SkeletonBlock className="h-5 w-24" />
+					<SkeletonBlock className="mt-4 h-12 w-16" />
+					<SkeletonBlock className="mt-3 h-4 w-20" />
+				</Card>
+			</View>
+
+			<Card className="mb-md">
+				<SkeletonBlock className="h-7 w-40" />
+				{Array.from({ length: 3 }).map((_, index) => (
+					<View key={`day-detail-session-${index}`} className="mt-4 flex-row">
+						<SkeletonBlock className="mt-2 h-4 w-14" />
+						<View className="mx-4 items-center">
+							<SkeletonBlock className="mt-2 h-3 w-3 rounded-full" />
+							<SkeletonBlock className="mt-2 h-20 w-0.5" />
+						</View>
+						<View className="flex-1 rounded-3xl border border-slate-200 bg-card px-4 py-4">
+							<SkeletonBlock className="h-5 w-28" />
+							<SkeletonBlock className="mt-3 h-4 w-full" />
+							<SkeletonBlock className="mt-2 h-4 w-3/4" />
+						</View>
+					</View>
+				))}
+			</Card>
+
+			<Card className="mb-md">
+				<View className="mb-md flex-row items-center justify-between">
+					<SkeletonBlock className="h-7 w-44" />
+					<SkeletonBlock className="h-4 w-14" />
+				</View>
+				{Array.from({ length: 4 }).map((_, index) => (
+					<View
+						key={`day-detail-breakdown-${index}`}
+						className="border-b border-gray-100 py-sm last:border-b-0"
+					>
+						<View className="mb-2 flex-row items-center justify-between">
+							<View className="flex-row items-center flex-1">
+								<SkeletonBlock className="h-8 w-8 rounded-full" />
+								<SkeletonBlock className="ml-3 h-5 w-28" />
+							</View>
+							<View className="items-end">
+								<SkeletonBlock className="h-5 w-14" />
+								<SkeletonBlock className="mt-2 h-3.5 w-10" />
+							</View>
+						</View>
+						<SkeletonBlock className="ml-10 h-1 w-full rounded-full" />
+					</View>
+				))}
+			</Card>
+		</>
 	);
 }
 

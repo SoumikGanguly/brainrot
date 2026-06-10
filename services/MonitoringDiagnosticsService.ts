@@ -41,6 +41,8 @@ export class MonitoringDiagnosticsService {
       foreground_query_count: diagnostics.foregroundQueryCount,
       battery_percent: diagnostics.batteryPercent,
       battery_charging: diagnostics.batteryCharging,
+      battery_optimization_ignored: diagnostics.batteryOptimizationIgnored,
+      session_repair_count: diagnostics.sessionRepairCount,
       last_blocking_failure_reason: diagnostics.lastBlockingFailureReason || null,
     });
     await database.setMeta(DAILY_SAMPLE_KEY, today);

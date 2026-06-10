@@ -13,7 +13,6 @@ import {
 
 import { firestore } from './firebase';
 import { PurchaseService } from './PurchaseService';
-import { TrialService } from './TrialService';
 import {
   database,
   type AppSettings,
@@ -23,7 +22,6 @@ import {
 } from './database';
 
 type UserSettingsSnapshot = {
-  onboardingCompleted: boolean;
   analyticsEnabled: boolean;
   monitoringEnabled: boolean;
   backgroundChecksEnabled: boolean;
@@ -98,7 +96,6 @@ export class CloudSyncService {
 
   private static async getSettingsSnapshot(): Promise<UserSettingsSnapshot> {
     const [
-      onboardingCompleted,
       analyticsEnabled,
       monitoringEnabled,
       backgroundChecksEnabled,
@@ -115,7 +112,6 @@ export class CloudSyncService {
       blockScheduleEnd,
       trialStartTime,
     ] = await Promise.all([
-      database.getMeta('onboarding_completed'),
       database.getMeta('analytics_enabled'),
       database.getMeta('monitoring_enabled'),
       database.getMeta('background_checks_enabled'),
@@ -134,7 +130,6 @@ export class CloudSyncService {
     ]);
 
     return {
-      onboardingCompleted: onboardingCompleted === 'true',
       analyticsEnabled: analyticsEnabled !== 'false',
       monitoringEnabled: monitoringEnabled === 'true',
       backgroundChecksEnabled: backgroundChecksEnabled !== 'false',
@@ -495,7 +490,6 @@ export class CloudSyncService {
 
   private static async restoreMetaFromCloud(data: Record<string, unknown>): Promise<void> {
     await Promise.all([
-      database.setMeta('onboarding_completed', String(Boolean(data.onboardingCompleted))),
       database.setMeta('analytics_enabled', String(data.analyticsEnabled !== false)),
       database.setMeta('monitoring_enabled', String(Boolean(data.monitoringEnabled))),
       database.setMeta('background_checks_enabled', String(data.backgroundChecksEnabled !== false)),

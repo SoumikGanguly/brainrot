@@ -17,7 +17,7 @@ import {
 import { SafeAreaView } from "react-native-safe-area-context";
 
 import ActionInsightCard from "@/components/ActionInsightCard";
-import PermissionRecoveryCard from "@/components/PermissionRecoveryCard";
+import PermissionCoachBottomSheet from "@/components/PermissionCoachBottomSheet";
 import SkeletonBlock from "@/components/SkeletonBlock";
 import { Card } from "../../components/Card";
 import { database, type DailyUsage } from "../../services/database";
@@ -98,13 +98,15 @@ export default function HomeScreen() {
 	});
 	const [loading, setLoading] = useState(true);
 	const [hasUsagePermission, setHasUsagePermission] = useState<boolean | null>(null);
-	const [permissionNudges, setPermissionNudges] = useState<PermissionNudge[]>([]);
+	const [homePermissionPrompt, setHomePermissionPrompt] =
+		useState<PermissionNudge | null>(null);
 	const [loginNudge, setLoginNudge] = useState<LoginNudge | null>(null);
 	const pendingPermissionCheck = useRef(false);
 	const appStateRef = useRef<AppStateStatus>(AppState.currentState);
 	const paywallLoggedRef = useRef<"trial" | "expired" | null>(null);
 	const homeRefreshInFlightRef = useRef(false);
 	const backgroundHomeRefreshQueuedRef = useRef(false);
+	const shownPermissionPromptRef = useRef<string | null>(null);
 
 	useEffect(() => {
 		Animated.loop(
@@ -391,13 +393,11 @@ export default function HomeScreen() {
 	}
 
 	async function refreshNudges() {
-		const [permissionHealth, nextLoginNudge] = await Promise.all([
-			PermissionHealthService.getPermissionHealth().catch(() => null),
+		const [nextPermissionPrompt, nextLoginNudge] = await Promise.all([
+			PermissionHealthService.getHomeBottomSheetNudge().catch(() => null),
 			LoginNudgeService.getLoginNudge().catch(() => null),
 		]);
-		if (permissionHealth) {
-			setPermissionNudges(permissionHealth.nudges.slice(0, 2));
-		}
+		setHomePermissionPrompt(nextPermissionPrompt);
 		setLoginNudge(nextLoginNudge?.shouldShow ? nextLoginNudge : null);
 	}
 
@@ -545,6 +545,20 @@ export default function HomeScreen() {
 		);
 	}, [primaryInsight]);
 
+	useEffect(() => {
+		if (!homePermissionPrompt) {
+			shownPermissionPromptRef.current = null;
+			return;
+		}
+
+		if (shownPermissionPromptRef.current === homePermissionPrompt.id) {
+			return;
+		}
+
+		shownPermissionPromptRef.current = homePermissionPrompt.id;
+		void PermissionHealthService.recordHomeBottomSheetShown();
+	}, [homePermissionPrompt]);
+
 	if (loading) {
 		return (
 			<SafeAreaView className="flex-1 bg-[#FCFBFF]">
@@ -557,6 +571,36 @@ export default function HomeScreen() {
 
 	return (
 		<SafeAreaView className="flex-1 bg-[#FCFBFF]">
+			<PermissionCoachBottomSheet
+				visible={homePermissionPrompt !== null}
+				title={homePermissionPrompt?.title || "Keep Brainrot working"}
+				body={homePermissionPrompt?.body || ""}
+				helperText={homePermissionPrompt?.helperText || ""}
+				primaryLabel={homePermissionPrompt?.ctaLabel || "Fix now"}
+				secondaryLabel="Not now"
+				onClose={() => setHomePermissionPrompt(null)}
+				onPrimary={() => {
+					if (!homePermissionPrompt) {
+						return;
+					}
+					pendingPermissionCheck.current = true;
+					setHomePermissionPrompt(null);
+					void PermissionHealthService.runNudgeAction(homePermissionPrompt).finally(
+						refreshNudges,
+					);
+				}}
+				onSecondary={() => {
+					if (!homePermissionPrompt) {
+						return;
+					}
+					const prompt = homePermissionPrompt;
+					setHomePermissionPrompt(null);
+					void PermissionHealthService.dismissHomeBottomSheet(prompt.id).then(
+						refreshNudges,
+					);
+				}}
+				tone={homePermissionPrompt?.severity === "warning" ? "warning" : "accent"}
+			/>
 			<ScrollView className="flex-1" showsVerticalScrollIndicator={false}>
 				<View
 					className="overflow-hidden px-6 pb-5 pt-2"
@@ -626,21 +670,6 @@ export default function HomeScreen() {
 						</Text>
 					</Card>
 				)}
-
-				{permissionNudges.map((nudge) => (
-					<PermissionRecoveryCard
-						key={nudge.id}
-						nudge={nudge}
-						onFix={() => {
-							pendingPermissionCheck.current = true;
-							void PermissionHealthService.runNudgeAction(nudge).finally(refreshNudges);
-						}}
-						onRecheck={() => void refreshNudges()}
-						onDismiss={() => {
-							void PermissionHealthService.dismissNudge(nudge.id).then(refreshNudges);
-						}}
-					/>
-				))}
 
 				{loginNudge ? (
 					<Card className="mx-md mb-md border border-[#D8E6FF] bg-[#F3F8FF]">

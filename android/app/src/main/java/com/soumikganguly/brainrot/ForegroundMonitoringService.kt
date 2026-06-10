@@ -31,6 +31,11 @@ class ForegroundMonitoringService : Service() {
     }
     
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        if (intent?.action == ACTION_REFRESH_NOTIFICATION) {
+            startForegroundSafely(buildNotification())
+            return START_STICKY
+        }
+
         startForegroundSafely(buildNotification())
         startNotificationLoop()
         
@@ -43,6 +48,7 @@ class ForegroundMonitoringService : Service() {
             .setContentText("Preparing your focus status")
             .setSmallIcon(R.drawable.ic_notification)
             .setPriority(NotificationCompat.PRIORITY_LOW)
+            .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
             .setSilent(true)
             .setOnlyAlertOnce(true)
             .setOngoing(true)
@@ -51,8 +57,21 @@ class ForegroundMonitoringService : Service() {
     }
 
     private fun buildNotification(): Notification {
-        val brainState = usageChecker?.getCurrentBrainState(forceRefresh = true)
-            ?: UsageChecker.BrainState(100, "Focused", 0L)
+        val prefs = getSharedPreferences("brainrot_prefs", Context.MODE_PRIVATE)
+        val summaryDate = prefs.getString("daily_summary_date", "") ?: ""
+        val today = java.text.SimpleDateFormat("yyyy-MM-dd", java.util.Locale.US)
+            .format(java.util.Date())
+        val syncedSummaryAvailable = summaryDate == today
+        val brainState = if (syncedSummaryAvailable) {
+            UsageChecker.BrainState(
+                prefs.getInt("daily_summary_brain_score", 100),
+                prefs.getString("daily_summary_brain_status", "Focused") ?: "Focused",
+                prefs.getLong("daily_summary_total_screen_time_ms", 0L)
+            )
+        } else {
+            usageChecker?.getCurrentBrainState(forceRefresh = true)
+                ?: UsageChecker.BrainState(100, "Focused", 0L)
+        }
         val contentText = "Screen time ${formatDuration(brainState.totalUsageMs)}"
 
         return NotificationCompat.Builder(this, CHANNEL_ID)
@@ -61,6 +80,8 @@ class ForegroundMonitoringService : Service() {
             .setStyle(NotificationCompat.BigTextStyle().bigText(contentText))
             .setSmallIcon(R.drawable.ic_notification)
             .setPriority(NotificationCompat.PRIORITY_LOW)
+            .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
+            .setCategory(NotificationCompat.CATEGORY_STATUS)
             .setSilent(true)
             .setOnlyAlertOnce(true)
             .setOngoing(true)
@@ -140,6 +161,7 @@ class ForegroundMonitoringService : Service() {
             val channel = NotificationChannel(CHANNEL_ID, name, importance).apply {
                 description = descriptionText
                 setShowBadge(false)
+                lockscreenVisibility = Notification.VISIBILITY_PUBLIC
             }
             
             val notificationManager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
@@ -159,6 +181,8 @@ class ForegroundMonitoringService : Service() {
     override fun onBind(intent: Intent?): IBinder? = null
 
     companion object {
+        private const val ACTION_REFRESH_NOTIFICATION = "ACTION_REFRESH_NOTIFICATION"
+
         fun start(context: Context) {
             val intent = Intent(context, ForegroundMonitoringService::class.java)
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
@@ -171,6 +195,25 @@ class ForegroundMonitoringService : Service() {
         fun stop(context: Context) {
             val intent = Intent(context, ForegroundMonitoringService::class.java)
             context.stopService(intent)
+        }
+
+        fun refreshNotification(context: Context) {
+            val activityManager = context.getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
+            val isRunning = activityManager
+                .getRunningServices(Int.MAX_VALUE)
+                .any { it.service.className == ForegroundMonitoringService::class.java.name }
+            if (!isRunning) {
+                return
+            }
+
+            val intent = Intent(context, ForegroundMonitoringService::class.java).apply {
+                action = ACTION_REFRESH_NOTIFICATION
+            }
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                context.startForegroundService(intent)
+            } else {
+                context.startService(intent)
+            }
         }
     }
 }

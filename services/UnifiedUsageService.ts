@@ -669,6 +669,19 @@ export class UnifiedUsageService {
     }
   }
 
+  static async requestBatteryOptimizationExemption(): Promise<boolean> {
+    if (!this.isNativeModuleAvailable() || !UsageStatsModule.requestBatteryOptimizationExemption) {
+      return false;
+    }
+
+    try {
+      return await UsageStatsModule.requestBatteryOptimizationExemption();
+    } catch (error) {
+      console.error('Error requesting battery exemption:', error);
+      return false;
+    }
+  }
+
   // Sync monitored apps to native SharedPreferences for background services
   static async syncMonitoredAppsToNative(monitoredPackages: string[]): Promise<boolean> {
     if (!this.isNativeModuleAvailable()) {
@@ -897,10 +910,10 @@ export interface ManufacturerPermissionInfo {
 }
 
 export interface BlockingConfigPayload {
-  protectedApps: Array<{
+  protectedApps: {
     packageName: string;
     mode: 'monitor' | 'limit' | 'locked' | 'ignore';
-  }>;
+  }[];
   focusSessionActive: boolean;
   blockingEnabled: boolean;
   limitIntervalMinutes: number;
@@ -931,4 +944,10 @@ export interface MonitoringDiagnostics {
   foregroundQueryCount: number;
   batteryPercent: number;
   batteryCharging: boolean;
+  batteryOptimizationIgnored: boolean;
+  lastRealtimeEventPackage: string;
+  lastRealtimeEventType: string;
+  lastRealtimeEventAt: number;
+  sessionRepairCount: number;
+  lockScreenNotificationGuidanceNeeded: boolean;
 }

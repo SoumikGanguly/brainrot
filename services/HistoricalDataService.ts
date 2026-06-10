@@ -12,6 +12,7 @@ interface AggregatedAppUsage extends UsageData {
 }
 
 const SUMMARY_INTEGRITY_WARNING_MS = 2 * 60 * 1000;
+const SESSION_REPLAY_FALLBACK_MS = 10 * 60 * 1000;
 const DAILY_SUMMARY_VERSION = 'v3';
 
 export class HistoricalDataService {
@@ -56,21 +57,33 @@ export class HistoricalDataService {
 
       const sessionUsage = this.buildAggregatedUsageFromSessions(dateStr, sessions, monitoredSet);
       const rawUsageAggregated = this.buildAggregatedUsageFromRaw(dateStr, rawUsage, monitoredSet);
-      const monitoredUsage = sessionUsage.length > 0 ? sessionUsage : rawUsageAggregated;
       const monitoredSessions = sessions.filter((session) =>
         monitoredSet.size === 0
           ? session.packageName !== 'com.soumikganguly.brainrot'
           : monitoredSet.has(session.packageName)
       );
       const blockEvents = await database.getBlockEventsForDate(dateStr);
-      const totalScreenTime = monitoredUsage.reduce((sum, app) => sum + app.totalTimeMs, 0);
       const sessionTotalMs = sessionUsage.reduce((sum, app) => sum + app.totalTimeMs, 0);
       const rawUsageTotalMs = rawUsageAggregated.reduce((sum, app) => sum + app.totalTimeMs, 0);
       const integrityDeltaMs = Math.abs(sessionTotalMs - rawUsageTotalMs);
+      const shouldPreferRawUsage =
+        rawUsageAggregated.length > 0 &&
+        sessionUsage.length > 0 &&
+        sessionTotalMs > rawUsageTotalMs &&
+        integrityDeltaMs > SESSION_REPLAY_FALLBACK_MS;
+      const monitoredUsage = shouldPreferRawUsage
+        ? rawUsageAggregated
+        : sessionUsage.length > 0
+          ? sessionUsage
+          : rawUsageAggregated;
       const summarySource: 'sessions' | 'raw_usage' =
-        sessionUsage.length > 0 ? 'sessions' : 'raw_usage';
-      const totalMonitoredOpens = monitoredSessions.length;
-      const longestSessionMs = monitoredSessions.reduce((max, session) => Math.max(max, session.durationMs), 0);
+        shouldPreferRawUsage || sessionUsage.length === 0 ? 'raw_usage' : 'sessions';
+      const totalScreenTime = monitoredUsage.reduce((sum, app) => sum + app.totalTimeMs, 0);
+      const totalMonitoredOpens = summarySource === 'sessions' ? monitoredSessions.length : 0;
+      const longestSessionMs =
+        summarySource === 'sessions'
+          ? monitoredSessions.reduce((max, session) => Math.max(max, session.durationMs), 0)
+          : 0;
       const averageSessionMs = totalMonitoredOpens > 0 ? Math.round(totalScreenTime / totalMonitoredOpens) : 0;
       const topApp = monitoredUsage[0] ?? null;
       const previousSummaries = await this.loadPreviousSummaries(dateStr, 7);
@@ -122,7 +135,11 @@ export class HistoricalDataService {
         insightSignals,
       };
 
-      if (sessionUsage.length > 0 && rawUsageAggregated.length > 0 && integrityDeltaMs > SUMMARY_INTEGRITY_WARNING_MS) {
+      if (shouldPreferRawUsage) {
+        console.warn(
+          `Falling back to raw usage for ${dateStr}: sessions=${sessionTotalMs} raw=${rawUsageTotalMs} delta=${integrityDeltaMs}`
+        );
+      } else if (sessionUsage.length > 0 && rawUsageAggregated.length > 0 && integrityDeltaMs > SUMMARY_INTEGRITY_WARNING_MS) {
         console.warn(
           `Summary integrity drift on ${dateStr}: sessions=${sessionTotalMs} raw=${rawUsageTotalMs} delta=${integrityDeltaMs}`
         );
@@ -235,7 +252,7 @@ export class HistoricalDataService {
   private async loadPreviousSummaries(
     dateStr: string,
     trailingDays: number
-  ): Promise<Array<{ date: string; totalDistractingMs: number; totalMonitoredOpens: number }>> {
+  ): Promise<{ date: string; totalDistractingMs: number; totalMonitoredOpens: number }[]> {
     const dates = Array.from({ length: trailingDays }, (_, index) => {
       const date = new Date(`${dateStr}T00:00:00`);
       date.setDate(date.getDate() - (index + 1));
@@ -260,11 +277,11 @@ export class HistoricalDataService {
     totalMonitoredOpens: number,
     longestSessionMs: number,
     averageSessionMs: number,
-    previousSummaries: Array<{
+    previousSummaries: {
       date: string;
       totalDistractingMs: number;
       totalMonitoredOpens: number;
-    }>
+    }[]
   ): DailyInsightSignals {
     const firstSessionStartedAt = monitoredSessions[0]?.startedAt
       ? new Date(monitoredSessions[0].startedAt).getTime()

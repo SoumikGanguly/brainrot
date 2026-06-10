@@ -66,6 +66,12 @@ export interface MonitoringDiagnostics {
   foregroundQueryCount: number;
   batteryPercent: number;
   batteryCharging: boolean;
+  batteryOptimizationIgnored: boolean;
+  lastRealtimeEventPackage: string;
+  lastRealtimeEventType: string;
+  lastRealtimeEventAt: number;
+  sessionRepairCount: number;
+  lockScreenNotificationGuidanceNeeded: boolean;
 }
 
 export class UsageService {

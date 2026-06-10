@@ -6,6 +6,7 @@ import {
   AppState,
   AppStateStatus,
   Image,
+  Modal,
   ScrollView,
   Text,
   TouchableOpacity,
@@ -15,12 +16,11 @@ import { SafeAreaView } from "react-native-safe-area-context";
 
 import ActionInsightCard from "@/components/ActionInsightCard";
 import { CapabilitiesService } from "@/services/CapabilitiesService";
+import { ReplayLoaderService } from "@/services/ReplayLoaderService";
 import { Card } from "../../components/Card";
 import { Header } from "../../components/Header";
 import SkeletonBlock from "@/components/SkeletonBlock";
 import {
-  DailyInsightsService,
-  type DailyInsights,
   type ReplayEntry,
 } from "../../services/DailyInsightsService";
 import { InsightActionService } from "../../services/InsightActionService";
@@ -28,7 +28,6 @@ import { InsightInvalidationService } from "../../services/InsightInvalidationSe
 import type { InsightCard } from "../../services/InsightTypes";
 import { TelemetryService } from "../../services/TelemetryService";
 import { type DailyUsage } from "../../services/database";
-import { DataSyncService } from "../../services/DataSyncService";
 import {
   UnifiedUsageService,
   type ManufacturerPermissionInfo,
@@ -160,7 +159,7 @@ export default function ReplayScreen() {
 	const [eventFilter, setEventFilter] = useState<ReplayEventFilter>("all");
 	const [timeFilter, setTimeFilter] = useState<ReplayTimeFilter>("all");
 	const [appFilter, setAppFilter] = useState("all");
-	const [wastedTimeMs, setWastedTimeMs] = useState(0);
+	const [filterSheetVisible, setFilterSheetVisible] = useState(false);
 	const [biggestTimeLeak, setBiggestTimeLeak] = useState<{
 		packageName: string;
 		appName: string;
@@ -168,6 +167,9 @@ export default function ReplayScreen() {
 		percentage: number;
 	} | null>(null);
 	const [replayInsightCards, setReplayInsightCards] = useState<InsightCard[]>([]);
+	const [emptyStateMessage, setEmptyStateMessage] = useState(
+		"No monitored distraction sessions were recorded for this day.",
+	);
 	const pendingPermissionCheck = useRef(false);
 	const appStateRef = useRef<AppStateStatus>(AppState.currentState);
 
@@ -231,42 +233,41 @@ export default function ReplayScreen() {
 	async function loadReplayData(date: string) {
 		try {
 			setLoading(true);
+			const result = await ReplayLoaderService.loadDay(date, {
+				syncUsageBeforeLoad: true,
+				selectedMoment: params.moment,
+			});
 
-			if (UnifiedUsageService.isNativeModuleAvailable()) {
-				const granted = await UnifiedUsageService.isUsageAccessGranted();
-				if (granted) {
-					await DataSyncService.getInstance().syncUsageData();
-				}
-			}
-
-			const insights =
-				await DailyInsightsService.getInstance().getDailyInsights(date, {
-					allowInsightRegeneration: false,
-					preferPersistedInsights: true,
-				});
-
-			setSummary(insights.summary);
-			const entries = thisMomentFilteredEntries(insights, params.moment);
-			setAllReplayEntries(entries);
-			setReplayEntries(applyReplayFilters(entries, eventFilter, timeFilter, appFilter));
-			setWastedTimeMs(insights.wastedTimeMs);
-			setBiggestTimeLeak(insights.biggestTimeLeak);
-			setReplayInsightCards(insights.replayInsightCards);
+			setSummary(result.summary);
+			setAllReplayEntries(result.replayEntries);
+			setReplayEntries(
+				applyReplayFilters(
+					result.replayEntries,
+					eventFilter,
+					timeFilter,
+					appFilter,
+				),
+			);
+			setBiggestTimeLeak(result.biggestTimeLeak);
+			setReplayInsightCards(result.replayInsightCards);
+			setEmptyStateMessage(result.emptyMessage);
 			TelemetryService.track("replay_viewed", {
 				date_type: date === getYesterdayDate() ? "yesterday" : "historical",
-				total_distraction_ms: insights.wastedTimeMs,
-				open_count: insights.summary?.totalMonitoredOpens ?? 0,
-				top_app: insights.biggestTimeLeak?.appName,
-				session_count: insights.replayEntries.length,
+				total_distraction_ms: result.wastedTimeMs,
+				open_count: result.summary?.totalMonitoredOpens ?? 0,
+				top_app: result.biggestTimeLeak?.appName,
+				session_count: result.replayEntries.length,
 			});
 		} catch (error) {
 			console.error("Error loading replay data:", error);
 			setSummary(null);
 			setAllReplayEntries([]);
 			setReplayEntries([]);
-			setWastedTimeMs(0);
 			setBiggestTimeLeak(null);
 			setReplayInsightCards([]);
+			setEmptyStateMessage(
+				"No monitored distraction sessions were recorded for this day.",
+			);
 		} finally {
 			setLoading(false);
 		}
@@ -274,12 +275,8 @@ export default function ReplayScreen() {
 
 	const emptyStateText = loading
 		? "Rebuilding your distraction trail..."
-		: "No monitored distraction sessions were recorded for this day.";
-	const showInsightSkeletons =
-		!loading &&
-		replayInsightCards.length === 0 &&
-		summary?.totalScreenTime &&
-		summary.totalScreenTime > 0;
+		: emptyStateMessage;
+	const showInsightSkeletons = false;
 	const appFilterOptions = buildAppFilterOptions(allReplayEntries);
 
 	useEffect(() => {
@@ -305,6 +302,75 @@ export default function ReplayScreen() {
 
 	return (
 		<SafeAreaView className="flex-1 bg-bg">
+			<Modal
+				visible={filterSheetVisible}
+				transparent
+				animationType="none"
+				hardwareAccelerated
+				onRequestClose={() => setFilterSheetVisible(false)}
+			>
+				<View className="flex-1 justify-end bg-black/35 px-md pb-md">
+					<TouchableOpacity
+						className="flex-1"
+						activeOpacity={1}
+						onPress={() => setFilterSheetVisible(false)}
+					/>
+					<View className="rounded-[28px] bg-white p-md">
+						<View className="flex-row items-center justify-between">
+							<View className="flex-1 pr-sm">
+								<Text className="font-heading-bold text-section text-text">
+									Replay filters
+								</Text>
+								<Text className="mt-2 font-body text-secondary text-muted">
+									Choose which sessions to show.
+								</Text>
+							</View>
+							<TouchableOpacity onPress={() => setFilterSheetVisible(false)}>
+								<Ionicons name="close" size={22} color="#64748B" />
+							</TouchableOpacity>
+						</View>
+
+						<Text className="mt-5 mb-2 font-heading-semibold text-card-title text-text">
+							Event type
+						</Text>
+						<FilterRow
+							options={[
+								{ key: "all", label: "All" },
+								{ key: "session", label: "Sessions" },
+								{ key: "short_open", label: "Short opens" },
+								{ key: "blocked", label: "Blocks" },
+								{ key: "emergency_pass", label: "Passes" },
+							]}
+							selected={eventFilter}
+							onSelect={(value) => setEventFilter(value as ReplayEventFilter)}
+						/>
+
+						<Text className="mt-4 mb-2 font-heading-semibold text-card-title text-text">
+							Time window
+						</Text>
+						<FilterRow
+							options={[
+								{ key: "all", label: "Any time" },
+								{ key: "morning", label: "Morning" },
+								{ key: "day", label: "Day" },
+								{ key: "evening", label: "Evening" },
+								{ key: "night", label: "Night" },
+							]}
+							selected={timeFilter}
+							onSelect={(value) => setTimeFilter(value as ReplayTimeFilter)}
+						/>
+
+						<Text className="mt-4 mb-2 font-heading-semibold text-card-title text-text">
+							App
+						</Text>
+						<FilterRow
+							options={appFilterOptions}
+							selected={appFilter}
+							onSelect={setAppFilter}
+						/>
+					</View>
+				</View>
+			</Modal>
 			<ScrollView className="flex-1" showsVerticalScrollIndicator={false}>
 				<Header title="Replay" />
 
@@ -393,35 +459,24 @@ export default function ReplayScreen() {
 					<Text className="mb-md font-heading-bold text-section text-text">
 						Session Replay
 					</Text>
-					<View className="mb-3">
-						<FilterRow
-							options={[
-								{ key: "all", label: "All" },
-								{ key: "session", label: "Sessions" },
-								{ key: "short_open", label: "Short opens" },
-								{ key: "blocked", label: "Blocks" },
-								{ key: "emergency_pass", label: "Passes" },
-							]}
-							selected={eventFilter}
-							onSelect={(value) => setEventFilter(value as ReplayEventFilter)}
-						/>
-						<FilterRow
-							options={[
-								{ key: "all", label: "Any time" },
-								{ key: "morning", label: "Morning" },
-								{ key: "day", label: "Day" },
-								{ key: "evening", label: "Evening" },
-								{ key: "night", label: "Night" },
-							]}
-							selected={timeFilter}
-							onSelect={(value) => setTimeFilter(value as ReplayTimeFilter)}
-						/>
-						<FilterRow
-							options={appFilterOptions}
-							selected={appFilter}
-							onSelect={setAppFilter}
-						/>
-					</View>
+					{allReplayEntries.length > 0 ? (
+						<TouchableOpacity
+							onPress={() => setFilterSheetVisible(true)}
+							className="mb-4 rounded-[24px] border border-[#E7DFFD] bg-[#FAF7FF] px-4 py-4"
+						>
+							<View className="flex-row items-center justify-between">
+								<View className="flex-1 pr-3">
+									<Text className="font-heading-semibold text-card-title text-text">
+										Filter replay
+									</Text>
+									<Text className="mt-1 font-body text-secondary text-muted">
+										{buildFilterSummary(eventFilter, timeFilter, appFilter, appFilterOptions)}
+									</Text>
+								</View>
+								<Ionicons name="options-outline" size={20} color="#5B4CF0" />
+							</View>
+						</TouchableOpacity>
+					) : null}
 					{replayEntries.length === 0 ? (
 						<Text className="font-body text-body text-muted">
 							{emptyStateText}
@@ -617,18 +672,32 @@ export default function ReplayScreen() {
 	);
 }
 
-function thisMomentFilteredEntries(
-	insights: DailyInsights,
-	selectedMoment?: string,
-): ReplayEntry[] {
-	if (!selectedMoment) {
-		return insights.replayEntries;
-	}
+function buildFilterSummary(
+	eventFilter: ReplayEventFilter,
+	timeFilter: ReplayTimeFilter,
+	appFilter: string,
+	appFilterOptions: { key: string; label: string }[],
+): string {
+	const eventLabel =
+		eventFilter === "all"
+			? "All events"
+			: eventFilter === "session"
+				? "Sessions"
+				: eventFilter === "short_open"
+					? "Short opens"
+					: eventFilter === "blocked"
+						? "Blocks"
+						: "Passes";
+	const timeLabel =
+		timeFilter === "all"
+			? "any time"
+			: timeFilter === "day"
+				? "daytime"
+				: timeFilter;
+	const appLabel =
+		appFilterOptions.find((option) => option.key === appFilter)?.label || "All apps";
 
-	const matchingEntries = insights.replayEntries.filter(
-		(entry) => entry.moment === selectedMoment,
-	);
-	return matchingEntries.length > 0 ? matchingEntries : insights.replayEntries;
+	return `${eventLabel} • ${timeLabel} • ${appLabel}`;
 }
 
 function applyReplayFilters(
@@ -668,7 +737,7 @@ function isInTimeFilter(entry: ReplayEntry, timeFilter: ReplayTimeFilter): boole
 	return hour >= 22 || hour < 4;
 }
 
-function buildAppFilterOptions(entries: ReplayEntry[]): Array<{ key: string; label: string }> {
+function buildAppFilterOptions(entries: ReplayEntry[]): { key: string; label: string }[] {
 	const options = new Map<string, string>();
 	for (const entry of entries) {
 		if (!options.has(entry.packageName)) {
@@ -708,7 +777,7 @@ function FilterRow({
 	selected,
 	onSelect,
 }: {
-	options: Array<{ key: string; label: string }>;
+	options: { key: string; label: string }[];
 	selected: string;
 	onSelect: (value: string) => void;
 }) {

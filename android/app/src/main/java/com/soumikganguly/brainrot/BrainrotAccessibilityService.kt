@@ -146,18 +146,24 @@ class BrainrotAccessibilityService : AccessibilityService() {
             val currentTime = System.currentTimeMillis()
             val events = usageStatsManager.queryEvents(currentTime - 4000, currentTime)
             val event = UsageEvents.Event()
-            var foregroundApp: String? = null
+            var latestPackage: String? = null
+            var latestEventType: Int? = null
             var lastEventTime = 0L
 
             while (events.hasNextEvent()) {
                 events.getNextEvent(event)
-                if (event.eventType == UsageEvents.Event.MOVE_TO_FOREGROUND && event.timeStamp > lastEventTime) {
-                    foregroundApp = event.packageName
+                if (
+                    (event.eventType == UsageEvents.Event.MOVE_TO_FOREGROUND ||
+                        event.eventType == UsageEvents.Event.MOVE_TO_BACKGROUND) &&
+                    event.timeStamp > lastEventTime
+                ) {
+                    latestPackage = event.packageName
+                    latestEventType = event.eventType
                     lastEventTime = event.timeStamp
                 }
             }
 
-            foregroundApp == packageName
+            latestPackage == packageName && latestEventType == UsageEvents.Event.MOVE_TO_FOREGROUND
         } catch (_: Exception) {
             false
         }
