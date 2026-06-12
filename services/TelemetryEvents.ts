@@ -18,6 +18,11 @@ export type NotificationType =
   | "monthly_report"
   | "permission_reminder";
 export type ReplayDateType = "today" | "yesterday" | "historical";
+export type InsightFeedbackSurface = "replay" | "progress";
+export type InsightFeedbackVote = "up" | "down";
+export type ReviewPromptSource = "morning_replay" | "dev_button";
+export type SubscriptionStatus = "trial" | "active" | "expired";
+export type ExpiredPaywallScreen = "intro" | "declined" | "returning";
 
 export type TelemetryEventMap = {
   onboarding_started: { screen_name: string };
@@ -36,7 +41,84 @@ export type TelemetryEventMap = {
     selected_app_count: number;
     default_apps_removed_count: number;
   };
-  app_opened: Record<string, never>;
+  app_opened: {
+    local_date: string;
+    open_count_for_day: number;
+    open_hour_local: number;
+    subscription_status?: SubscriptionStatus;
+    hours_since_last_open?: number;
+    days_since_last_open?: number;
+  };
+  subscription_access_reconciled: {
+    reason:
+      | "app_startup"
+      | "app_resume"
+      | "onboarding_completed"
+      | "auth_state_changed"
+      | "auth_sync_completed"
+      | "customer_info_updated"
+      | "dev_override"
+      | "manual_restore";
+    subscription_status: SubscriptionStatus;
+    is_premium: boolean;
+    trial_days_remaining?: number;
+    expired_flow_state?: ExpiredPaywallScreen;
+  };
+  expired_app_opened: {
+    local_date: string;
+    open_count_for_day: number;
+    open_hour_local: number;
+    screen: ExpiredPaywallScreen;
+    hours_since_last_open?: number;
+    days_since_last_open?: number;
+  };
+  expired_paywall_viewed: {
+    screen: ExpiredPaywallScreen;
+    subscription_status: "expired";
+  };
+  expired_paywall_cta_clicked: {
+    screen: ExpiredPaywallScreen;
+    cta:
+      | "get_lifetime_access"
+      | "no_thanks"
+      | "close_app"
+      | "help_shape_brainrot"
+      | "dev_force_trial"
+      | "dev_force_active"
+      | "dev_force_expired_intro"
+      | "dev_force_expired_declined"
+      | "dev_force_expired_returning";
+    subscription_status: SubscriptionStatus;
+  };
+  expired_paywall_declined: {
+    screen: "intro";
+    subscription_status: "expired";
+  };
+  expired_paywall_reopened: {
+    screen: "returning";
+    subscription_status: "expired";
+  };
+  subscription_entitlement_activated: {
+    source: "customer_info" | "restore" | "dev_override";
+    subscription_status: "active";
+  };
+  subscription_restore_result: {
+    success: boolean;
+    has_active_entitlement: boolean;
+    subscription_status?: SubscriptionStatus;
+  };
+  review_prompt_requested: {
+    source: ReviewPromptSource;
+    qualifying_visit_count?: number;
+    prompt_attempt_number?: number;
+    days_since_last_prompt?: number;
+  };
+  review_prompt_unavailable: {
+    source: ReviewPromptSource;
+    reason: "no_action" | "not_available" | "request_failed";
+    qualifying_visit_count?: number;
+    prompt_attempt_number?: number;
+  };
   home_viewed: {
     brain_score: number;
     brain_status: string;
@@ -59,6 +141,7 @@ export type TelemetryEventMap = {
   insight_card_tapped: InsightTelemetryProps;
   insight_cta_clicked: InsightTelemetryProps;
   insight_dismissed: InsightTelemetryProps;
+  insight_feedback_submitted: InsightFeedbackTelemetryProps;
   replay_viewed: ReplayTelemetryProps;
   replay_session_tapped: ReplayTelemetryProps & { app_name: string };
   replay_date_changed: ReplayTelemetryProps;
@@ -150,6 +233,14 @@ export type InsightTelemetryProps = {
   cta_type: string;
 };
 
+export type InsightFeedbackTelemetryProps = {
+  surface: InsightFeedbackSurface;
+  insight_type: string;
+  app_package?: string;
+  severity: string;
+  vote: InsightFeedbackVote;
+};
+
 export type ReplayTelemetryProps = {
   date_type: ReplayDateType;
   total_distraction_ms: number;
@@ -187,7 +278,7 @@ export function buildPermissionTelemetry(trigger: PermissionTrigger): Permission
 
 export function buildInsightTelemetry(insight: InsightCard): InsightTelemetryProps {
   return {
-    insight_type: insight.category,
+    insight_type: getInsightTelemetryType(insight),
     app_package: insight.relatedAppPackage || insight.subjectAppPackage || undefined,
     app_name: insight.relatedAppPackage ? undefined : undefined,
     severity: getInsightSeverity(insight),
@@ -207,6 +298,40 @@ export function buildCalendarInsightTelemetry(
     recommended_action: insight.action.type,
     cta_type: `calendar_${insight.periodType}:${insight.action.type}`,
   };
+}
+
+export function buildInsightFeedbackTelemetry(
+  insight: InsightCard,
+  surface: InsightFeedbackSurface,
+  vote: InsightFeedbackVote
+): InsightFeedbackTelemetryProps {
+  return {
+    surface,
+    insight_type: getInsightTelemetryType(insight),
+    app_package: insight.relatedAppPackage || insight.subjectAppPackage || undefined,
+    severity: getInsightSeverity(insight),
+    vote,
+  };
+}
+
+export function buildCalendarInsightFeedbackTelemetry(
+  insight: CalendarPeriodInsight,
+  surface: InsightFeedbackSurface,
+  vote: InsightFeedbackVote
+): InsightFeedbackTelemetryProps {
+  return {
+    surface,
+    insight_type: insight.insightType,
+    app_package: insight.relatedAppPackage || undefined,
+    severity: insight.severity,
+    vote,
+  };
+}
+
+export function getInsightTelemetryType(
+  insight: Pick<InsightCard, "insightType" | "category" | "id">
+): string {
+  return insight.insightType || insight.id || insight.category;
 }
 
 export function getInsightSeverity(insight: InsightCard): string {

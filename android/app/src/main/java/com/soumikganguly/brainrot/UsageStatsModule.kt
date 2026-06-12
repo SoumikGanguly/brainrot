@@ -28,11 +28,6 @@ class UsageStatsModule(reactContext: ReactApplicationContext) : ReactContextBase
     private var lastForegroundApp: String? = null
     private var isRealtimeMonitoring = false
     private val permissionHelper = ManufacturerPermissionHelper(reactContext)
-    private data class RecentEventSnapshot(
-        val packageName: String?,
-        val eventType: Int?,
-        val timestamp: Long
-    )
 
     init {
         Log.d(TAG, "UsageStatsModule initialized with enhanced UsageChecker")
@@ -186,8 +181,6 @@ class UsageStatsModule(reactContext: ReactApplicationContext) : ReactContextBase
         Log.d(TAG, "startBackgroundMonitoring() called with interval: $intervalMinutes")
         try {
             BackgroundUsageWorker.startPeriodicWork(reactApplicationContext, intervalMinutes.toLong())
-            ForegroundMonitoringService.start(reactApplicationContext)
-            startRealtimeMonitoring()
         } catch (e: Exception) {
             Log.e(TAG, "Error starting background monitoring", e)
         }
@@ -198,8 +191,6 @@ class UsageStatsModule(reactContext: ReactApplicationContext) : ReactContextBase
         Log.d(TAG, "stopBackgroundMonitoring() called")
         try {
             BackgroundUsageWorker.stopPeriodicWork(reactApplicationContext)
-            ForegroundMonitoringService.stop(reactApplicationContext)
-            stopRealtimeMonitoring()
         } catch (e: Exception) {
             Log.e(TAG, "Error stopping background monitoring", e)
         }
@@ -293,9 +284,15 @@ class UsageStatsModule(reactContext: ReactApplicationContext) : ReactContextBase
             }
 
             incrementDailyCounter("foreground_query_count")
-            val snapshot = getLatestRelevantUsageEvent(5_000L)
+            val usageStatsManager =
+                reactApplicationContext.getSystemService(Context.USAGE_STATS_SERVICE) as UsageStatsManager
+            val snapshot = ForegroundAppResolver.getCurrentForeground(
+                context = reactApplicationContext,
+                usageStatsManager = usageStatsManager,
+                ignoredPackages = setOf(reactApplicationContext.packageName, "com.android.systemui")
+            )
 
-            if (snapshot.packageName != null && snapshot.eventType == UsageEvents.Event.MOVE_TO_FOREGROUND) {
+            if (snapshot.packageName != null) {
                 val pm = reactApplicationContext.packageManager
                 try {
                     val ai = pm.getApplicationInfo(snapshot.packageName, 0)
@@ -304,7 +301,7 @@ class UsageStatsModule(reactContext: ReactApplicationContext) : ReactContextBase
                     val result = WritableNativeMap()
                     result.putString("packageName", snapshot.packageName)
                     result.putString("appName", appName)
-                    result.putDouble("timestamp", snapshot.timestamp.toDouble())
+                    result.putDouble("timestamp", snapshot.foregroundedAt.toDouble())
 
                     Log.d(TAG, "Current foreground app: $appName (${snapshot.packageName})")
                     promise.resolve(result)
@@ -523,6 +520,23 @@ class UsageStatsModule(reactContext: ReactApplicationContext) : ReactContextBase
     }
 
     @ReactMethod
+    fun syncSubscriptionStatus(subscriptionStatus: String, expiredNotificationTitle: String, expiredNotificationBody: String, promise: Promise) {
+        try {
+            val prefs = reactApplicationContext.getSharedPreferences("brainrot_prefs", Context.MODE_PRIVATE)
+            prefs.edit()
+                .putString("subscription_status", subscriptionStatus)
+                .putString("expired_notification_title", expiredNotificationTitle)
+                .putString("expired_notification_body", expiredNotificationBody)
+                .apply()
+            ForegroundMonitoringService.refreshNotification(reactApplicationContext)
+            promise.resolve(true)
+        } catch (e: Exception) {
+            Log.e(TAG, "Error syncing subscription status", e)
+            promise.reject("SYNC_SUBSCRIPTION_STATUS_ERROR", e.message)
+        }
+    }
+
+    @ReactMethod
     fun syncDailySummary(
         date: String,
         brainScore: Int,
@@ -684,26 +698,27 @@ class UsageStatsModule(reactContext: ReactApplicationContext) : ReactContextBase
     private fun checkCurrentForegroundApp() {
         try {
             incrementDailyCounter("foreground_query_count")
-            val snapshot = getLatestRelevantUsageEvent(10_000L)
+            val usageStatsManager =
+                reactApplicationContext.getSystemService(Context.USAGE_STATS_SERVICE) as UsageStatsManager
+            val snapshot = ForegroundAppResolver.getCurrentForeground(
+                context = reactApplicationContext,
+                usageStatsManager = usageStatsManager,
+                ignoredPackages = setOf(reactApplicationContext.packageName)
+            )
 
-            if (snapshot.packageName != null && snapshot.eventType != null) {
-                persistRealtimeEvent(snapshot.packageName, snapshot.eventType, snapshot.timestamp)
+            if (snapshot.lastEventPackage != null && snapshot.lastEventType != null) {
+                persistRealtimeEvent(snapshot.lastEventPackage, snapshot.lastEventType, snapshot.lastEventAt)
             }
 
             if (snapshot.packageName != null &&
-                snapshot.eventType == UsageEvents.Event.MOVE_TO_FOREGROUND &&
                 snapshot.packageName != lastForegroundApp &&
                 snapshot.packageName != reactApplicationContext.packageName) {
 
                 Log.d(TAG, "Detected app change: ${snapshot.packageName}")
                 lastForegroundApp = snapshot.packageName
                 usageChecker.checkRealtimeAppUsage(snapshot.packageName)
-            } else if (
-                snapshot.packageName != null &&
-                snapshot.eventType == UsageEvents.Event.MOVE_TO_BACKGROUND &&
-                snapshot.packageName == lastForegroundApp
-            ) {
-                Log.d(TAG, "Detected app close: ${snapshot.packageName}")
+            } else if (snapshot.packageName == null && lastForegroundApp != null) {
+                Log.d(TAG, "Detected app close: $lastForegroundApp")
                 lastForegroundApp = null
                 usageChecker.getCurrentBrainState(forceRefresh = true)
             }
@@ -808,13 +823,11 @@ class UsageStatsModule(reactContext: ReactApplicationContext) : ReactContextBase
             }
         }
 
-        val currentForegroundPackage = getLatestRelevantUsageEvent(5_000L).let { snapshot ->
-            if (snapshot.eventType == UsageEvents.Event.MOVE_TO_FOREGROUND) {
-                snapshot.packageName
-            } else {
-                null
-            }
-        }
+        val currentForegroundPackage = ForegroundAppResolver.getCurrentForeground(
+            context = reactApplicationContext,
+            usageStatsManager = usageStatsManager,
+            ignoredPackages = setOf(reactApplicationContext.packageName)
+        ).packageName
 
         sessionStartTimes.forEach { (pkg, startTs) ->
             if (endTime > startTs && pkg == currentForegroundPackage) {
@@ -922,34 +935,6 @@ class UsageStatsModule(reactContext: ReactApplicationContext) : ReactContextBase
         val today = getLocalDateString(System.currentTimeMillis())
         val key = "${name}_$today"
         prefs.edit().putInt(key, prefs.getInt(key, 0) + 1).apply()
-    }
-
-    private fun getLatestRelevantUsageEvent(windowMs: Long): RecentEventSnapshot {
-        val usageStatsManager = reactApplicationContext.getSystemService(Context.USAGE_STATS_SERVICE) as UsageStatsManager
-        val currentTime = System.currentTimeMillis()
-        val events = usageStatsManager.queryEvents(currentTime - windowMs, currentTime)
-        val event = UsageEvents.Event()
-        var lastEventType: Int? = null
-        var lastEventPackage: String? = null
-        var lastEventTime = 0L
-
-        while (events.hasNextEvent()) {
-            events.getNextEvent(event)
-            val packageName = event.packageName ?: continue
-            if (packageName == reactApplicationContext.packageName) continue
-
-            if (
-                (event.eventType == UsageEvents.Event.MOVE_TO_FOREGROUND ||
-                    event.eventType == UsageEvents.Event.MOVE_TO_BACKGROUND) &&
-                event.timeStamp >= lastEventTime
-            ) {
-                lastEventTime = event.timeStamp
-                lastEventPackage = packageName
-                lastEventType = event.eventType
-            }
-        }
-
-        return RecentEventSnapshot(lastEventPackage, lastEventType, lastEventTime)
     }
 
     private fun persistRealtimeEvent(packageName: String, eventType: Int, timestamp: Long) {

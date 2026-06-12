@@ -13,11 +13,11 @@ type CalendarInsightDay = {
   totalScreenTime: number;
   totalMonitoredOpens?: number;
   brainScore: number;
-  apps: Array<{
+  apps: {
     packageName: string;
     appName: string;
     totalTimeMs: number;
-  }>;
+  }[];
   insightSignals?: DailyInsightSignals;
 };
 
@@ -113,8 +113,9 @@ export class CalendarPeriodInsightService {
         entry.totalMonitoredOpens ?? entry.insightSignals?.totalMonitoredOpens ?? 0;
       lateNightUsageMs += entry.insightSignals?.lateNightUsageMs ?? 0;
       morningUsageMs +=
+        entry.insightSignals?.morningUsageMs ??
         (entry.insightSignals?.beforeLunchUsageMs ?? 0) +
-        (entry.insightSignals?.wakeWindowUsageMs ?? 0);
+          (entry.insightSignals?.wakeWindowUsageMs ?? 0);
       awakeSpanMinutes += entry.insightSignals?.awakeSpanMinutes ?? 0;
 
       for (const app of entry.apps) {
@@ -214,8 +215,8 @@ export class CalendarPeriodInsightService {
       recommendationBody:
         topAppMode === "locked"
           ? "Open Focus and tighten your nighttime setup so your nights stay protected."
-          : `Enable Lock Mode for ${aggregated.topApp.appName} at night so late scrolling stops before it snowballs.`,
-      actionLabel: topAppMode === "locked" ? "Open Focus" : "Enable Lock Mode",
+          : `Open Focus and add a nighttime Lock Mode plan for ${aggregated.topApp.appName} before late scrolling snowballs.`,
+      actionLabel: "Open Focus",
       action,
       relatedAppPackage: aggregated.topApp.packageName,
       relatedAppName: aggregated.topApp.appName,
@@ -328,9 +329,9 @@ export class CalendarPeriodInsightService {
       recommendationTitle: "What you can try",
       recommendationBody:
         mode === "monitor"
-          ? `Add ${topApp.appName} to Limit Mode with a short pause so the mindless opens lose momentum.`
+          ? `Open Focus and set up Limit Mode for ${topApp.appName} with a short pause so the mindless opens lose momentum.`
           : `Open Focus and tighten how ${topApp.appName} is protected during your distraction windows.`,
-      actionLabel: mode === "monitor" ? "Enable Limit Mode" : "Open Focus",
+      actionLabel: "Open Focus",
       action,
       relatedAppPackage: topApp.packageName,
       relatedAppName: topApp.appName,

@@ -3,10 +3,10 @@ import { Ionicons } from "@expo/vector-icons";
 import { useLocalSearchParams, useRouter } from "expo-router";
 import { useEffect, useRef, useState } from "react";
 import {
+  Alert,
   AppState,
   AppStateStatus,
   Image,
-  Modal,
   ScrollView,
   Text,
   TouchableOpacity,
@@ -26,11 +26,18 @@ import {
 import { InsightActionService } from "../../services/InsightActionService";
 import { InsightInvalidationService } from "../../services/InsightInvalidationService";
 import type { InsightCard } from "../../services/InsightTypes";
+import { InAppReviewService } from "../../services/InAppReviewService";
 import { TelemetryService } from "../../services/TelemetryService";
 import { type DailyUsage } from "../../services/database";
 import {
-  UnifiedUsageService,
-  type ManufacturerPermissionInfo,
+	buildInsightFeedbackTelemetry,
+	buildInsightTelemetry,
+	type InsightFeedbackVote,
+	withDefinedProperties,
+} from "../../services/TelemetryEvents";
+import {
+	UnifiedUsageService,
+	type ManufacturerPermissionInfo,
 } from "../../services/UnifiedUsageService";
 import { getBrainStateLevel } from "../../utils/brainScore";
 import { formatTime } from "../../utils/time";
@@ -148,7 +155,14 @@ function getBrainExpression(score: number | null | undefined) {
 
 export default function ReplayScreen() {
 	const router = useRouter();
-	const params = useLocalSearchParams<{ moment?: string }>();
+	const params = useLocalSearchParams<{
+		moment?: string;
+		source?: string;
+		replayDay?: string;
+		replayDate?: string;
+		notificationType?: string;
+		notificationId?: string;
+	}>();
 	const [loading, setLoading] = useState(true);
 	const [hasUsagePermission, setHasUsagePermission] = useState<boolean | null>(null);
 	const [manufacturerInfo, setManufacturerInfo] =
@@ -167,11 +181,15 @@ export default function ReplayScreen() {
 		percentage: number;
 	} | null>(null);
 	const [replayInsightCards, setReplayInsightCards] = useState<InsightCard[]>([]);
+	const [insightFeedbackById, setInsightFeedbackById] = useState<
+		Record<string, InsightFeedbackVote>
+	>({});
 	const [emptyStateMessage, setEmptyStateMessage] = useState(
 		"No monitored distraction sessions were recorded for this day.",
 	);
 	const pendingPermissionCheck = useRef(false);
 	const appStateRef = useRef<AppStateStatus>(AppState.currentState);
+	const processedReviewVisitKeyRef = useRef<string | null>(null);
 
 	const selectedDate = getYesterdayDate();
 
@@ -216,6 +234,32 @@ export default function ReplayScreen() {
 		});
 		return unsubscribe;
 	}, [selectedDate, params.moment]);
+
+	useEffect(() => {
+		const isMorningReplayVisit =
+			params.source === "daily_replay" ||
+			params.notificationType === "morning_insight";
+		if (!isMorningReplayVisit) {
+			return;
+		}
+
+		const visitKey =
+			params.notificationId ||
+			params.replayDate ||
+			`${params.source || "daily_replay"}:${params.replayDay || "yesterday"}`;
+		if (processedReviewVisitKeyRef.current === visitKey) {
+			return;
+		}
+
+		processedReviewVisitKeyRef.current = visitKey;
+		void InAppReviewService.registerMorningReplayVisit();
+	}, [
+		params.notificationId,
+		params.notificationType,
+		params.replayDate,
+		params.replayDay,
+		params.source,
+	]);
 
 	async function checkPermissionAndLoad(date: string) {
 		try {
@@ -289,90 +333,71 @@ export default function ReplayScreen() {
 		}
 
 		for (const insight of replayInsightCards) {
-			TelemetryService.track("insight_generated", {
-				insight_type: insight.category,
-				app_package: insight.relatedAppPackage || insight.subjectAppPackage || undefined,
-				app_name: undefined,
-				severity: insight.scoreBreakdown?.finalPriority >= 80 ? "high" : insight.scoreBreakdown?.finalPriority >= 50 ? "medium" : "low",
-				recommended_action: insight.action.type,
-				cta_type: insight.action.type,
-			});
+			TelemetryService.track(
+				"insight_generated",
+				withDefinedProperties(buildInsightTelemetry(insight)),
+			);
 		}
 	}, [replayInsightCards]);
 
+	const handleReplayInsightFeedback = (
+		insight: InsightCard,
+		vote: InsightFeedbackVote,
+	) => {
+		setInsightFeedbackById((current) => {
+			if (current[insight.id] === vote) {
+				return current;
+			}
+
+			TelemetryService.track(
+				"insight_feedback_submitted",
+				withDefinedProperties(
+					buildInsightFeedbackTelemetry(insight, "replay", vote),
+				),
+			);
+			return {
+				...current,
+				[insight.id]: vote,
+			};
+		});
+	};
+
 	return (
 		<SafeAreaView className="flex-1 bg-bg">
-			<Modal
-				visible={filterSheetVisible}
-				transparent
-				animationType="none"
-				hardwareAccelerated
-				onRequestClose={() => setFilterSheetVisible(false)}
-			>
-				<View className="flex-1 justify-end bg-black/35 px-md pb-md">
-					<TouchableOpacity
-						className="flex-1"
-						activeOpacity={1}
-						onPress={() => setFilterSheetVisible(false)}
-					/>
-					<View className="rounded-[28px] bg-white p-md">
-						<View className="flex-row items-center justify-between">
-							<View className="flex-1 pr-sm">
-								<Text className="font-heading-bold text-section text-text">
-									Replay filters
-								</Text>
-								<Text className="mt-2 font-body text-secondary text-muted">
-									Choose which sessions to show.
-								</Text>
-							</View>
-							<TouchableOpacity onPress={() => setFilterSheetVisible(false)}>
-								<Ionicons name="close" size={22} color="#64748B" />
-							</TouchableOpacity>
-						</View>
-
-						<Text className="mt-5 mb-2 font-heading-semibold text-card-title text-text">
-							Event type
-						</Text>
-						<FilterRow
-							options={[
-								{ key: "all", label: "All" },
-								{ key: "session", label: "Sessions" },
-								{ key: "short_open", label: "Short opens" },
-								{ key: "blocked", label: "Blocks" },
-								{ key: "emergency_pass", label: "Passes" },
-							]}
-							selected={eventFilter}
-							onSelect={(value) => setEventFilter(value as ReplayEventFilter)}
-						/>
-
-						<Text className="mt-4 mb-2 font-heading-semibold text-card-title text-text">
-							Time window
-						</Text>
-						<FilterRow
-							options={[
-								{ key: "all", label: "Any time" },
-								{ key: "morning", label: "Morning" },
-								{ key: "day", label: "Day" },
-								{ key: "evening", label: "Evening" },
-								{ key: "night", label: "Night" },
-							]}
-							selected={timeFilter}
-							onSelect={(value) => setTimeFilter(value as ReplayTimeFilter)}
-						/>
-
-						<Text className="mt-4 mb-2 font-heading-semibold text-card-title text-text">
-							App
-						</Text>
-						<FilterRow
-							options={appFilterOptions}
-							selected={appFilter}
-							onSelect={setAppFilter}
-						/>
-					</View>
-				</View>
-			</Modal>
 			<ScrollView className="flex-1" showsVerticalScrollIndicator={false}>
 				<Header title="Replay" />
+
+				{__DEV__ ? (
+					<Card className="mx-md mb-md border border-dashed border-[#C9B9FF] bg-[#F7F3FF]">
+						<View className="flex-row items-center justify-between">
+							<View className="flex-1 pr-3">
+								<Text className="font-heading-semibold text-card-title text-text">
+									Review prompt test
+								</Text>
+								<Text className="mt-1 font-body text-secondary text-muted">
+									Triggers the native in-app review flow from Replay.
+								</Text>
+							</View>
+							<TouchableOpacity
+								onPress={() =>
+									void (async () => {
+										const result =
+											await InAppReviewService.requestReviewFromDebug();
+										if (!result.prompted) {
+											Alert.alert(
+												"Review prompt not shown",
+												`Reason: ${result.reason.replace(/_/g, " ")}`,
+											);
+										}
+									})()
+								}
+								className="rounded-full bg-accent px-4 py-2"
+							>
+								<Text className="font-heading-semibold text-white">Test</Text>
+							</TouchableOpacity>
+						</View>
+					</Card>
+				) : null}
 
 				{hasUsagePermission === false && (
 					<Card className="mx-md mb-md border border-yellow-200 bg-yellow-50">
@@ -581,6 +606,10 @@ export default function ReplayScreen() {
 						<ActionInsightCard
 							insight={insight}
 							surface="replay"
+							feedbackVote={insightFeedbackById[insight.id] ?? null}
+							onFeedbackChange={(vote) =>
+								handleReplayInsightFeedback(insight, vote)
+							}
 							onPress={() =>
 								void (async () => {
 									await InsightActionService.execute(insight.action, router, "replay_cta");
@@ -668,6 +697,69 @@ export default function ReplayScreen() {
 					</Card>
 				</View>
 			</ScrollView>
+			{filterSheetVisible ? (
+				<View className="absolute inset-0 z-50 justify-end bg-black/35 px-md pb-md">
+					<TouchableOpacity
+						className="flex-1"
+						activeOpacity={1}
+						onPress={() => setFilterSheetVisible(false)}
+					/>
+					<View className="rounded-[28px] bg-white p-md">
+						<View className="flex-row items-center justify-between">
+							<View className="flex-1 pr-sm">
+								<Text className="font-heading-bold text-section text-text">
+									Replay filters
+								</Text>
+								<Text className="mt-2 font-body text-secondary text-muted">
+									Choose which sessions to show.
+								</Text>
+							</View>
+							<TouchableOpacity onPress={() => setFilterSheetVisible(false)}>
+								<Ionicons name="close" size={22} color="#64748B" />
+							</TouchableOpacity>
+						</View>
+
+						<Text className="mt-5 mb-2 font-heading-semibold text-card-title text-text">
+							Event type
+						</Text>
+						<FilterRow
+							options={[
+								{ key: "all", label: "All" },
+								{ key: "session", label: "Sessions" },
+								{ key: "short_open", label: "Short opens" },
+								{ key: "blocked", label: "Blocks" },
+								{ key: "emergency_pass", label: "Passes" },
+							]}
+							selected={eventFilter}
+							onSelect={(value) => setEventFilter(value as ReplayEventFilter)}
+						/>
+
+						<Text className="mt-4 mb-2 font-heading-semibold text-card-title text-text">
+							Time window
+						</Text>
+						<FilterRow
+							options={[
+								{ key: "all", label: "Any time" },
+								{ key: "morning", label: "Morning" },
+								{ key: "day", label: "Day" },
+								{ key: "evening", label: "Evening" },
+								{ key: "night", label: "Night" },
+							]}
+							selected={timeFilter}
+							onSelect={(value) => setTimeFilter(value as ReplayTimeFilter)}
+						/>
+
+						<Text className="mt-4 mb-2 font-heading-semibold text-card-title text-text">
+							App
+						</Text>
+						<FilterRow
+							options={appFilterOptions}
+							selected={appFilter}
+							onSelect={setAppFilter}
+						/>
+					</View>
+				</View>
+			) : null}
 		</SafeAreaView>
 	);
 }

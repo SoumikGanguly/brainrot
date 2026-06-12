@@ -1,9 +1,11 @@
 import React, { useEffect, useRef } from 'react';
 import { Text, TouchableOpacity, View } from 'react-native';
 
+import InsightFeedbackRow from './InsightFeedbackRow';
 import { Card } from './Card';
 
 import type { InsightCard } from '@/services/InsightTypes';
+import type { InsightFeedbackVote } from '@/services/TelemetryEvents';
 import { buildInsightTelemetry, withDefinedProperties } from '@/services/TelemetryEvents';
 import { TelemetryService } from '@/services/TelemetryService';
 
@@ -11,11 +13,15 @@ export default function ActionInsightCard({
   insight,
   label,
   surface,
+  feedbackVote,
+  onFeedbackChange,
   onPress,
 }: {
   insight: InsightCard;
   label?: string;
   surface?: 'home' | 'replay';
+  feedbackVote?: InsightFeedbackVote | null;
+  onFeedbackChange?: (vote: InsightFeedbackVote) => void;
   onPress: () => void;
 }) {
   const trackedViewRef = useRef(false);
@@ -73,6 +79,15 @@ export default function ActionInsightCard({
             {insight.actionLabel}
           </Text>
         </TouchableOpacity>
+        {onFeedbackChange ? (
+          <View className="mt-5 border-t border-slate-200 pt-4">
+            <InsightFeedbackRow
+              vote={feedbackVote ?? null}
+              onVoteChange={onFeedbackChange}
+              align="left"
+            />
+          </View>
+        ) : null}
       </View>
     </Card>
   );

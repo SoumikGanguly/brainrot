@@ -26,6 +26,7 @@ import { CapabilitiesService } from "@/services/CapabilitiesService";
 import { MonitoredAppsService } from "@/services/MonitoredAppsService";
 import { buildPermissionTelemetry } from "@/services/TelemetryEvents";
 import { TelemetryService } from "@/services/TelemetryService";
+import { SubscriptionAccessService } from "@/services/SubscriptionAccessService";
 import { TrialService } from "@/services/TrialService";
 import { UnifiedUsageService } from "@/services/UnifiedUsageService";
 import { database } from "@/services/database";
@@ -470,6 +471,8 @@ export default function OnboardingFlow({
 				].join(","),
 			});
 
+			await SubscriptionAccessService.reconcileAccess("onboarding_completed");
+
 			goToApp();
 		} catch (error) {
 			console.error("Error finishing onboarding:", error);
@@ -754,18 +757,20 @@ export default function OnboardingFlow({
 						onPrimary={() => void finishOnboarding()}
 						footer="Your first replay will arrive tomorrow morning."
 					>
-						<View className="mt-4 items-center">
+						<View className="mt-3 items-center">
 							<OnboardingArt
 								source={ASSETS.complete}
-								height={270}
-								bleed={1.14}
+								height={228}
+								bleed={1.08}
+								className="mt-0"
 							/>
 						</View>
-						<View className="mt-4 -mx-5 items-center">
+						<View className="mt-1 -mx-4 items-center">
 							<OnboardingArt
 								source={ASSETS.completeCards}
-								height={262}
-								bleed={1.58}
+								height={218}
+								bleed={1.42}
+								className="mt-0"
 							/>
 						</View>
 					</StepLayout>

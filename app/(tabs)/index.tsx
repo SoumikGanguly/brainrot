@@ -1,8 +1,7 @@
 /* eslint-disable react-hooks/immutability, react-hooks/refs, react/no-unescaped-entities */
 import { useFocusEffect, useRouter } from "expo-router";
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import {
-	Alert,
 	Animated,
 	AppState,
 	AppStateStatus,
@@ -36,9 +35,9 @@ import {
 	type PermissionNudge,
 } from "@/services/PermissionHealthService";
 import { MonitoringDiagnosticsService } from "@/services/MonitoringDiagnosticsService";
-import { PurchaseService } from "@/services/PurchaseService";
+import { SubscriptionAccessService } from "@/services/SubscriptionAccessService";
+import { buildInsightTelemetry, withDefinedProperties } from "@/services/TelemetryEvents";
 import { TelemetryService } from "@/services/TelemetryService";
-import { TrialService } from "@/services/TrialService";
 import {
 	UnifiedUsageService,
 } from "@/services/UnifiedUsageService";
@@ -47,7 +46,6 @@ import {
 	getBrainStateLevel,
 	getScoreColor,
 } from "@/utils/brainScore";
-import { formatTime } from "@/utils/time";
 
 const heroExpressions = {
 	happy: require("../../assets/expressions/happy.png"),
@@ -67,6 +65,12 @@ function getDateShiftedBy(days: number): string {
 	const date = new Date();
 	date.setDate(date.getDate() + days);
 	return formatLocalDate(date);
+}
+
+function waitForStartupWindow(delayMs: number): Promise<void> {
+	return new Promise((resolve) => {
+		setTimeout(resolve, delayMs);
+	});
 }
 
 function getExpressionSource(score: number) {
@@ -91,11 +95,6 @@ export default function HomeScreen() {
 	const [brainState, setBrainState] = useState(getBrainStateLabel(100));
 	const [todayInsights, setTodayInsights] = useState<DailyInsights | null>(null);
 	const [yesterdaySummary, setYesterdaySummary] = useState<DailyUsage | null>(null);
-	const [trialInfo, setTrialInfo] = useState({
-		isActive: false,
-		daysRemaining: 0,
-		expired: false,
-	});
 	const [loading, setLoading] = useState(true);
 	const [hasUsagePermission, setHasUsagePermission] = useState<boolean | null>(null);
 	const [homePermissionPrompt, setHomePermissionPrompt] =
@@ -103,10 +102,10 @@ export default function HomeScreen() {
 	const [loginNudge, setLoginNudge] = useState<LoginNudge | null>(null);
 	const pendingPermissionCheck = useRef(false);
 	const appStateRef = useRef<AppStateStatus>(AppState.currentState);
-	const paywallLoggedRef = useRef<"trial" | "expired" | null>(null);
 	const homeRefreshInFlightRef = useRef(false);
-	const backgroundHomeRefreshQueuedRef = useRef(false);
 	const shownPermissionPromptRef = useRef<string | null>(null);
+	const startupWarmupQueuedRef = useRef(false);
+	const resumeWarmupQueuedRef = useRef(false);
 
 	useEffect(() => {
 		Animated.loop(
@@ -127,37 +126,43 @@ export default function HomeScreen() {
 
 	useEffect(() => {
 		let isInitialized = false;
+		let isCancelled = false;
 
-		const initializeAllServices = async () => {
-			if (isInitialized) return;
-
-			try {
-				const unifiedService = UnifiedUsageService.getInstance();
-				await unifiedService.initialize();
-				await NotificationService.ensureDefaultSchedules();
-
-				const blockingService = AppBlockingService.getInstance();
-				await blockingService.initialize();
-
-				DailyResetService.getInstance().initialize();
-				await MonitoringDiagnosticsService.sampleDailyTelemetry();
-
-				isInitialized = true;
-				thisQueueBackgroundInitialization();
-			} catch (error) {
-				console.error("Failed to initialize services:", error);
-			}
-		};
-
-		const thisQueueBackgroundInitialization = () => {
-			if (backgroundHomeRefreshQueuedRef.current) {
+		const runDeferredStartupWarmup = () => {
+			if (startupWarmupQueuedRef.current) {
 				return;
 			}
 
-			backgroundHomeRefreshQueuedRef.current = true;
+			startupWarmupQueuedRef.current = true;
 			InteractionManager.runAfterInteractions(() => {
 				void (async () => {
 					try {
+						await waitForStartupWindow(350);
+						if (isCancelled) {
+							return;
+						}
+
+						await NotificationService.initialize();
+						if (isCancelled) {
+							return;
+						}
+
+						await AppBlockingService.getInstance().initialize();
+						if (isCancelled) {
+							return;
+						}
+
+						DailyResetService.getInstance().initialize();
+						await MonitoringDiagnosticsService.sampleDailyTelemetry();
+						if (isCancelled) {
+							return;
+						}
+
+						await waitForStartupWindow(250);
+						if (isCancelled) {
+							return;
+						}
+
 						const lastBackfill = await database.getMeta("last_backfill_date");
 						const today = formatLocalDate(new Date());
 						if (lastBackfill !== today) {
@@ -181,14 +186,27 @@ export default function HomeScreen() {
 						}
 
 						await database.cleanupDuplicateEntries();
-						await loadHomeData({ refreshInBackground: true, preferCached: true });
+						if (!isCancelled) {
+							await loadHomeData({ refreshInBackground: true, preferCached: true });
+						}
 					} catch (error) {
 						console.error("Background home initialization failed:", error);
-					} finally {
-						backgroundHomeRefreshQueuedRef.current = false;
 					}
 				})();
 			});
+		};
+
+		const initializeAllServices = async () => {
+			if (isInitialized) return;
+
+			try {
+				const unifiedService = UnifiedUsageService.getInstance();
+				await unifiedService.initialize();
+				isInitialized = true;
+				runDeferredStartupWarmup();
+			} catch (error) {
+				console.error("Failed to initialize services:", error);
+			}
 		};
 
 		void initializeAllServices();
@@ -207,14 +225,31 @@ export default function HomeScreen() {
 
 				const monitoringService = UnifiedUsageService.getInstance();
 				await monitoringService.startMonitoring();
-				await NotificationService.ensureDefaultSchedules();
+				if (!resumeWarmupQueuedRef.current) {
+					resumeWarmupQueuedRef.current = true;
+					InteractionManager.runAfterInteractions(() => {
+						void (async () => {
+							try {
+								await waitForStartupWindow(250);
+								if (isCancelled) {
+									return;
+								}
 
-				const blockingService = AppBlockingService.getInstance();
-				await blockingService.initialize();
+								await NotificationService.ensureDefaultSchedules();
+								await AppBlockingService.getInstance().initialize();
+								await MonitoringDiagnosticsService.sampleDailyTelemetry();
 
-				setTimeout(() => {
-					monitoringService.triggerManualCheck();
-				}, 1000);
+								setTimeout(() => {
+									void monitoringService.triggerManualCheck();
+								}, 600);
+							} catch (error) {
+								console.error("Failed to warm app state resume services:", error);
+							} finally {
+								resumeWarmupQueuedRef.current = false;
+							}
+						})();
+					});
+				}
 			}
 
 			appStateRef.current = nextAppState;
@@ -222,6 +257,7 @@ export default function HomeScreen() {
 
 		const subscription = AppState.addEventListener("change", handleAppStateChange);
 		return () => {
+			isCancelled = true;
 			subscription?.remove();
 		};
 	}, []);
@@ -310,14 +346,9 @@ export default function HomeScreen() {
 	async function hydrateHomeFromCache() {
 		const today = formatLocalDate(new Date());
 		const yesterday = getDateShiftedBy(-1);
-		const [todaySummary, yesterdaySummaryData, trial, cachedTodayInsights] = await Promise.all([
+		const [todaySummary, yesterdaySummaryData, cachedTodayInsights] = await Promise.all([
 			database.getDailySummary(today),
 			database.getDailySummary(yesterday),
-			TrialService.getTrialInfo().catch(() => ({
-				isActive: false,
-				daysRemaining: 0,
-				expired: false,
-			})),
 			DailyInsightsService.getInstance().getDailyInsights(today, {
 				allowInsightRegeneration: false,
 				preferPersistedInsights: true,
@@ -336,7 +367,6 @@ export default function HomeScreen() {
 			100;
 		setBrainScore(nextScore);
 		setBrainState(getBrainStateLabel(nextScore));
-		setTrialInfo(trial);
 		setLoading(false);
 		await refreshNudges();
 	};
@@ -360,7 +390,7 @@ export default function HomeScreen() {
 
 			const today = formatLocalDate(new Date());
 			const yesterday = getDateShiftedBy(-1);
-			const [todayResult, yesterdayResult, trial] = await Promise.all([
+			const [todayResult, yesterdayResult] = await Promise.all([
 				DailyInsightsService.getInstance().getDailyInsights(today, {
 					forceSummaryRefresh: true,
 					allowInsightRegeneration: true,
@@ -370,11 +400,6 @@ export default function HomeScreen() {
 					allowInsightRegeneration: false,
 					preferPersistedInsights: true,
 				}),
-				TrialService.getTrialInfo().catch(() => ({
-					isActive: false,
-					daysRemaining: 0,
-					expired: false,
-				})),
 			]);
 
 			const nextScore =
@@ -383,7 +408,6 @@ export default function HomeScreen() {
 			setYesterdaySummary(yesterdayResult.summary);
 			setBrainScore(nextScore);
 			setBrainState(getBrainStateLabel(nextScore));
-			setTrialInfo(trial);
 			await refreshNudges();
 		} catch (error) {
 			console.log(`Critical error: ${String(error)}`);
@@ -436,41 +460,6 @@ export default function HomeScreen() {
 		}, []),
 	);
 
-	useEffect(() => {
-		if (
-			trialInfo.isActive &&
-			!trialInfo.expired &&
-			paywallLoggedRef.current !== "trial"
-		) {
-			TelemetryService.capture("paywall_shown", {
-				state: "trial_active",
-				days_remaining: trialInfo.daysRemaining,
-			});
-			paywallLoggedRef.current = "trial";
-		} else if (trialInfo.expired && paywallLoggedRef.current !== "expired") {
-			TelemetryService.capture("paywall_shown", {
-				state: "trial_expired",
-			});
-			paywallLoggedRef.current = "expired";
-		}
-	}, [trialInfo]);
-
-	const handlePurchasePress = async () => {
-		const success = await PurchaseService.purchaseLifetime();
-		if (!success) {
-			Alert.alert(
-				"Purchase Unavailable",
-				"The purchase flow is not fully wired yet in this build.",
-			);
-			return;
-		}
-
-		Alert.alert(
-			"Purchase Complete",
-			"Premium unlock was recorded successfully.",
-		);
-	};
-
 	const scoreColor = getScoreColor(brainScore);
 	const primaryInsight = todayInsights?.primaryInsight ?? null;
 	const floatTranslateY = heroFloat.interpolate({
@@ -515,14 +504,10 @@ export default function HomeScreen() {
 			return;
 		}
 
-		TelemetryService.track("insight_generated", {
-			insight_type: primaryInsight.category,
-			app_package: primaryInsight.relatedAppPackage || primaryInsight.subjectAppPackage || undefined,
-			app_name: undefined,
-			severity: primaryInsight.scoreBreakdown?.finalPriority >= 80 ? "high" : primaryInsight.scoreBreakdown?.finalPriority >= 50 ? "medium" : "low",
-			recommended_action: primaryInsight.action.type,
-			cta_type: primaryInsight.action.type,
-		});
+		TelemetryService.track(
+			"insight_generated",
+			withDefinedProperties(buildInsightTelemetry(primaryInsight)),
+		);
 
 		void TelemetryService.trackOnce(
 			"telemetry_first_insight_generated",
@@ -700,26 +685,44 @@ export default function HomeScreen() {
 					</Card>
 				) : null}
 
-				{trialInfo.isActive && !trialInfo.expired && (
-					<Card className="mx-md mb-xl border border-[#E7DFFD] bg-[#F7F3FF]">
-						<View className="items-center">
-							<Text className="mb-sm text-base font-semibold text-[#5D3DF0]">
-								7-day trial active — {trialInfo.daysRemaining} days left
-							</Text>
-							<Text className="mb-md text-center font-body text-secondary text-muted">
-								Unlock permanently for ₹149 / $2.99
-							</Text>
-							<TouchableOpacity
-								onPress={() => void handlePurchasePress()}
-								className="w-full rounded-2xl bg-[#5D3DF0] px-4 py-4"
-							>
-								<Text className="text-center font-heading-semibold text-card-title text-white">
-									Unlock ₹149
-								</Text>
-							</TouchableOpacity>
+				{__DEV__ ? (
+					<Card className="mx-md mb-xl border border-dashed border-[#C9B9FF] bg-[#F7F3FF]">
+						<Text className="font-heading-semibold text-card-title text-text">
+							Subscription gate tester
+						</Text>
+						<Text className="mt-2 font-body text-secondary text-muted">
+							Force the expired gate states without waiting for the trial clock.
+						</Text>
+						<View className="mt-4 flex-row flex-wrap">
+							{[
+								{ label: "Trial", value: "trial" },
+								{ label: "Expired", value: "expired_intro" },
+								{ label: "Declined", value: "expired_declined" },
+								{ label: "Return", value: "expired_returning" },
+								{ label: "Paid", value: "active" },
+							].map((option) => (
+								<TouchableOpacity
+									key={option.value}
+									onPress={() =>
+										void SubscriptionAccessService.setDevOverrideState(
+											option.value as
+												| "trial"
+												| "active"
+												| "expired_intro"
+												| "expired_declined"
+												| "expired_returning",
+										)
+									}
+									className="mb-2 mr-2 rounded-full bg-white px-4 py-2"
+								>
+									<Text className="font-heading-semibold text-secondary text-slate-700">
+										{option.label}
+									</Text>
+								</TouchableOpacity>
+							))}
 						</View>
 					</Card>
-				)}
+				) : null}
 			</ScrollView>
 		</SafeAreaView>
 	);

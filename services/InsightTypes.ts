@@ -44,6 +44,7 @@ export interface InsightPriorityBreakdown {
 
 export interface InsightCard {
   id: string;
+  insightType: string;
   category: InsightCategory;
   priority: number;
   headline: string;
@@ -87,11 +88,11 @@ export type CalendarInsightEvidence =
       kind: 'app_opens';
       title: string;
       body: string;
-      comparisonRows: Array<{
+      comparisonRows: {
         label: string;
         value: number;
         highlighted?: boolean;
-      }>;
+      }[];
     }
   | {
       kind: 'night';
@@ -126,6 +127,7 @@ export interface CalendarPeriodInsight {
 
 export interface RecentInsightMemoryEntry {
   id: string;
+  insightType?: string;
   category: InsightCategory;
   subjectAppPackage?: string;
   subjectMoment?: string;
@@ -157,11 +159,17 @@ export interface DailyInsightSignals {
   longestSessionMs: number;
   averageSessionMs: number;
   lateNightUsageMs: number;
+  morningUsageMs: number;
   beforeLunchUsageMs: number;
   wakeWindowUsageMs: number;
   wakeWindowOpenCount: number;
   awakeSpanMinutes: number;
   distractionCadenceMinutes: number;
+  firstDistractionAt?: string | null;
+  lastDistractionAt?: string | null;
+  longestSessionStartedAt?: string | null;
+  dominantHour?: number | null;
+  dominantHourSharePercent: number;
   topAppPackage?: string | null;
   topAppName?: string | null;
   topAppMs: number;

@@ -24,6 +24,7 @@ export class TelemetryService {
   private static enabled = true;
   private static posthogClient: PostHog | null = null;
   private static anonymousId: string | null = null;
+  private static globalProperties: PostHogEventProperties = {};
   private static debugEvents: Array<{
     event: string;
     properties?: PostHogEventProperties;
@@ -73,12 +74,16 @@ export class TelemetryService {
   }
 
   static capture(event: string, properties?: PostHogEventProperties): void {
-    this.recordDebugEvent(event, properties);
+    const mergedProperties = {
+      ...this.globalProperties,
+      ...(properties || {}),
+    };
+    this.recordDebugEvent(event, mergedProperties);
     if (!this.enabled || !this.posthogClient) {
       return;
     }
 
-    this.posthogClient.capture(event, properties);
+    this.posthogClient.capture(event, mergedProperties);
   }
 
   static track<EventName extends TelemetryEventName>(
@@ -104,12 +109,23 @@ export class TelemetryService {
   }
 
   static async screen(name: string, properties?: PostHogEventProperties): Promise<void> {
-    this.recordDebugEvent(`screen:${name}`, properties);
+    const mergedProperties = {
+      ...this.globalProperties,
+      ...(properties || {}),
+    };
+    this.recordDebugEvent(`screen:${name}`, mergedProperties);
     if (!this.enabled || !this.posthogClient) {
       return;
     }
 
-    await this.posthogClient.screen(name, properties);
+    await this.posthogClient.screen(name, mergedProperties);
+  }
+
+  static setGlobalProperties(properties: PostHogEventProperties): void {
+    this.globalProperties = {
+      ...this.globalProperties,
+      ...properties,
+    };
   }
 
   static identify(distinctId: string, properties?: PostHogEventProperties): void {

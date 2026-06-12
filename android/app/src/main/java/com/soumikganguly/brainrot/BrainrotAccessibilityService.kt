@@ -1,10 +1,10 @@
 package com.soumikganguly.brainrot
 
 import android.accessibilityservice.AccessibilityService
-import android.app.usage.UsageEvents
 import android.app.usage.UsageStatsManager
 import android.content.Context
 import android.content.Intent
+import android.content.SharedPreferences
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
@@ -16,11 +16,26 @@ import org.json.JSONObject
 
 class BrainrotAccessibilityService : AccessibilityService() {
     private val tag = "BrainrotAccessibility"
+    private val prefs by lazy { getSharedPreferences("brainrot_prefs", Context.MODE_PRIVATE) }
     private var lastHandledPackage: String? = null
     private var lastHandledAt = 0L
     private val handler = Handler(Looper.getMainLooper())
     private var softLoopRunnable: Runnable? = null
     private var softLoopPackage: String? = null
+    private var cachedConfigString: String? = null
+    private var cachedConfig: BlockingConfig? = null
+    private val blockingConfigListener =
+        SharedPreferences.OnSharedPreferenceChangeListener { _, key ->
+            if (key == "blocking_config") {
+                refreshCachedConfig()
+            }
+        }
+
+    override fun onServiceConnected() {
+        super.onServiceConnected()
+        prefs.registerOnSharedPreferenceChangeListener(blockingConfigListener)
+        refreshCachedConfig()
+    }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
         val packageName = event?.packageName?.toString() ?: return
@@ -37,6 +52,7 @@ class BrainrotAccessibilityService : AccessibilityService() {
             return
         }
 
+        ForegroundAppResolver.recordForeground(this, packageName, event.eventTime)
         val config = loadConfig() ?: run {
             stopSoftLoop()
             return
@@ -82,6 +98,7 @@ class BrainrotAccessibilityService : AccessibilityService() {
 
     override fun onDestroy() {
         super.onDestroy()
+        prefs.unregisterOnSharedPreferenceChangeListener(blockingConfigListener)
         stopSoftLoop()
     }
 
@@ -143,35 +160,37 @@ class BrainrotAccessibilityService : AccessibilityService() {
     private fun isPackageStillForeground(packageName: String): Boolean {
         return try {
             val usageStatsManager = getSystemService(Context.USAGE_STATS_SERVICE) as UsageStatsManager
-            val currentTime = System.currentTimeMillis()
-            val events = usageStatsManager.queryEvents(currentTime - 4000, currentTime)
-            val event = UsageEvents.Event()
-            var latestPackage: String? = null
-            var latestEventType: Int? = null
-            var lastEventTime = 0L
-
-            while (events.hasNextEvent()) {
-                events.getNextEvent(event)
-                if (
-                    (event.eventType == UsageEvents.Event.MOVE_TO_FOREGROUND ||
-                        event.eventType == UsageEvents.Event.MOVE_TO_BACKGROUND) &&
-                    event.timeStamp > lastEventTime
-                ) {
-                    latestPackage = event.packageName
-                    latestEventType = event.eventType
-                    lastEventTime = event.timeStamp
-                }
-            }
-
-            latestPackage == packageName && latestEventType == UsageEvents.Event.MOVE_TO_FOREGROUND
+            val snapshot = ForegroundAppResolver.getCurrentForeground(
+                context = this,
+                usageStatsManager = usageStatsManager,
+                bootstrapWindowMs = 2 * 60 * 60 * 1000L,
+                ignoredPackages = setOf(applicationContext.packageName)
+            )
+            snapshot.packageName == packageName
         } catch (_: Exception) {
             false
         }
     }
 
     private fun loadConfig(): BlockingConfig? {
-        val prefs = getSharedPreferences("brainrot_prefs", Context.MODE_PRIVATE)
-        val configString = prefs.getString("blocking_config", null) ?: return null
+        val currentConfigString = prefs.getString("blocking_config", null)
+        if (currentConfigString != cachedConfigString) {
+            refreshCachedConfig()
+        }
+        return cachedConfig
+    }
+
+    private fun refreshCachedConfig() {
+        val configString = prefs.getString("blocking_config", null)
+        if (configString == cachedConfigString) {
+            return
+        }
+        cachedConfigString = configString
+        cachedConfig = parseConfig(configString)
+    }
+
+    private fun parseConfig(configString: String?): BlockingConfig? {
+        configString ?: return null
         val json = runCatching { JSONObject(configString) }.getOrNull() ?: run {
             recordRecoverableFailure("malformed_blocking_config", null)
             return null
@@ -223,7 +242,6 @@ class BrainrotAccessibilityService : AccessibilityService() {
     }
 
     private fun isSoftCooldownActive(packageName: String): Boolean {
-        val prefs = getSharedPreferences("brainrot_prefs", Context.MODE_PRIVATE)
         return prefs.getLong("soft_block_cooldown_until_$packageName", 0L) > System.currentTimeMillis()
     }
 
@@ -232,7 +250,6 @@ class BrainrotAccessibilityService : AccessibilityService() {
             return false
         }
 
-        val prefs = getSharedPreferences("brainrot_prefs", Context.MODE_PRIVATE)
         val pendingPackage = prefs.getString("emergency_pass_pending_package", null)
         val activePackage = prefs.getString("emergency_pass_active_package", null)
         return pendingPackage == packageName || activePackage == packageName
@@ -243,7 +260,6 @@ class BrainrotAccessibilityService : AccessibilityService() {
             return
         }
 
-        val prefs = getSharedPreferences("brainrot_prefs", Context.MODE_PRIVATE)
         val editor = prefs.edit()
         var changed = false
 

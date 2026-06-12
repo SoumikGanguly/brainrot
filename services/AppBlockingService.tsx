@@ -22,8 +22,12 @@ const PROTECTED_APPS_KEY = 'protected_apps';
 const FOCUS_SESSION_ACTIVE_KEY = 'focus_session_active';
 const FOCUS_SESSION_STARTED_AT_KEY = 'focus_session_started_at';
 const APP_BLOCKING_ENABLED_KEY = 'app_blocking_enabled';
-const LIMIT_INTERVAL_MINUTES = 15;
-const LOCKED_PASSES_PER_DAY = 2;
+const SUBSCRIPTION_ACCESS_PROTECTION_KEY = 'subscription_access_protection_enabled';
+const SOFT_BLOCK_INTERVAL_MINUTES_KEY = 'soft_block_interval_minutes';
+const BLOCK_BYPASS_LIMIT_KEY = 'block_bypass_limit';
+const DEFAULT_LIMIT_INTERVAL_MINUTES = 15;
+const DEFAULT_LOCKED_PASSES_PER_DAY = 2;
+const PERMISSION_ALERT_COOLDOWN_MS = 30_000;
 
 export class AppBlockingService {
   private static instance: AppBlockingService;
@@ -36,6 +40,11 @@ export class AppBlockingService {
   private lastFallbackBlockAt = 0;
   private limitOverlayShownAt = new Map<string, number>();
   private focusSessionActive = false;
+  private blockingEnabled = true;
+  private subscriptionAccessEnabled = true;
+  private limitIntervalMinutes = DEFAULT_LIMIT_INTERVAL_MINUTES;
+  private lockedPassesPerDay = DEFAULT_LOCKED_PASSES_PER_DAY;
+  private permissionAlertShownAt = new Map<string, number>();
 
   static getInstance(): AppBlockingService {
     if (!this.instance) {
@@ -182,13 +191,12 @@ export class AppBlockingService {
         'Accessibility Required',
         'Focus Session locks protected apps, so Accessibility must be enabled first.'
       );
-      const granted = await UnifiedUsageService.openAccessibilitySettings().then(() => false).catch(() => false);
+      await UnifiedUsageService.openAccessibilitySettings().catch(() => undefined);
       await this.loadState();
-      return granted;
+      return this.hasAccessibilityPermission;
     }
 
     this.focusSessionActive = true;
-    await database.setMeta(APP_BLOCKING_ENABLED_KEY, 'true');
     await database.setMeta(FOCUS_SESSION_ACTIVE_KEY, 'true');
     await database.setMeta(FOCUS_SESSION_STARTED_AT_KEY, Date.now().toString());
     await this.syncNativeConfig();
@@ -220,6 +228,13 @@ export class AppBlockingService {
     return this.focusSessionActive;
   }
 
+  async setSubscriptionAccessEnabled(enabled: boolean): Promise<void> {
+    this.subscriptionAccessEnabled = enabled;
+    await database.setMeta(SUBSCRIPTION_ACCESS_PROTECTION_KEY, enabled ? 'true' : 'false');
+    await this.syncNativeConfig();
+    await this.applyRuntimeBehavior();
+  }
+
   async evaluateForegroundApp(packageName: string, appName?: string): Promise<void> {
     const effectiveMode = this.getEffectiveMode(packageName);
     if (!effectiveMode || effectiveMode === 'monitor' || effectiveMode === 'ignore') {
@@ -240,10 +255,12 @@ export class AppBlockingService {
         reason: 'accessibility_missing',
         source: 'js_fallback',
       });
-      Alert.alert(
-        'Accessibility Required',
-        'Locked protection needs Accessibility access on Android. Enable Accessibility to enforce Locked mode and Focus Sessions.'
-      );
+      if (this.shouldShowPermissionAlert('locked_accessibility_missing')) {
+        Alert.alert(
+          'Accessibility Required',
+          'Locked protection needs Accessibility access on Android. Enable Accessibility to enforce Locked mode and Focus Sessions.'
+        );
+      }
       return;
     }
 
@@ -262,15 +279,17 @@ export class AppBlockingService {
         reason: 'overlay_missing',
         source: 'js_fallback',
       });
-      Alert.alert(
-        'Overlay Permission Required',
-        'Limit mode fallback needs Display over other apps permission.'
-      );
+      if (this.shouldShowPermissionAlert('limit_overlay_missing')) {
+        Alert.alert(
+          'Overlay Permission Required',
+          'Limit mode fallback needs Display over other apps permission.'
+        );
+      }
       return;
     }
 
     const lastShownAt = this.limitOverlayShownAt.get(packageName) || 0;
-    if (lastShownAt !== 0 && now - lastShownAt < LIMIT_INTERVAL_MINUTES * 60 * 1000) {
+    if (lastShownAt !== 0 && now - lastShownAt < this.limitIntervalMinutes * 60 * 1000) {
       return;
     }
 
@@ -340,9 +359,10 @@ export class AppBlockingService {
         mode: app.protectionMode,
       })),
       focusSessionActive: this.focusSessionActive,
-      blockingEnabled: true,
-      limitIntervalMinutes: LIMIT_INTERVAL_MINUTES,
-      lockedPassesPerDay: LOCKED_PASSES_PER_DAY,
+      blockingEnabled:
+        this.subscriptionAccessEnabled && (this.focusSessionActive || this.blockingEnabled),
+      limitIntervalMinutes: this.limitIntervalMinutes,
+      lockedPassesPerDay: this.lockedPassesPerDay,
     });
   }
 
@@ -413,8 +433,35 @@ export class AppBlockingService {
       });
     }
 
-    this.hasAccessibilityPermission = await UnifiedUsageService.hasAccessibilityPermission();
-    this.focusSessionActive = (await database.getMeta(FOCUS_SESSION_ACTIVE_KEY)) === 'true';
+    const [
+      hasAccessibilityPermission,
+      focusSessionActiveMeta,
+      blockingEnabledMeta,
+      subscriptionAccessEnabledMeta,
+      limitIntervalMeta,
+      lockedPassesMeta,
+    ] =
+      await Promise.all([
+        UnifiedUsageService.hasAccessibilityPermission(),
+        database.getMeta(FOCUS_SESSION_ACTIVE_KEY),
+        database.getMeta(APP_BLOCKING_ENABLED_KEY),
+        database.getMeta(SUBSCRIPTION_ACCESS_PROTECTION_KEY),
+        database.getMeta(SOFT_BLOCK_INTERVAL_MINUTES_KEY),
+        database.getMeta(BLOCK_BYPASS_LIMIT_KEY),
+      ]);
+
+    this.hasAccessibilityPermission = hasAccessibilityPermission;
+    this.focusSessionActive = focusSessionActiveMeta === 'true';
+    this.blockingEnabled = blockingEnabledMeta !== 'false';
+    this.subscriptionAccessEnabled = subscriptionAccessEnabledMeta !== 'false';
+    this.limitIntervalMinutes = this.parsePositiveInt(
+      limitIntervalMeta,
+      DEFAULT_LIMIT_INTERVAL_MINUTES
+    );
+    this.lockedPassesPerDay = this.parseNonNegativeInt(
+      lockedPassesMeta,
+      DEFAULT_LOCKED_PASSES_PER_DAY
+    );
   }
 
   private async getProtectedPackages(): Promise<Set<string>> {
@@ -443,6 +490,14 @@ export class AppBlockingService {
 
     if (protectedApp.protectionMode === 'ignore') {
       return 'ignore';
+    }
+
+    if (!this.subscriptionAccessEnabled) {
+      return null;
+    }
+
+    if (!this.focusSessionActive && !this.blockingEnabled) {
+      return null;
     }
 
     if (this.focusSessionActive) {
@@ -505,7 +560,7 @@ export class AppBlockingService {
         if (effectiveMode === 'limit' && this.currentForegroundAppStartedAt) {
           const now = Date.now();
           const lastShownAt = this.limitOverlayShownAt.get(currentForegroundApp.packageName) || 0;
-          if (lastShownAt === 0 || now - lastShownAt >= LIMIT_INTERVAL_MINUTES * 60 * 1000) {
+          if (lastShownAt === 0 || now - lastShownAt >= this.limitIntervalMinutes * 60 * 1000) {
             await this.evaluateForegroundApp(currentForegroundApp.packageName, currentForegroundApp.appName);
           }
         }
@@ -553,4 +608,25 @@ export class AppBlockingService {
       await this.initialize();
     }
   };
+
+  private shouldShowPermissionAlert(key: string): boolean {
+    const now = Date.now();
+    const lastShownAt = this.permissionAlertShownAt.get(key) || 0;
+    if (now - lastShownAt < PERMISSION_ALERT_COOLDOWN_MS) {
+      return false;
+    }
+
+    this.permissionAlertShownAt.set(key, now);
+    return true;
+  }
+
+  private parsePositiveInt(value: string | null, fallback: number): number {
+    const parsed = parseInt(value || '', 10);
+    return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+  }
+
+  private parseNonNegativeInt(value: string | null, fallback: number): number {
+    const parsed = parseInt(value || '', 10);
+    return Number.isFinite(parsed) && parsed >= 0 ? parsed : fallback;
+  }
 }

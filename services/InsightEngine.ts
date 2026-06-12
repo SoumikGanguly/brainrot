@@ -1,15 +1,15 @@
-import { formatTime } from '@/utils/time';
+import { formatTime } from "@/utils/time";
 
-import type { BlockEvent, DailyUsage } from './database';
-import { InsightMemoryService } from './InsightMemoryService';
+import type { BlockEvent, DailyUsage } from "./database";
+import { InsightMemoryService } from "./InsightMemoryService";
 import type {
   DailyInsightSignals,
   InsightAction,
   InsightCard,
   InsightPriorityBreakdown,
   RecentInsightMemory,
-} from './InsightTypes';
-import type { ReplayEntry } from './DailyInsightsService';
+} from "./InsightTypes";
+import type { ReplayEntry } from "./DailyInsightsService";
 
 type InsightEngineInput = {
   date: string;
@@ -24,7 +24,7 @@ type InsightEngineInput = {
 
 type CandidateSpec = Omit<
   InsightCard,
-  'priority' | 'scoreBreakdown'
+  "priority" | "scoreBreakdown"
 > & {
   severity: number;
   actionability: number;
@@ -32,7 +32,7 @@ type CandidateSpec = Omit<
   categoryPrior?: number;
 };
 
-const CATEGORY_PRIORS: Record<InsightCard['category'], number> = {
+const CATEGORY_PRIORS: Record<InsightCard["category"], number> = {
   opportunity_cost: 4,
   awareness: 3,
   pattern: 3,
@@ -43,19 +43,6 @@ const CATEGORY_PRIORS: Record<InsightCard['category'], number> = {
   behavioral: 2,
 };
 
-const OPPORTUNITY_EQUIVALENTS = [
-  {
-    key: 'workouts',
-    unitMinutes: 45,
-    render: (count: number) => `${count} x 45-minute workouts`,
-  },
-  {
-    key: 'guitar',
-    unitMinutes: 30,
-    render: (count: number) => `${count} x 30-minute guitar sessions`,
-  },
-] as const;
-
 export class InsightEngine {
   static async generate(input: InsightEngineInput): Promise<InsightCard[]> {
     const { summary } = input;
@@ -63,51 +50,346 @@ export class InsightEngine {
       return [];
     }
 
-    const isCurrentDate = input.date === new Date().toISOString().split('T')[0];
     const signals = summary.insightSignals;
+    const isCurrentDate = input.date === new Date().toISOString().split("T")[0];
     const memory = await InsightMemoryService.load();
     const candidates: CandidateSpec[] = [];
 
-    const opportunity = this.buildOpportunityInsight(
-      signals,
-      input.focusSessionActive,
-      isCurrentDate
+    this.pushIfPresent(
+      candidates,
+      this.buildBeforeLunchInsight(signals, input.protectionModes),
+      this.buildMostDistractingAppInsight(signals, input.protectionModes),
+      this.buildPhoneCheckFrequencyInsight(signals, input.focusSessionActive),
+      this.buildVulnerableHourInsight(signals),
+      this.buildLongestSpiralInsight(signals),
+      this.buildWakeUpHabitInsight(signals),
+      this.buildBedtimeHabitInsight(signals),
+      this.buildImprovementInsight(signals, input.previousDaySummary),
+      this.buildAttentionDominanceInsight(summary, signals, input.protectionModes),
+      this.buildDistractionClusterInsight(signals, isCurrentDate),
+      this.buildOpportunityCostInsight(signals, input.focusSessionActive, isCurrentDate),
+      this.buildLateNightTrendInsight(signals, input.trailingSummaries, input.protectionModes),
+      this.buildInterventionPotentialInsight(signals, input.protectionModes),
+      this.buildIgnoredWarningsInsight(signals, input.trailingSummaries, input.protectionModes),
+      this.buildWeekendVsWeekdayInsight(summary, input.trailingSummaries)
     );
-    if (opportunity) candidates.push(opportunity);
-
-    const awareness = this.buildAwarenessInsight(signals, input.protectionModes);
-    if (awareness) candidates.push(awareness);
-
-    const pattern = this.buildPatternInsight(signals, input.replayEntries, isCurrentDate);
-    if (pattern) candidates.push(pattern);
-
-    const comparison = this.buildComparisonInsight(
-      signals,
-      summary,
-      input.trailingSummaries,
-      input.protectionModes
-    );
-    if (comparison) candidates.push(comparison);
-
-    const intervention = this.buildInterventionInsight(signals, input.protectionModes);
-    if (intervention) candidates.push(intervention);
-
-    candidates.push(...this.buildInterventionSuccessInsights(input.blockEvents));
-
-    const improvement = this.buildImprovementInsight(signals);
-    if (improvement) candidates.push(improvement);
-
-    const behavioral = this.buildBehavioralInsight(
-      signals,
-      input.focusSessionActive,
-      isCurrentDate
-    );
-    if (behavioral) candidates.push(behavioral);
 
     return this.dedupeAndRank(candidates, memory, input.date);
   }
 
-  private static buildOpportunityInsight(
+  private static buildBeforeLunchInsight(
+    signals: DailyInsightSignals,
+    protectionModes: Map<string, string>
+  ): CandidateSpec | null {
+    if (!signals.topAppPackage || !signals.topAppName || signals.totalDistractingMs <= 0) {
+      return null;
+    }
+
+    const morningShare = Math.round((signals.morningUsageMs / signals.totalDistractingMs) * 100);
+    if (signals.morningUsageMs < 35 * 60 * 1000 || morningShare < 45) {
+      return null;
+    }
+
+    const action = this.getProtectiveAction("limit", signals, protectionModes);
+    return this.createCandidate({
+      id: "tier1-before-lunch",
+      insightType: "before_lunch_share",
+      category: "pattern",
+      headline: `${morningShare}% of your distractions\nhappened before lunch.`,
+      subtext: "Open Focus and protect your mornings before the first spiral gets momentum.",
+      actionLabel: "Open Focus",
+      action,
+      relatedAppPackage: signals.topAppPackage,
+      subjectAppPackage: signals.topAppPackage,
+      subjectMoment: "before_lunch",
+      actionKey: this.getActionKey(action),
+      evidenceStrength: morningShare,
+      severity: this.scale(morningShare / 100, 50, 86),
+      actionability: 82,
+      confidence: 88,
+    });
+  }
+
+  private static buildMostDistractingAppInsight(
+    signals: DailyInsightSignals,
+    protectionModes: Map<string, string>
+  ): CandidateSpec | null {
+    if (!signals.topAppPackage || !signals.topAppName || signals.topAppSharePercent < 40) {
+      return null;
+    }
+
+    const action = this.getProtectiveAction("limit", signals, protectionModes);
+    return this.createCandidate({
+      id: `tier1-top-app-${signals.topAppPackage}`,
+      insightType: "most_distracting_app",
+      category: "awareness",
+      headline: `${signals.topAppName} caused\n${signals.topAppSharePercent}% of your distractions yesterday.`,
+      subtext: "That app is doing most of the damage right now.",
+      actionLabel: "Open Focus",
+      action,
+      relatedAppPackage: signals.topAppPackage,
+      subjectAppPackage: signals.topAppPackage,
+      actionKey: this.getActionKey(action),
+      evidenceStrength: signals.topAppSharePercent,
+      severity: this.scale(signals.topAppSharePercent / 100, 48, 90),
+      actionability: 80,
+      confidence: 92,
+    });
+  }
+
+  private static buildPhoneCheckFrequencyInsight(
+    signals: DailyInsightSignals,
+    focusSessionActive: boolean
+  ): CandidateSpec | null {
+    if (signals.distractionCadenceMinutes <= 0 || signals.distractionCadenceMinutes > 45) {
+      return null;
+    }
+
+    const action = focusSessionActive
+      ? ({ type: "open_focus_screen" } satisfies InsightAction)
+      : ({ type: "start_focus_session" } satisfies InsightAction);
+    return this.createCandidate({
+      id: "tier1-check-frequency",
+      insightType: "phone_check_frequency",
+      category: "behavioral",
+      headline: `You checked ${signals.topAppName || "your phone"}\nevery ${signals.distractionCadenceMinutes} minutes while awake.`,
+      subtext: "This one hits hard.",
+      actionLabel: "Open Focus",
+      action,
+      relatedAppPackage: signals.topAppPackage || undefined,
+      subjectAppPackage: signals.topAppPackage || undefined,
+      actionKey: this.getActionKey(action),
+      evidenceStrength: this.scale((45 - signals.distractionCadenceMinutes) / 45, 56, 94),
+      severity: this.scale((45 - signals.distractionCadenceMinutes) / 45, 46, 88),
+      actionability: focusSessionActive ? 56 : 78,
+      confidence: 84,
+    });
+  }
+
+  private static buildVulnerableHourInsight(
+    signals: DailyInsightSignals
+  ): CandidateSpec | null {
+    if (signals.dominantHour === null || signals.dominantHour === undefined) {
+      return null;
+    }
+    if (signals.dominantHourSharePercent < 16) {
+      return null;
+    }
+
+    const moment = this.getMomentLabelFromHour(signals.dominantHour);
+    const action = {
+      type: "open_replay_at_time_window",
+      moment,
+    } satisfies InsightAction;
+    return this.createCandidate({
+      id: `tier1-vulnerable-hour-${signals.dominantHour}`,
+      insightType: "vulnerable_hour",
+      category: "pattern",
+      headline: `Most distractions happened\nbetween ${this.formatHourWindow(signals.dominantHour)}.`,
+      subtext: `${signals.dominantHourSharePercent}% of your distraction time clustered into that hour.`,
+      actionLabel: "Open Replay",
+      action,
+      subjectMoment: `hour_${signals.dominantHour}`,
+      actionKey: this.getActionKey(action),
+      evidenceStrength: signals.dominantHourSharePercent,
+      severity: this.scale(signals.dominantHourSharePercent / 100, 42, 82),
+      actionability: 70,
+      confidence: 82,
+    });
+  }
+
+  private static buildLongestSpiralInsight(signals: DailyInsightSignals): CandidateSpec | null {
+    if (!signals.longestSessionStartedAt || signals.longestSessionMs < 25 * 60 * 1000) {
+      return null;
+    }
+
+    const moment = this.getMomentLabelFromTimestamp(signals.longestSessionStartedAt);
+    const action = {
+      type: "open_replay_at_time_window",
+      moment,
+    } satisfies InsightAction;
+    return this.createCandidate({
+      id: "tier1-longest-spiral",
+      insightType: "longest_spiral",
+      category: "behavioral",
+      headline: `Your longest distraction\nlasted ${Math.max(1, Math.round(signals.longestSessionMs / 60000))} minutes.`,
+      subtext: `Started at ${this.formatClockTime(signals.longestSessionStartedAt)}.`,
+      actionLabel: "Open Replay",
+      action,
+      subjectMoment: moment,
+      actionKey: this.getActionKey(action),
+      evidenceStrength: this.scale(signals.longestSessionMs / (90 * 60 * 1000), 52, 92),
+      severity: this.scale(signals.longestSessionMs / (90 * 60 * 1000), 48, 90),
+      actionability: 66,
+      confidence: 90,
+    });
+  }
+
+  private static buildWakeUpHabitInsight(signals: DailyInsightSignals): CandidateSpec | null {
+    if (!signals.firstDistractionAt) {
+      return null;
+    }
+
+    const firstHour = new Date(signals.firstDistractionAt).getHours();
+    if (firstHour > 10) {
+      return null;
+    }
+
+    const moment = this.getMomentLabelFromTimestamp(signals.firstDistractionAt);
+    const action = {
+      type: "open_replay_at_time_window",
+      moment,
+    } satisfies InsightAction;
+    return this.createCandidate({
+      id: "tier2-wake-up-habit",
+      insightType: "wake_up_habit",
+      category: "pattern",
+      headline: `Your first distraction happened\nat ${this.formatClockTime(signals.firstDistractionAt)}.`,
+      subtext: "That first open often decides the tone for the rest of the day.",
+      actionLabel: "Open Replay",
+      action,
+      subjectMoment: "first_distraction",
+      actionKey: this.getActionKey(action),
+      evidenceStrength: 68,
+      severity: this.scale((11 - firstHour) / 11, 30, 68),
+      actionability: 60,
+      confidence: 76,
+    });
+  }
+
+  private static buildBedtimeHabitInsight(signals: DailyInsightSignals): CandidateSpec | null {
+    if (!signals.lastDistractionAt) {
+      return null;
+    }
+
+    const lastHour = new Date(signals.lastDistractionAt).getHours();
+    if (lastHour < 21 && lastHour >= 5) {
+      return null;
+    }
+
+    const moment = this.getMomentLabelFromTimestamp(signals.lastDistractionAt);
+    const action = {
+      type: "open_replay_at_time_window",
+      moment,
+    } satisfies InsightAction;
+    return this.createCandidate({
+      id: "tier2-bedtime-habit",
+      insightType: "bedtime_habit",
+      category: "pattern",
+      headline: `Your last distraction happened\nat ${this.formatClockTime(signals.lastDistractionAt)}.`,
+      subtext: "Late endings usually make tomorrow's focus more expensive.",
+      actionLabel: "Open Replay",
+      action,
+      subjectMoment: "last_distraction",
+      actionKey: this.getActionKey(action),
+      evidenceStrength: 72,
+      severity: this.scale(lastHour >= 21 ? (lastHour - 20) / 4 : 1, 34, 72),
+      actionability: 60,
+      confidence: 80,
+    });
+  }
+
+  private static buildImprovementInsight(
+    signals: DailyInsightSignals,
+    previousDaySummary: DailyUsage | null
+  ): CandidateSpec | null {
+    if (signals.improvementVsYesterdayOpens < 4 && signals.improvementVsYesterdayMs < 15 * 60 * 1000) {
+      return null;
+    }
+
+    const previousTopPackage = previousDaySummary?.topAppPackage ?? null;
+    const subjectName =
+      previousTopPackage &&
+      previousTopPackage === signals.topAppPackage &&
+      signals.topAppName
+        ? signals.topAppName
+        : "distracting apps";
+    const action = { type: "open_focus_screen" } satisfies InsightAction;
+
+    return this.createCandidate({
+      id: "tier2-improvement",
+      insightType: "improvement_vs_yesterday",
+      category: "improvement",
+      headline: `You opened ${subjectName}\n${signals.improvementVsYesterdayOpens} fewer times than yesterday.`,
+      subtext: "Users love progress because progress is proof.",
+      actionLabel: "Open Focus",
+      action,
+      relatedAppPackage: signals.topAppPackage || undefined,
+      subjectAppPackage: signals.topAppPackage || undefined,
+      actionKey: this.getActionKey(action),
+      evidenceStrength: Math.min(96, signals.improvementVsYesterdayOpens * 6),
+      severity: this.scale(signals.improvementVsYesterdayOpens / 18, 28, 64),
+      actionability: 52,
+      confidence: 82,
+    });
+  }
+
+  private static buildAttentionDominanceInsight(
+    summary: DailyUsage,
+    signals: DailyInsightSignals,
+    protectionModes: Map<string, string>
+  ): CandidateSpec | null {
+    const [topApp, secondApp, thirdApp] = summary.apps;
+    if (!topApp || !secondApp || !thirdApp) {
+      return null;
+    }
+
+    const combined = secondApp.totalTimeMs + thirdApp.totalTimeMs;
+    if (combined <= 0 || topApp.totalTimeMs <= combined) {
+      return null;
+    }
+
+    const action = this.getProtectiveAction("limit", signals, protectionModes);
+    return this.createCandidate({
+      id: `tier2-attention-dominance-${topApp.packageName}`,
+      insightType: "attention_dominance",
+      category: "comparison",
+      headline: `${topApp.appName} consumed more time\nthan ${secondApp.appName} and ${thirdApp.appName} combined.`,
+      subtext: "One app is dominating the day more than the rest put together.",
+      actionLabel: "Open Focus",
+      action,
+      relatedAppPackage: topApp.packageName,
+      subjectAppPackage: topApp.packageName,
+      actionKey: this.getActionKey(action),
+      evidenceStrength: this.scale(topApp.totalTimeMs / Math.max(combined, 1), 54, 90),
+      severity: this.scale(topApp.totalTimeMs / Math.max(combined, 1), 46, 86),
+      actionability: 76,
+      confidence: 86,
+    });
+  }
+
+  private static buildDistractionClusterInsight(
+    signals: DailyInsightSignals,
+    isCurrentDate: boolean
+  ): CandidateSpec | null {
+    if (signals.wakeWindowUsageMs < 15 * 60 * 1000 || signals.wakeWindowOpenCount < 2) {
+      return null;
+    }
+
+    const action = {
+      type: "open_replay_at_time_window",
+      moment: "Early morning",
+    } satisfies InsightAction;
+    return this.createCandidate({
+      id: "tier2-distraction-cluster",
+      insightType: "distraction_cluster_after_waking",
+      category: "pattern",
+      headline: "Most distractions happened\nwithin 30 minutes of waking up.",
+      subtext: isCurrentDate
+        ? `That first stretch has already cost you ${formatTime(signals.wakeWindowUsageMs)} today.`
+        : `That first stretch cost you ${formatTime(signals.wakeWindowUsageMs)} yesterday.`,
+      actionLabel: "Open Replay",
+      action,
+      subjectMoment: "wake_window",
+      actionKey: this.getActionKey(action),
+      evidenceStrength: this.scale(signals.wakeWindowUsageMs / (60 * 60 * 1000), 52, 88),
+      severity: this.scale(signals.wakeWindowUsageMs / (60 * 60 * 1000), 42, 82),
+      actionability: 72,
+      confidence: 84,
+    });
+  }
+
+  private static buildOpportunityCostInsight(
     signals: DailyInsightSignals,
     focusSessionActive: boolean,
     isCurrentDate: boolean
@@ -116,192 +398,72 @@ export class InsightEngine {
       return null;
     }
 
-    const chips = this.buildOpportunityEquivalents(signals.totalDistractingMs);
-    if (chips.length === 0) {
-      return null;
-    }
-
+    const chips = this.buildOpportunityChips(signals.totalDistractingMs);
     const action = focusSessionActive
-      ? ({ type: 'open_focus_screen' } satisfies InsightAction)
-      : ({ type: 'start_focus_session' } satisfies InsightAction);
+      ? ({ type: "open_focus_screen" } satisfies InsightAction)
+      : ({ type: "start_focus_session" } satisfies InsightAction);
 
     return this.createCandidate({
-      id: 'opportunity-cost',
-      category: 'opportunity_cost',
+      id: "tier3-opportunity-cost",
+      insightType: "opportunity_cost",
+      category: "opportunity_cost",
       headline: isCurrentDate
         ? `You have lost ${formatTime(signals.totalDistractingMs)} today.`
-        : `You lost ${formatTime(signals.totalDistractingMs)} that day.`,
-      subtext: 'That was enough time to reclaim for things you would actually remember doing.',
+        : `You lost ${formatTime(signals.totalDistractingMs)} yesterday.`,
+      subtext: "That's enough time for things you would actually remember doing.",
       chips,
-      actionLabel: focusSessionActive ? 'Open Focus' : 'Start Focus Mode today',
+      actionLabel: "Open Focus",
       action,
       actionKey: this.getActionKey(action),
       evidenceStrength: 96,
-      severity: this.scale(signals.totalDistractingMs / (4 * 60 * 60 * 1000), 45, 98),
-      actionability: focusSessionActive ? 44 : 92,
-      confidence: 95,
+      severity: this.scale(signals.totalDistractingMs / (4 * 60 * 60 * 1000), 50, 96),
+      actionability: focusSessionActive ? 54 : 82,
+      confidence: 96,
     });
   }
 
-  private static buildAwarenessInsight(
+  private static buildLateNightTrendInsight(
     signals: DailyInsightSignals,
-    protectionModes: Map<string, string>
-  ): CandidateSpec | null {
-    if (!signals.topAppName || !signals.topAppPackage || signals.topAppOpenCount < 8) {
-      return null;
-    }
-
-    const mode = protectionModes.get(signals.topAppPackage) || 'monitor';
-    const action =
-      mode === 'monitor'
-        ? ({
-            type: 'set_app_mode_limit',
-            packageName: signals.topAppPackage,
-            appName: signals.topAppName,
-          } satisfies InsightAction)
-        : ({ type: 'open_focus_screen' } satisfies InsightAction);
-
-    return this.createCandidate({
-      id: `awareness-${signals.topAppPackage}`,
-      category: 'awareness',
-      headline: `You opened ${signals.topAppName}\n${signals.topAppOpenCount} times.`,
-      subtext: 'Frequent checking is usually where attention gets fragmented first.',
-      actionLabel: mode === 'monitor' ? 'Enable Limit Mode' : 'Open Focus',
-      action,
-      relatedAppPackage: signals.topAppPackage,
-      subjectAppPackage: signals.topAppPackage,
-      actionKey: this.getActionKey(action),
-      evidenceStrength: Math.min(100, signals.topAppOpenCount * 4),
-      severity: this.scale(signals.topAppOpenCount / 32, 38, 88),
-      actionability: mode === 'monitor' ? 84 : 46,
-      confidence: 88,
-    });
-  }
-
-  private static buildPatternInsight(
-    signals: DailyInsightSignals,
-    replayEntries: ReplayEntry[],
-    isCurrentDate: boolean
-  ): CandidateSpec | null {
-    if (
-      signals.wakeWindowUsageMs >= 20 * 60 * 1000 &&
-      signals.wakeWindowOpenCount >= 2
-    ) {
-      const action = {
-        type: 'open_replay_at_time_window',
-        moment: 'Early morning',
-      } satisfies InsightAction;
-
-      return this.createCandidate({
-        id: 'pattern-wake-window',
-        category: 'pattern',
-        headline: 'Most of your distractions happen\nwithin 30 minutes of waking up.',
-        subtext: isCurrentDate
-          ? `That first stretch has already cost you ${formatTime(signals.wakeWindowUsageMs)} today.`
-          : `That first stretch cost you ${formatTime(signals.wakeWindowUsageMs)} that day.`,
-        actionLabel: 'Tap to see replay',
-        action,
-        subjectMoment: 'Early morning',
-        actionKey: this.getActionKey(action),
-        evidenceStrength: 84,
-        severity: this.scale(signals.wakeWindowUsageMs / (90 * 60 * 1000), 35, 82),
-        actionability: 74,
-        confidence: 86,
-      });
-    }
-
-    if (!signals.dominantMoment || signals.dominantMomentPercent < 38) {
-      return null;
-    }
-
-    const hasMatchingReplay = replayEntries.some((entry) => entry.moment === signals.dominantMoment);
-    if (!hasMatchingReplay) {
-      return null;
-    }
-
-    const action = {
-      type: 'open_replay_at_time_window',
-      moment: signals.dominantMoment,
-    } satisfies InsightAction;
-
-    return this.createCandidate({
-      id: `pattern-${signals.dominantMoment}`,
-      category: 'pattern',
-      headline: `Most distractions happen\n${this.getMomentWindowCopy(signals.dominantMoment)}.`,
-      subtext: isCurrentDate
-        ? `${signals.dominantMomentPercent}% of today's distraction time has landed there.`
-        : `${signals.dominantMomentPercent}% of that day's distraction time landed there.`,
-      actionLabel: 'Tap to see replay',
-      action,
-      subjectMoment: signals.dominantMoment,
-      actionKey: this.getActionKey(action),
-      evidenceStrength: signals.dominantMomentPercent,
-      severity: this.scale(signals.dominantMomentPercent / 100, 32, 78),
-      actionability: 76,
-      confidence: 90,
-    });
-  }
-
-  private static buildComparisonInsight(
-    signals: DailyInsightSignals,
-    summary: DailyUsage,
     trailingSummaries: DailyUsage[],
     protectionModes: Map<string, string>
   ): CandidateSpec | null {
-    const topApp = summary.apps[0];
-    if (!topApp) {
-      return null;
-    }
-
-    const historicalValues = trailingSummaries
-      .map((day) => day.apps.find((app) => app.packageName === topApp.packageName)?.totalTimeMs || 0)
+    const baselines = trailingSummaries
+      .map((entry) => entry.insightSignals?.lateNightUsageMs ?? 0)
       .filter((value) => value > 0);
-
-    if (historicalValues.length === 0) {
+    if (signals.lateNightUsageMs < 25 * 60 * 1000 || baselines.length < 3) {
       return null;
     }
 
-    const averagePreviousUsage =
-      historicalValues.reduce((sum, value) => sum + value, 0) / historicalValues.length;
-    if (averagePreviousUsage <= 0 || topApp.totalTimeMs <= averagePreviousUsage) {
+    const baseline = baselines.reduce((sum, value) => sum + value, 0) / baselines.length;
+    if (baseline <= 0 || signals.lateNightUsageMs <= baseline) {
       return null;
     }
 
-    const increasePercent = Math.round(
-      ((topApp.totalTimeMs - averagePreviousUsage) / averagePreviousUsage) * 100
-    );
-    if (increasePercent < 25) {
+    const increasePercent = Math.round(((signals.lateNightUsageMs - baseline) / baseline) * 100);
+    if (increasePercent < 20) {
       return null;
     }
 
-    const mode = protectionModes.get(topApp.packageName) || 'monitor';
-    const action =
-      mode === 'locked'
-        ? ({ type: 'open_focus_screen' } satisfies InsightAction)
-        : ({
-            type: 'set_app_mode_locked',
-            packageName: topApp.packageName,
-            appName: topApp.appName,
-          } satisfies InsightAction);
-
+    const action = this.getProtectiveAction("locked", signals, protectionModes);
     return this.createCandidate({
-      id: `comparison-${topApp.packageName}`,
-      category: 'comparison',
-      headline: `${topApp.appName} usage increased\n${increasePercent}% from last week.`,
-      subtext: `${topApp.appName} is taking a bigger share of your attention than usual.`,
-      actionLabel: mode === 'locked' ? 'Open Focus' : 'Enable Lock Mode',
+      id: "tier3-late-night-trend",
+      insightType: "late_night_trend",
+      category: "comparison",
+      headline: `Late-night scrolling increased\n${increasePercent}% compared to last week.`,
+      subtext: "The night pattern is getting stronger, not weaker.",
+      actionLabel: "Open Focus",
       action,
-      relatedAppPackage: topApp.packageName,
-      subjectAppPackage: topApp.packageName,
+      relatedAppPackage: signals.topAppPackage || undefined,
+      subjectMoment: "late_night",
       actionKey: this.getActionKey(action),
       evidenceStrength: Math.min(100, increasePercent),
-      severity: this.scale(increasePercent / 100, 44, 90),
-      actionability: mode === 'locked' ? 42 : 86,
-      confidence: this.scale(historicalValues.length / 7, 68, 90),
+      severity: this.scale(increasePercent / 100, 42, 86),
+      actionability: 74,
+      confidence: this.scale(baselines.length / 7, 72, 88),
     });
   }
 
-  private static buildInterventionInsight(
+  private static buildInterventionPotentialInsight(
     signals: DailyInsightSignals,
     protectionModes: Map<string, string>
   ): CandidateSpec | null {
@@ -309,187 +471,105 @@ export class InsightEngine {
       return null;
     }
 
-    const mode = protectionModes.get(signals.topAppPackage) || 'monitor';
-    if (mode !== 'monitor') {
-      return null;
-    }
-
-    const action = {
-      type: 'set_app_mode_limit',
-      packageName: signals.topAppPackage,
-      appName: signals.topAppName,
-    } satisfies InsightAction;
-
+    const action = this.getProtectiveAction("limit", signals, protectionModes);
     return this.createCandidate({
-      id: `intervention-${signals.topAppPackage}`,
-      category: 'intervention',
-      headline: `Limit Mode could reduce\n${signals.topAppSharePercent}% of your distractions.`,
-      subtext: `${signals.topAppName} caused most of yesterday's distraction time.`,
-      actionLabel: 'Enable Limit Mode',
+      id: `tier3-intervention-${signals.topAppPackage}`,
+      insightType: "intervention_potential",
+      category: "intervention",
+      headline: `Limit Mode could have prevented\n${signals.topAppSharePercent}% of yesterday's distractions.`,
+      subtext: `${signals.topAppName} created most of the damage.`,
+      actionLabel: "Open Focus",
       action,
       relatedAppPackage: signals.topAppPackage,
       subjectAppPackage: signals.topAppPackage,
       actionKey: this.getActionKey(action),
       evidenceStrength: signals.topAppSharePercent,
-      severity: this.scale(signals.topAppSharePercent / 100, 30, 76),
-      actionability: 82,
-      confidence: 82,
-    });
-  }
-
-  private static buildImprovementInsight(
-    signals: DailyInsightSignals
-  ): CandidateSpec | null {
-    if (signals.improvementVsYesterdayOpens < 5) {
-      return null;
-    }
-
-    const action = { type: 'open_focus_screen' } satisfies InsightAction;
-
-    return this.createCandidate({
-      id: 'improvement-yesterday',
-      category: 'improvement',
-      headline: `You opened ${signals.topAppName || 'your distractions'}\n${signals.improvementVsYesterdayOpens} fewer times than yesterday.`,
-      subtext: 'That is real progress. Reinforce it before the pattern snaps back.',
-      actionLabel: 'Open Focus',
-      action,
-      relatedAppPackage: signals.topAppPackage || undefined,
-      subjectAppPackage: signals.topAppPackage || undefined,
-      actionKey: this.getActionKey(action),
-      evidenceStrength: Math.min(100, signals.improvementVsYesterdayOpens * 5),
-      severity: this.scale(signals.improvementVsYesterdayOpens / 20, 26, 62),
-      actionability: 54,
+      severity: this.scale(signals.topAppSharePercent / 100, 36, 80),
+      actionability: 84,
       confidence: 84,
     });
   }
 
-  private static buildInterventionSuccessInsights(blockEvents: BlockEvent[]): CandidateSpec[] {
-    const action = { type: 'open_focus_screen' } satisfies InsightAction;
-    const candidates: CandidateSpec[] = [];
-    const abandoned = blockEvents.filter((event) => event.action === 'abandoned');
-    const bypassed = blockEvents.filter((event) => event.action === 'bypassed');
-    const focusBlocks = blockEvents.filter(
-      (event) => event.protectionContext === 'focus_session' && event.action === 'blocked'
-    );
-    const cooldowns = blockEvents.filter(
-      (event) => event.protectionContext === 'limit_mode' && event.action === 'cooldown_started'
-    );
-
-    if (abandoned.length > 0) {
-      candidates.push(this.createCandidate({
-        id: 'success-abandoned-blocks',
-        category: 'success',
-        headline: `You walked away ${abandoned.length} ${abandoned.length === 1 ? 'time' : 'times'}.`,
-        subtext: 'Those are real interrupted impulses, not vague motivation.',
-        actionLabel: 'Open Focus',
-        action,
-        actionKey: this.getActionKey(action),
-        evidenceStrength: Math.min(100, abandoned.length * 18),
-        severity: this.scale(abandoned.length / 6, 22, 56),
-        actionability: 48,
-        confidence: 92,
-      }));
+  private static buildIgnoredWarningsInsight(
+    signals: DailyInsightSignals,
+    trailingSummaries: DailyUsage[],
+    protectionModes: Map<string, string>
+  ): CandidateSpec | null {
+    const hasLimitModeEnabled = Array.from(protectionModes.values()).some((mode) => mode === "limit");
+    if (!hasLimitModeEnabled) {
+      return null;
     }
 
-    if (focusBlocks.length > 0) {
-      candidates.push(this.createCandidate({
-        id: 'success-focus-blocks',
-        category: 'success',
-        headline: `Focus Session protected you ${focusBlocks.length} ${focusBlocks.length === 1 ? 'time' : 'times'}.`,
-        subtext: 'That is the lock doing exactly what you asked it to do.',
-        actionLabel: 'Open Focus',
-        action,
-        actionKey: this.getActionKey(action),
-        evidenceStrength: Math.min(100, focusBlocks.length * 16),
-        severity: this.scale(focusBlocks.length / 8, 24, 58),
-        actionability: 44,
-        confidence: 94,
-      }));
+    const weeklyLimitDismissals =
+      signals.limitDismissals +
+      trailingSummaries
+        .slice(0, 6)
+        .reduce((sum, entry) => sum + (entry.insightSignals?.limitDismissals ?? 0), 0);
+    if (weeklyLimitDismissals < 3) {
+      return null;
     }
 
-    if (cooldowns.length > 0) {
-      candidates.push(this.createCandidate({
-        id: 'success-limit-cooldowns',
-        category: 'success',
-        headline: `Limit Mode made you pause ${cooldowns.length} ${cooldowns.length === 1 ? 'time' : 'times'}.`,
-        subtext: 'Each cooldown is a chance for the urge to lose momentum.',
-        actionLabel: 'Open Focus',
-        action,
-        actionKey: this.getActionKey(action),
-        evidenceStrength: Math.min(100, cooldowns.length * 14),
-        severity: this.scale(cooldowns.length / 8, 20, 54),
-        actionability: 46,
-        confidence: 90,
-      }));
-    }
-
-    if (bypassed.length > 0) {
-      candidates.push(this.createCandidate({
-        id: 'intervention-emergency-passes',
-        category: 'intervention',
-        headline: `You used ${bypassed.length} emergency ${bypassed.length === 1 ? 'pass' : 'passes'}.`,
-        subtext: 'If that was not a true emergency, Lock Mode needs a tighter plan.',
-        actionLabel: 'Open Focus',
-        action,
-        actionKey: this.getActionKey(action),
-        evidenceStrength: Math.min(100, bypassed.length * 20),
-        severity: this.scale(bypassed.length / 2, 38, 76),
-        actionability: 58,
-        confidence: 92,
-      }));
-    }
-
-    return candidates;
+    const action = { type: "open_focus_screen" } satisfies InsightAction;
+    return this.createCandidate({
+      id: "tier3-ignored-warnings",
+      insightType: "ignored_warnings",
+      category: "intervention",
+      headline: `You ignored ${weeklyLimitDismissals} reflection screens\nthis week.`,
+      subtext: "The reflection is showing up. The plan just needs to get tighter.",
+      actionLabel: "Open Focus",
+      action,
+      subjectMoment: "limit_mode",
+      actionKey: this.getActionKey(action),
+      evidenceStrength: Math.min(100, weeklyLimitDismissals * 12),
+      severity: this.scale(weeklyLimitDismissals / 10, 38, 78),
+      actionability: 72,
+      confidence: 88,
+    });
   }
 
-  private static buildBehavioralInsight(
-    signals: DailyInsightSignals,
-    focusSessionActive: boolean,
-    isCurrentDate: boolean
+  private static buildWeekendVsWeekdayInsight(
+    summary: DailyUsage,
+    trailingSummaries: DailyUsage[]
   ): CandidateSpec | null {
-    const action = focusSessionActive
-      ? ({ type: 'open_focus_screen' } satisfies InsightAction)
-      : ({ type: 'start_focus_session' } satisfies InsightAction);
+    const sample = [summary, ...trailingSummaries];
+    const weekendValues = sample
+      .filter((entry) => this.isWeekend(entry.date))
+      .map((entry) => entry.totalDistractingMs ?? entry.totalScreenTime);
+    const weekdayValues = sample
+      .filter((entry) => !this.isWeekend(entry.date))
+      .map((entry) => entry.totalDistractingMs ?? entry.totalScreenTime);
 
-    if (signals.distractionCadenceMinutes > 0 && signals.distractionCadenceMinutes <= 25) {
-      return this.createCandidate({
-        id: 'behavioral-cadence',
-        category: 'behavioral',
-        headline: `You checked ${signals.topAppName || 'your phone'}\nonce every ${signals.distractionCadenceMinutes} minutes while awake.`,
-        subtext: 'That kind of cadence keeps your attention from settling.',
-        actionLabel: focusSessionActive ? 'Open Focus' : 'Start Focus Mode today',
-        action,
-        relatedAppPackage: signals.topAppPackage || undefined,
-        subjectAppPackage: signals.topAppPackage || undefined,
-        actionKey: this.getActionKey(action),
-        evidenceStrength: this.scale((25 - signals.distractionCadenceMinutes) / 25, 50, 92),
-        severity: this.scale((25 - signals.distractionCadenceMinutes) / 25, 36, 80),
-        actionability: focusSessionActive ? 42 : 72,
-        confidence: 80,
-      });
+    if (weekendValues.length < 2 || weekdayValues.length < 3) {
+      return null;
     }
 
-    if (signals.totalDistractingMs >= 50 * 60 * 1000) {
-      return this.createCandidate({
-        id: 'behavioral-eating',
-        category: 'behavioral',
-        headline: isCurrentDate
-          ? `You have spent more time on ${signals.topAppName || 'distractions'}\nthan eating today.`
-          : `You spent more time on ${signals.topAppName || 'distractions'}\nthan eating that day.`,
-        subtext: 'That is a strong sign the day is bending around your impulses.',
-        actionLabel: focusSessionActive ? 'Open Focus' : 'Start Focus Mode today',
-        action,
-        relatedAppPackage: signals.topAppPackage || undefined,
-        subjectAppPackage: signals.topAppPackage || undefined,
-        actionKey: this.getActionKey(action),
-        evidenceStrength: 70,
-        severity: this.scale(signals.totalDistractingMs / (3 * 60 * 60 * 1000), 28, 68),
-        actionability: focusSessionActive ? 42 : 70,
-        confidence: 68,
-      });
+    const weekendAverage = weekendValues.reduce((sum, value) => sum + value, 0) / weekendValues.length;
+    const weekdayAverage = weekdayValues.reduce((sum, value) => sum + value, 0) / weekdayValues.length;
+    if (weekdayAverage <= 0 || weekendAverage <= weekdayAverage) {
+      return null;
     }
 
-    return null;
+    const increasePercent = Math.round(((weekendAverage - weekdayAverage) / weekdayAverage) * 100);
+    if (increasePercent < 20) {
+      return null;
+    }
+
+    const action = { type: "open_focus_screen" } satisfies InsightAction;
+    return this.createCandidate({
+      id: "tier3-weekend-vs-weekday",
+      insightType: "weekend_vs_weekday",
+      category: "comparison",
+      headline: `You are ${increasePercent}% more distracted\non weekends.`,
+      subtext: "Your recovery days are where attention slips the most.",
+      actionLabel: "Open Focus",
+      action,
+      subjectMoment: "weekend",
+      actionKey: this.getActionKey(action),
+      evidenceStrength: Math.min(100, increasePercent),
+      severity: this.scale(increasePercent / 100, 38, 78),
+      actionability: 62,
+      confidence: 80,
+    });
   }
 
   private static dedupeAndRank(
@@ -503,11 +583,11 @@ export class InsightEngine {
       .sort((a, b) => b.priority - a.priority)
       .filter((candidate) => {
         const dedupeKey = [
-          candidate.category,
-          candidate.subjectAppPackage || '',
-          candidate.subjectMoment || '',
+          candidate.insightType,
+          candidate.subjectAppPackage || "",
+          candidate.subjectMoment || "",
           candidate.actionKey,
-        ].join(':');
+        ].join(":");
         if (seen.has(dedupeKey)) {
           return false;
         }
@@ -538,10 +618,10 @@ export class InsightEngine {
     const freshness = this.computeFreshness(date);
     const categoryPrior = candidate.categoryPrior ?? CATEGORY_PRIORS[candidate.category] ?? 0;
     const finalPriority = Math.round(
-      candidate.severity * 0.38 +
-        candidate.actionability * 0.2 +
-        candidate.confidence * 0.16 +
-        novelty * 0.18 +
+      novelty * 0.3 +
+        candidate.severity * 0.24 +
+        candidate.actionability * 0.18 +
+        candidate.confidence * 0.14 +
         freshness * 0.08 +
         categoryPrior
     );
@@ -572,13 +652,17 @@ export class InsightEngine {
       .sort((a, b) => b.localeCompare(a))
       .slice(0, 4);
 
-    let novelty = 78;
+    let novelty = 82;
+    let insightTypeHits = 0;
     let categoryHits = 0;
     let appHits = 0;
     let momentHits = 0;
 
     for (const priorDate of priorDates) {
       const entries = memory.shownByDate[priorDate] || [];
+      if (entries.some((entry) => entry.insightType === candidate.insightType)) {
+        insightTypeHits += 1;
+      }
       if (entries.some((entry) => entry.category === candidate.category)) {
         categoryHits += 1;
       }
@@ -596,9 +680,10 @@ export class InsightEngine {
       }
     }
 
-    novelty -= categoryHits * 10;
-    novelty -= appHits * 8;
-    novelty -= momentHits * 6;
+    novelty -= insightTypeHits * 16;
+    novelty -= categoryHits * 8;
+    novelty -= appHits * 6;
+    novelty -= momentHits * 5;
 
     const recentlyActed = memory.acted.some(
       (entry) =>
@@ -606,20 +691,20 @@ export class InsightEngine {
         Date.now() - entry.actedAt < 3 * 24 * 60 * 60 * 1000
     );
     if (recentlyActed) {
-      novelty -= 22;
+      novelty -= 18;
     }
 
-    if (categoryHits === 0) {
+    if (insightTypeHits === 0) {
       novelty += 10;
     }
     if (candidate.subjectAppPackage && appHits === 0) {
-      novelty += 6;
-    }
-    if (candidate.subjectMoment && momentHits === 0) {
       novelty += 5;
     }
+    if (candidate.subjectMoment && momentHits === 0) {
+      novelty += 4;
+    }
 
-    return this.clamp(novelty, 18, 96);
+    return this.clamp(novelty, 16, 98);
   }
 
   private static computeFreshness(date: string): number {
@@ -643,17 +728,50 @@ export class InsightEngine {
     return left.actionKey === right.actionKey;
   }
 
-  private static buildOpportunityEquivalents(totalMs: number): string[] {
+  private static buildOpportunityChips(totalMs: number): string[] {
     const totalMinutes = Math.floor(totalMs / 60000);
-    const chips = OPPORTUNITY_EQUIVALENTS.map((item) => {
-      const count = Math.floor(totalMinutes / item.unitMinutes);
-      if (count < 1) {
-        return null;
-      }
-      return item.render(count);
-    }).filter((value): value is string => Boolean(value));
-
+    const chips: string[] = [];
+    if (totalMinutes >= 45) {
+      chips.push("a workout");
+    }
+    if (totalMinutes >= 120) {
+      chips.push("60 pages of reading");
+    }
+    if (totalMinutes >= 30) {
+      chips.push("a long walk");
+    }
     return chips.slice(0, 3);
+  }
+
+  private static getProtectiveAction(
+    desiredMode: "limit" | "locked",
+    signals: DailyInsightSignals,
+    protectionModes: Map<string, string>
+  ): InsightAction {
+    if (!signals.topAppPackage || !signals.topAppName) {
+      return { type: "start_focus_session" };
+    }
+
+    const currentMode = protectionModes.get(signals.topAppPackage) || "monitor";
+    if (desiredMode === "limit") {
+      if (currentMode === "monitor") {
+        return {
+          type: "set_app_mode_limit",
+          packageName: signals.topAppPackage,
+          appName: signals.topAppName,
+        };
+      }
+      return { type: "open_focus_screen" };
+    }
+
+    if (currentMode !== "locked") {
+      return {
+        type: "set_app_mode_locked",
+        packageName: signals.topAppPackage,
+        appName: signals.topAppName,
+      };
+    }
+    return { type: "open_focus_screen" };
   }
 
   private static createCandidate(candidate: CandidateSpec): CandidateSpec {
@@ -665,28 +783,68 @@ export class InsightEngine {
 
   private static getActionKey(action: InsightAction): string {
     switch (action.type) {
-      case 'start_focus_session':
-        return 'start_focus_session';
-      case 'set_app_mode_limit':
+      case "start_focus_session":
+        return "start_focus_session";
+      case "set_app_mode_limit":
         return `set_app_mode_limit:${action.packageName}`;
-      case 'set_app_mode_locked':
+      case "set_app_mode_locked":
         return `set_app_mode_locked:${action.packageName}`;
-      case 'open_replay_at_time_window':
+      case "open_replay_at_time_window":
         return `open_replay_at_time_window:${action.moment}`;
-      case 'open_focus_screen':
-        return 'open_focus_screen';
-      case 'open_permissions_accessibility':
-        return 'open_permissions_accessibility';
+      case "open_focus_screen":
+        return "open_focus_screen";
+      case "open_permissions_accessibility":
+        return "open_permissions_accessibility";
     }
   }
 
-  private static getMomentWindowCopy(moment: string): string {
-    if (moment === 'After bed') return 'between 10 PM and 12 AM';
-    if (moment === 'Before lunch') return 'between 12 PM and 2 PM';
-    if (moment === 'Early morning') return 'between 4 AM and 7 AM';
-    if (moment === 'Morning') return 'between 7 AM and 9 AM';
-    if (moment === 'Mid day') return 'between 9 AM and 12 PM';
-    return 'in the evening';
+  private static formatClockTime(isoTimestamp: string): string {
+    return new Date(isoTimestamp).toLocaleTimeString([], {
+      hour: "numeric",
+      minute: "2-digit",
+    });
+  }
+
+  private static formatHourWindow(hour: number): string {
+    const start = this.formatHourLabel(hour);
+    const end = this.formatHourLabel((hour + 1) % 24);
+    return `${start} and ${end}`;
+  }
+
+  private static formatHourLabel(hour: number): string {
+    const normalized = ((hour % 24) + 24) % 24;
+    const suffix = normalized >= 12 ? "PM" : "AM";
+    const hour12 = normalized % 12 === 0 ? 12 : normalized % 12;
+    return `${hour12} ${suffix}`;
+  }
+
+  private static getMomentLabelFromTimestamp(isoTimestamp: string): string {
+    return this.getMomentLabelFromHour(new Date(isoTimestamp).getHours());
+  }
+
+  private static getMomentLabelFromHour(hour: number): ReplayEntry["moment"] {
+    if (hour >= 4 && hour < 7) return "Early morning";
+    if (hour >= 7 && hour < 9) return "Morning";
+    if (hour >= 9 && hour < 12) return "Mid day";
+    if (hour >= 12 && hour < 14) return "Before lunch";
+    if (hour >= 14 && hour < 22) return "Evening";
+    return "After bed";
+  }
+
+  private static isWeekend(dateStr: string): boolean {
+    const day = new Date(`${dateStr}T00:00:00`).getDay();
+    return day === 0 || day === 6;
+  }
+
+  private static pushIfPresent(
+    candidates: CandidateSpec[],
+    ...items: (CandidateSpec | null)[]
+  ): void {
+    for (const item of items) {
+      if (item) {
+        candidates.push(item);
+      }
+    }
   }
 
   private static scale(value: number, min: number, max: number): number {

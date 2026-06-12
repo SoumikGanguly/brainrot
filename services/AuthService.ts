@@ -3,6 +3,7 @@ import type { User } from 'firebase/auth';
 import { GoogleAuthProvider, onAuthStateChanged, signInWithCredential, signOut } from 'firebase/auth';
 
 import { CloudSyncService } from './CloudSyncService';
+import { SubscriptionAccessService } from './SubscriptionAccessService';
 import { TelemetryService } from './TelemetryService';
 import { firebaseAuth } from './firebase';
 
@@ -63,6 +64,11 @@ export class AuthService {
       } catch (error) {
         console.warn('Failed to reset telemetry identity:', error);
       }
+      try {
+        await SubscriptionAccessService.reconcileAccess('auth_state_changed');
+      } catch (error) {
+        console.warn('Failed to refresh subscription access after sign out:', error);
+      }
       return;
     }
 
@@ -80,6 +86,12 @@ export class AuthService {
       await CloudSyncService.syncAuthenticatedUser(user);
     } catch (error) {
       console.warn('Cloud sync skipped after auth state change:', error);
+    }
+
+    try {
+      await SubscriptionAccessService.reconcileAccess('auth_sync_completed');
+    } catch (error) {
+      console.warn('Failed to refresh subscription access after auth sync:', error);
     }
   }
 }

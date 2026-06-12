@@ -37,6 +37,9 @@ type UserSettingsSnapshot = {
   blockScheduleStart: string;
   blockScheduleEnd: string;
   trialStartTime: number | null;
+  subscriptionStatus: 'trial' | 'active' | 'expired';
+  expiredFlowState: 'intro' | 'declined' | 'returning';
+  frozenAccessSnapshotJson: string | null;
   isPremium: boolean;
 };
 
@@ -111,6 +114,9 @@ export class CloudSyncService {
       blockScheduleStart,
       blockScheduleEnd,
       trialStartTime,
+      subscriptionStatus,
+      expiredFlowState,
+      frozenAccessSnapshotJson,
     ] = await Promise.all([
       database.getMeta('analytics_enabled'),
       database.getMeta('monitoring_enabled'),
@@ -127,6 +133,9 @@ export class CloudSyncService {
       database.getMeta('block_schedule_start'),
       database.getMeta('block_schedule_end'),
       this.getTrialStartTime(),
+      database.getMeta('subscription_status'),
+      database.getMeta('expired_flow_state'),
+      database.getMeta('frozen_access_snapshot'),
     ]);
 
     return {
@@ -145,6 +154,15 @@ export class CloudSyncService {
       blockScheduleStart: blockScheduleStart || '22:00',
       blockScheduleEnd: blockScheduleEnd || '06:00',
       trialStartTime: trialStartTime,
+      subscriptionStatus:
+        subscriptionStatus === 'active' || subscriptionStatus === 'expired'
+          ? subscriptionStatus
+          : 'trial',
+      expiredFlowState:
+        expiredFlowState === 'declined' || expiredFlowState === 'returning'
+          ? expiredFlowState
+          : 'intro',
+      frozenAccessSnapshotJson: frozenAccessSnapshotJson || null,
       isPremium: false,
     };
   }
@@ -510,6 +528,22 @@ export class CloudSyncService {
       database.setMeta('block_schedule_enabled', String(Boolean(data.blockScheduleEnabled))),
       database.setMeta('block_schedule_start', String(data.blockScheduleStart || '22:00')),
       database.setMeta('block_schedule_end', String(data.blockScheduleEnd || '06:00')),
+      database.setMeta(
+        'subscription_status',
+        data.subscriptionStatus === 'active' || data.subscriptionStatus === 'expired'
+          ? String(data.subscriptionStatus)
+          : 'trial'
+      ),
+      database.setMeta(
+        'expired_flow_state',
+        data.expiredFlowState === 'declined' || data.expiredFlowState === 'returning'
+          ? String(data.expiredFlowState)
+          : 'intro'
+      ),
+      database.setMeta(
+        'frozen_access_snapshot',
+        typeof data.frozenAccessSnapshotJson === 'string' ? data.frozenAccessSnapshotJson : ''
+      ),
       database.setMeta(
         __DEV__ ? 'dev_trial_start_time' : 'trial_start_time',
         data.trialStartTime ? String(data.trialStartTime) : ''

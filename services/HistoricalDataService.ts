@@ -13,7 +13,7 @@ interface AggregatedAppUsage extends UsageData {
 
 const SUMMARY_INTEGRITY_WARNING_MS = 2 * 60 * 1000;
 const SESSION_REPLAY_FALLBACK_MS = 10 * 60 * 1000;
-const DAILY_SUMMARY_VERSION = 'v3';
+const DAILY_SUMMARY_VERSION = 'v4';
 
 export class HistoricalDataService {
   private static instance: HistoricalDataService;
@@ -35,7 +35,7 @@ export class HistoricalDataService {
 
       if (!force) {
         const existingSummary = await database.getDailySummary(dateStr);
-        if (existingSummary) {
+        if (existingSummary?.summaryVersion === DAILY_SUMMARY_VERSION) {
           return true;
         }
       }
@@ -157,6 +157,8 @@ export class HistoricalDataService {
     try {
       const startOfDate = this.getStartOfLocalDay(dateStr);
       const nativeSessions = await UsageService.getSessionsSince(startOfDate.getTime());
+      const monitoredPackages = await database.getMonitoredPackages();
+      const monitoredSet = new Set(monitoredPackages);
 
       const sessionRows: AppSession[] = nativeSessions
         .filter((session) => this.getSessionDate(session) === dateStr)
@@ -168,7 +170,8 @@ export class HistoricalDataService {
           endedAt: session.endedAt,
           durationMs: Math.round(session.durationMs),
           source: session.source || 'usage_events',
-          wasMonitored: Boolean(session.wasMonitored),
+          wasMonitored:
+            Boolean(session.wasMonitored) || monitoredSet.has(session.packageName),
         }));
 
       if (sessionRows.length === 0) {
@@ -283,11 +286,15 @@ export class HistoricalDataService {
       totalMonitoredOpens: number;
     }[]
   ): DailyInsightSignals {
-    const firstSessionStartedAt = monitoredSessions[0]?.startedAt
-      ? new Date(monitoredSessions[0].startedAt).getTime()
+    const sortedSessions = [...monitoredSessions].sort(
+      (left, right) =>
+        new Date(left.startedAt).getTime() - new Date(right.startedAt).getTime()
+    );
+    const firstSessionStartedAt = sortedSessions[0]?.startedAt
+      ? new Date(sortedSessions[0].startedAt).getTime()
       : null;
-    const lastSessionEndedAt = monitoredSessions[monitoredSessions.length - 1]?.endedAt
-      ? new Date(monitoredSessions[monitoredSessions.length - 1].endedAt).getTime()
+    const lastSessionEndedAt = sortedSessions[sortedSessions.length - 1]?.endedAt
+      ? new Date(sortedSessions[sortedSessions.length - 1].endedAt).getTime()
       : null;
     const awakeSpanMinutes =
       firstSessionStartedAt && lastSessionEndedAt && lastSessionEndedAt > firstSessionStartedAt
@@ -295,18 +302,29 @@ export class HistoricalDataService {
         : 0;
 
     const usageByMoment = new Map<string, number>();
+    const usageByHour = new Map<number, number>();
     let lateNightUsageMs = 0;
+    let morningUsageMs = 0;
     let beforeLunchUsageMs = 0;
     let wakeWindowUsageMs = 0;
     let wakeWindowOpenCount = 0;
+    let longestSessionStartedAt: string | null = null;
+    let longestSessionDurationMs = 0;
 
-    for (const session of monitoredSessions) {
+    for (const session of sortedSessions) {
       const startedAt = new Date(session.startedAt).getTime();
+      const startedAtDate = new Date(session.startedAt);
+      const startedHour = startedAtDate.getHours();
       const moment = this.getMomentLabel(session.startedAt);
       usageByMoment.set(moment, (usageByMoment.get(moment) || 0) + session.durationMs);
+      usageByHour.set(startedHour, (usageByHour.get(startedHour) || 0) + session.durationMs);
 
       if (moment === 'After bed') {
         lateNightUsageMs += session.durationMs;
+      }
+
+      if (startedHour >= 4 && startedHour < 12) {
+        morningUsageMs += session.durationMs;
       }
 
       if (moment === 'Before lunch') {
@@ -320,16 +338,22 @@ export class HistoricalDataService {
         wakeWindowUsageMs += session.durationMs;
         wakeWindowOpenCount += 1;
       }
+
+      if (session.durationMs >= longestSessionDurationMs) {
+        longestSessionDurationMs = session.durationMs;
+        longestSessionStartedAt = session.startedAt;
+      }
     }
 
     const dominantMomentEntry = Array.from(usageByMoment.entries()).sort(
       (a, b) => b[1] - a[1]
     )[0];
+    const dominantHourEntry = Array.from(usageByHour.entries()).sort((a, b) => b[1] - a[1])[0];
     const topAppPackage = monitoredUsage[0]?.packageName ?? null;
     const topAppName = monitoredUsage[0]?.appName ?? null;
     const topAppMs = monitoredUsage[0]?.totalTimeMs ?? 0;
     const topAppOpenCount = topAppPackage
-      ? monitoredSessions.filter((session) => session.packageName === topAppPackage).length
+      ? sortedSessions.filter((session) => session.packageName === topAppPackage).length
       : 0;
     const yesterday = previousSummaries[0] || null;
     const weeklyAverageMs =
@@ -349,6 +373,7 @@ export class HistoricalDataService {
       longestSessionMs,
       averageSessionMs,
       lateNightUsageMs,
+      morningUsageMs,
       beforeLunchUsageMs,
       wakeWindowUsageMs,
       wakeWindowOpenCount,
@@ -356,6 +381,14 @@ export class HistoricalDataService {
       distractionCadenceMinutes:
         totalMonitoredOpens > 0 && awakeSpanMinutes > 0
           ? Math.max(1, Math.round(awakeSpanMinutes / totalMonitoredOpens))
+          : 0,
+      firstDistractionAt: sortedSessions[0]?.startedAt ?? null,
+      lastDistractionAt: sortedSessions[sortedSessions.length - 1]?.startedAt ?? null,
+      longestSessionStartedAt,
+      dominantHour: dominantHourEntry?.[0] ?? null,
+      dominantHourSharePercent:
+        totalScreenTime > 0 && dominantHourEntry
+          ? Math.round((dominantHourEntry[1] / totalScreenTime) * 100)
           : 0,
       topAppPackage,
       topAppName,

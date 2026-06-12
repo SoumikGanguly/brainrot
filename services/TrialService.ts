@@ -1,14 +1,15 @@
 import { database } from './database';
 import { PurchaseService } from './PurchaseService';
 
-interface TrialInfo {
+export interface TrialInfo {
   isActive: boolean;
   daysRemaining: number;
   expired: boolean;
+  startedAt: number | null;
 }
 
 class TrialServiceClass {
-  private readonly TRIAL_DURATION_DAYS = 7;
+  private readonly TRIAL_DURATION_DAYS = 15;
 
   async getTrialInfo(): Promise<TrialInfo> {
     if (__DEV__) {
@@ -22,7 +23,8 @@ class TrialServiceClass {
         return {
           isActive: true,
           daysRemaining: this.TRIAL_DURATION_DAYS,
-          expired: false
+          expired: false,
+          startedAt: parseInt(startTime, 10),
         };
       }
 
@@ -35,7 +37,8 @@ class TrialServiceClass {
       return {
         isActive: !expired,
         daysRemaining,
-        expired
+        expired,
+        startedAt: Number.isFinite(startTime) ? startTime : null,
       };
     }
 
@@ -48,7 +51,8 @@ class TrialServiceClass {
         return {
           isActive: false,
           daysRemaining: 0,
-          expired: false
+          expired: false,
+          startedAt: null,
         };
       }
 
@@ -61,14 +65,16 @@ class TrialServiceClass {
       return {
         isActive: !expired,
         daysRemaining,
-        expired
+        expired,
+        startedAt: Number.isFinite(startTime) ? startTime : null,
       };
     } catch (error) {
       console.error('Error getting trial info:', error);
       return {
         isActive: false,
         daysRemaining: 0,
-        expired: false
+        expired: false,
+        startedAt: null,
       };
     }
   }
@@ -116,11 +122,6 @@ class TrialServiceClass {
   }
 
   async canAccessFeature(feature: string): Promise<boolean> {
-    if (__DEV__) {
-      // In dev mode, allow access to test features
-      return true;
-    }
-
     try {
       // Check if user has premium access first
       const { PurchaseService } = await import('./PurchaseService');
@@ -133,7 +134,7 @@ class TrialServiceClass {
       // Check trial status
       const trialInfo = await this.getTrialInfo();
       return trialInfo.isActive && !trialInfo.expired;
-    } catch (error) {
+      } catch (error) {
       console.error('Error checking feature access:', error);
       return false;
     }
@@ -194,7 +195,7 @@ class SubscriptionServiceClass {
       console.error('Error getting subscription status:', error);
       return {
         isPremium: false,
-        trialInfo: { isActive: false, daysRemaining: 0, expired: false },
+        trialInfo: { isActive: false, daysRemaining: 0, expired: false, startedAt: null },
         canAccessPremiumFeatures: false
       };
     }

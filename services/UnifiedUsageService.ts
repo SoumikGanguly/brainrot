@@ -237,21 +237,13 @@ export class UnifiedUsageService {
   async initialize(): Promise<void> {
     console.log('Initializing UnifiedUsageService...');
 
-    // Initialize notification service
-    const NotificationService = (await import('./NotificationService')).NotificationService;
-    await NotificationService.initialize();
-
     // Initialize trackers for monitored apps
     await this.initializeTodayTrackers();
 
     // Check if monitoring should be started
     const monitoringEnabled = await database.getMeta('monitoring_enabled');
+    this.isMonitoring = monitoringEnabled === 'true';
     await this.applyMonitoringSettings();
-    if (monitoringEnabled === 'true') {
-      await this.startMonitoring();
-    } else {
-      await UnifiedUsageService.stopFocusStatusService();
-    }
 
     console.log('UnifiedUsageService initialized');
   }
@@ -268,12 +260,6 @@ export class UnifiedUsageService {
 
     // Save monitoring state
     await database.setMeta('monitoring_enabled', 'true');
-    if (await UnifiedUsageService.isFocusStatusNotificationEnabled()) {
-      await UnifiedUsageService.startFocusStatusService();
-    } else {
-      await UnifiedUsageService.stopFocusStatusService();
-    }
-
     await this.applyMonitoringSettings();
 
     console.log('Usage monitoring started');
@@ -297,6 +283,10 @@ export class UnifiedUsageService {
     await UnifiedUsageService.stopFocusStatusService();
 
     console.log('Usage monitoring stopped');
+  }
+
+  async refreshMonitoringSettings(): Promise<void> {
+    await this.applyMonitoringSettings();
   }
 
   async applyMonitoringSettings(): Promise<void> {
@@ -750,6 +740,26 @@ export class UnifiedUsageService {
     }
   }
 
+  static async syncSubscriptionStatusToNative(
+    payload: SubscriptionStatusPayload
+  ): Promise<boolean> {
+    if (!this.isNativeModuleAvailable() || !UsageStatsModule.syncSubscriptionStatus) {
+      return false;
+    }
+
+    try {
+      await UsageStatsModule.syncSubscriptionStatus(
+        payload.subscriptionStatus,
+        payload.expiredNotificationTitle,
+        payload.expiredNotificationBody
+      );
+      return true;
+    } catch (error) {
+      console.error('Error syncing subscription status to native:', error);
+      return false;
+    }
+  }
+
   static async stopFocusStatusService(): Promise<boolean> {
     if (!this.isNativeModuleAvailable() || !UsageStatsModule.stopFocusStatusService) {
       return false;
@@ -918,6 +928,12 @@ export interface BlockingConfigPayload {
   blockingEnabled: boolean;
   limitIntervalMinutes: number;
   lockedPassesPerDay: number;
+}
+
+export interface SubscriptionStatusPayload {
+  subscriptionStatus: 'trial' | 'active' | 'expired';
+  expiredNotificationTitle: string;
+  expiredNotificationBody: string;
 }
 
 export interface MonitoringDiagnostics {

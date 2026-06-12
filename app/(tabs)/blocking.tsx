@@ -117,6 +117,9 @@ export default function FocusScreen() {
 	const [lockModePrompt, setLockModePrompt] =
 		useState<LockModePromptState>(null);
 	const [focusSessionPending, setFocusSessionPending] = useState(false);
+	const [focusSessionPendingAction, setFocusSessionPendingAction] = useState<
+		"start" | "end" | null
+	>(null);
 	const [firstUseFlowStep, setFirstUseFlowStep] =
 		useState<FocusEducationStep>("accessibility");
 	const [manufacturerInfo, setManufacturerInfo] =
@@ -317,7 +320,7 @@ export default function FocusScreen() {
 		usageDetailsLoadedAtRef.current = Date.now();
 	};
 
-	const refresh = async ({
+	async function refresh({
 		showLoader = false,
 		source,
 		refreshUsage = "auto",
@@ -325,7 +328,7 @@ export default function FocusScreen() {
 		showLoader?: boolean;
 		source: RefreshSource;
 		refreshUsage?: RefreshUsageStrategy;
-	}) => {
+	}) {
 		if (showLoader && !initialLoadCompleteRef.current) {
 			setLoading(true);
 		}
@@ -359,7 +362,7 @@ export default function FocusScreen() {
 			setLoading(false);
 			initialLoadCompleteRef.current = true;
 		}
-	};
+	}
 
 	const handleModeChange = async (app: ViewApp, mode: ProtectionMode) => {
 		if (mode === "locked") {
@@ -509,6 +512,8 @@ export default function FocusScreen() {
 		}
 
 		await triggerLightHaptic();
+		const pendingAction: "start" | "end" = focusSessionActive ? "end" : "start";
+		setFocusSessionPendingAction(pendingAction);
 		setFocusSessionPending(true);
 
 		try {
@@ -525,6 +530,7 @@ export default function FocusScreen() {
 			await startFocusSession();
 		} finally {
 			setFocusSessionPending(false);
+			setFocusSessionPendingAction(null);
 		}
 	};
 
@@ -536,7 +542,16 @@ export default function FocusScreen() {
 
 		if (firstUseFlowStep === "accessibility") {
 			if (permissions.accessibility) {
-				setFirstUseFlowStep("oem");
+				await database.setMeta(LOCK_MODE_PROMPT_SEEN_KEY, "true");
+				setLockModePrompt(null);
+				setFirstUseFlowStep("accessibility");
+
+				if (prompt.source === "focus_session") {
+					await startFocusSession();
+					return;
+				}
+
+				await applyLockedMode(prompt.app);
 				return;
 			}
 
@@ -544,7 +559,16 @@ export default function FocusScreen() {
 				await CapabilitiesService.ensureAccessibilityPermission("lock_mode");
 			await refresh({ source: "permission_reconcile", refreshUsage: "always" });
 			if (granted) {
-				setFirstUseFlowStep("oem");
+				await database.setMeta(LOCK_MODE_PROMPT_SEEN_KEY, "true");
+				setLockModePrompt(null);
+				setFirstUseFlowStep("accessibility");
+
+				if (prompt.source === "focus_session") {
+					await startFocusSession();
+					return;
+				}
+
+				await applyLockedMode(prompt.app);
 			}
 			return;
 		}
@@ -600,7 +624,11 @@ export default function FocusScreen() {
 									<TouchableOpacity
 										onPress={handleFocusSessionPress}
 										disabled={focusSessionPending}
-										className="mt-md self-start rounded-2xl bg-accent px-5 py-3"
+										className={`mt-md self-start rounded-2xl px-5 py-3 ${
+											focusSessionActive
+												? "bg-[#EF4444]"
+												: "bg-accent"
+										}`}
 										style={{ opacity: focusSessionPending ? 0.72 : 1 }}
 									>
 										<View className="flex-row items-center">
@@ -619,7 +647,7 @@ export default function FocusScreen() {
 											)}
 											<Text className="ml-2 font-heading-semibold text-card-title text-white">
 												{focusSessionPending
-													? focusSessionActive
+													? focusSessionPendingAction === "end"
 														? "Ending Focus Session..."
 														: "Starting Focus Session..."
 													: focusSessionActive

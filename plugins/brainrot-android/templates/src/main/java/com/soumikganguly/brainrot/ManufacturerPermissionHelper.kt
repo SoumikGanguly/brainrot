@@ -51,54 +51,59 @@ class ManufacturerPermissionHelper(private val reactContext: ReactApplicationCon
         
         when (manufacturer) {
             Manufacturer.XIAOMI -> {
-                map.putString("title", "Xiaomi/MIUI Special Permission Required")
+                map.putString("title", "Xiaomi/MIUI background reliability setup")
                 map.putString("instructions", 
                     "1. Go to Settings → Apps → Manage apps\n" +
                     "2. Find 'Brainrot' app\n" +
                     "3. Tap 'Other permissions'\n" +
                     "4. Enable 'Display pop-up windows while running in background'\n" +
                     "5. Enable 'Auto-start'\n" +
-                    "6. Then grant Usage Access permission")
+                    "6. Allow lock-screen notifications for Brainrot if MIUI hides them\n" +
+                    "7. Then grant Usage Access permission")
                 map.putBoolean("canOpenDirectly", true)
             }
             Manufacturer.OPPO -> {
-                map.putString("title", "Oppo/ColorOS Special Permission Required")
+                map.putString("title", "Oppo/ColorOS background reliability setup")
                 map.putString("instructions",
                     "1. Go to Settings → App Management\n" +
                     "2. Find 'Brainrot' app\n" +
                     "3. Enable 'Allow display over other apps'\n" +
                     "4. Enable 'Startup manager'\n" +
-                    "5. Then grant Usage Access permission")
+                    "5. Allow lock-screen notifications for Brainrot if needed\n" +
+                    "6. Then grant Usage Access permission")
                 map.putBoolean("canOpenDirectly", true)
             }
             Manufacturer.VIVO -> {
-                map.putString("title", "Vivo/FuntouchOS Special Permission Required")
+                map.putString("title", "Vivo/FuntouchOS background reliability setup")
                 map.putString("instructions",
                     "1. Go to iManager → App Manager\n" +
                     "2. Find 'Brainrot' app\n" +
                     "3. Enable 'Background running'\n" +
                     "4. Enable 'Display pop-up window'\n" +
-                    "5. Then grant Usage Access permission")
+                    "5. Allow lock-screen notifications if the fixed notification is hidden\n" +
+                    "6. Then grant Usage Access permission")
                 map.putBoolean("canOpenDirectly", false)
             }
             Manufacturer.REALME -> {
-                map.putString("title", "Realme Special Permission Required")
+                map.putString("title", "Realme background reliability setup")
                 map.putString("instructions",
                     "1. Go to Settings → App Management\n" +
                     "2. Find 'Brainrot' app\n" +
                     "3. Enable 'Allow display over other apps'\n" +
                     "4. Enable 'Auto-start'\n" +
-                    "5. Then grant Usage Access permission")
+                    "5. Allow lock-screen notifications for Brainrot if needed\n" +
+                    "6. Then grant Usage Access permission")
                 map.putBoolean("canOpenDirectly", true)
             }
             Manufacturer.HUAWEI -> {
-                map.putString("title", "Huawei Special Permission Required")
+                map.putString("title", "Huawei background reliability setup")
                 map.putString("instructions",
                     "1. Go to Settings → Apps\n" +
                     "2. Find 'Brainrot' app\n" +
                     "3. Enable 'Floating window'\n" +
                     "4. Enable 'AutoLaunch'\n" +
-                    "5. Then grant Usage Access permission")
+                    "5. Allow lock-screen notifications if they are suppressed\n" +
+                    "6. Then grant Usage Access permission")
                 map.putBoolean("canOpenDirectly", false)
             }
             else -> {
@@ -233,5 +238,16 @@ class ManufacturerPermissionHelper(private val reactContext: ReactApplicationCon
             }
         }
         return false
+    }
+
+    fun needsLockScreenNotificationGuidance(): Boolean {
+        return when (getManufacturer()) {
+            Manufacturer.XIAOMI,
+            Manufacturer.OPPO,
+            Manufacturer.VIVO,
+            Manufacturer.REALME,
+            Manufacturer.HUAWEI -> true
+            else -> false
+        }
     }
 }

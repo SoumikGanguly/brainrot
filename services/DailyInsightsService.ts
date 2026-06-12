@@ -81,12 +81,21 @@ export class DailyInsightsService {
       force: forceSummaryRefresh,
     });
 
-    const [summary, sessions, blockEvents, persistedInsights] = await Promise.all([
+    const [summary, allSessions, blockEvents, persistedInsights, monitoredPackages] = await Promise.all([
       database.getDailySummary(date),
-      database.getAppSessionsForDate(date, { monitoredOnly: true, minDurationMs: minSessionDurationMs }),
+      database.getAppSessionsForDate(date, { minDurationMs: minSessionDurationMs }),
       database.getBlockEventsForDate(date),
       InsightMemoryService.getPersistedInsights(date),
+      database.getMonitoredPackages(),
     ]);
+
+    const monitoredSet = new Set(monitoredPackages);
+    monitoredSet.delete('com.soumikganguly.brainrot');
+    const sessions = allSessions.filter((session) =>
+      monitoredSet.size === 0
+        ? session.packageName !== 'com.soumikganguly.brainrot'
+        : monitoredSet.has(session.packageName)
+    );
 
     const replayEntries = this.buildReplayEntries(sessions, blockEvents);
     const wastedTimeMs = replayEntries.reduce(

@@ -10,7 +10,7 @@ export class NotificationService {
   private static initialized = false;
   private static readonly DAILY_REPLAY_NOTIFICATION_KEY = 'scheduled_daily_replay_notification_id';
   private static readonly WEEKLY_REVIEW_NOTIFICATION_KEY = 'scheduled_weekly_review_notification_id';
-  private static readonly DEFAULT_NOTIFICATION_ROUTE = '/(tabs)/replay';
+  private static readonly MONTHLY_REVIEW_NOTIFICATION_KEY = 'scheduled_monthly_review_notification_id';
 
   static async initialize(): Promise<void> {
     try {
@@ -68,9 +68,18 @@ export class NotificationService {
   static async ensureDefaultSchedules(): Promise<void> {
     try {
       const notificationsEnabled = await database.getMeta('notifications_enabled');
+      const subscriptionStatus = await database.getMeta('subscription_status');
       if (notificationsEnabled === 'false') {
         await this.cancelStoredNotification(this.DAILY_REPLAY_NOTIFICATION_KEY);
         await this.cancelStoredNotification(this.WEEKLY_REVIEW_NOTIFICATION_KEY);
+        await this.cancelStoredNotification(this.MONTHLY_REVIEW_NOTIFICATION_KEY);
+        return;
+      }
+
+      if (subscriptionStatus === 'expired') {
+        await this.cancelStoredNotification(this.DAILY_REPLAY_NOTIFICATION_KEY);
+        await this.cancelStoredNotification(this.WEEKLY_REVIEW_NOTIFICATION_KEY);
+        await this.cancelStoredNotification(this.MONTHLY_REVIEW_NOTIFICATION_KEY);
         return;
       }
 
@@ -80,6 +89,7 @@ export class NotificationService {
 
       await this.scheduleDailyReplayNotification();
       await this.scheduleWeeklyReviewNotification();
+      await this.scheduleMonthlyReviewNotification();
     } catch (error) {
       console.error('Error ensuring default schedules:', error);
     }
@@ -98,8 +108,9 @@ export class NotificationService {
         body: replayContent.body,
         sound: true,
         data: {
-          route: this.DEFAULT_NOTIFICATION_ROUTE,
+          route: '/(tabs)/replay',
           replayDay: 'yesterday',
+          replayDate: dateStr,
           source: 'daily_replay',
           notification_type: 'morning_insight',
           app_name: replayContent.topAppName,
@@ -123,9 +134,10 @@ export class NotificationService {
         body: reviewContent.body,
         sound: true,
         data: {
-          route: '/(tabs)/calendar',
+          route: '/(tabs)/calendar?openInsight=true&insightPeriod=week',
           source: 'weekly_review',
           notification_type: 'weekly_report',
+          insight_type: 'calendar_weekly_summary',
         },
       },
       trigger: {
@@ -133,6 +145,29 @@ export class NotificationService {
         date: triggerDate,
       },
     }, 'weekly_report');
+  }
+
+  private static async scheduleMonthlyReviewNotification(): Promise<void> {
+    const reviewContent = await this.buildMonthlyReviewContent();
+    const triggerDate = this.getNextMonthlyTime(9, 0);
+
+    await this.replaceScheduledNotification(this.MONTHLY_REVIEW_NOTIFICATION_KEY, {
+      content: {
+        title: reviewContent.title,
+        body: reviewContent.body,
+        sound: true,
+        data: {
+          route: '/(tabs)/calendar?openInsight=true&insightPeriod=month',
+          source: 'monthly_review',
+          notification_type: 'monthly_report',
+          insight_type: 'calendar_monthly_summary',
+        },
+      },
+      trigger: {
+        type: Notifications.SchedulableTriggerInputTypes.DATE,
+        date: triggerDate,
+      },
+    }, 'monthly_report');
   }
 
   private static async buildDailyReplayContent(dateStr: string): Promise<{ title: string; body: string; topAppName?: string; brainScore?: number }> {
@@ -197,6 +232,43 @@ export class NotificationService {
     }
   }
 
+  private static async buildMonthlyReviewContent(): Promise<{ title: string; body: string }> {
+    try {
+      const today = new Date();
+      const currentMonthDates = this.getMonthToDateDates(today);
+      const previousMonthDates = this.getPreviousMonthToDateDates(today);
+
+      const [currentTotalMs, previousTotalMs] = await Promise.all([
+        this.getTotalUsageForDates(currentMonthDates),
+        this.getTotalUsageForDates(previousMonthDates),
+      ]);
+
+      if (previousTotalMs <= 0) {
+        return {
+          title: 'Your monthly focus report is ready',
+          body: 'Open Progress to review this month.',
+        };
+      }
+
+      const deltaMs = currentTotalMs - previousTotalMs;
+      const improved = deltaMs < 0;
+      const percent = Math.round((Math.abs(deltaMs) / previousTotalMs) * 100);
+
+      return {
+        title: `Your focus ${improved ? 'improved' : 'slipped'} ${percent}% this month`,
+        body: improved
+          ? 'Open Progress to see what changed this month.'
+          : 'Open Progress to see where this month drifted.',
+      };
+    } catch (error) {
+      console.warn('Error building monthly review notification:', error);
+      return {
+        title: 'Your monthly focus report is ready',
+        body: 'Open Progress to review this month.',
+      };
+    }
+  }
+
   private static async getTotalUsageForDates(dateStrings: string[]): Promise<number> {
     const summaries = await Promise.all(dateStrings.map((date) => database.getDailySummary(date)));
     return summaries.reduce((sum, entry) => sum + (entry?.totalScreenTime || 0), 0);
@@ -230,6 +302,40 @@ export class NotificationService {
       next.setDate(next.getDate() + 7);
     }
     return next;
+  }
+
+  private static getNextMonthlyTime(hour: number, minute: number): Date {
+    const next = new Date();
+    next.setDate(1);
+    next.setMonth(next.getMonth() + 1);
+    next.setHours(hour, minute, 0, 0);
+    return next;
+  }
+
+  private static getMonthToDateDates(anchor: Date): string[] {
+    const dates: string[] = [];
+    for (let day = 1; day <= anchor.getDate(); day += 1) {
+      dates.push(
+        this.formatLocalDate(new Date(anchor.getFullYear(), anchor.getMonth(), day))
+      );
+    }
+    return dates;
+  }
+
+  private static getPreviousMonthToDateDates(anchor: Date): string[] {
+    const previousMonth = new Date(anchor.getFullYear(), anchor.getMonth() - 1, 1);
+    const previousMonthLastDay = new Date(anchor.getFullYear(), anchor.getMonth(), 0).getDate();
+    const dayLimit = Math.min(anchor.getDate(), previousMonthLastDay);
+    const dates: string[] = [];
+
+    for (let day = 1; day <= dayLimit; day += 1) {
+      dates.push(
+        this.formatLocalDate(
+          new Date(previousMonth.getFullYear(), previousMonth.getMonth(), day)
+        )
+      );
+    }
+    return dates;
   }
 
   private static async replaceScheduledNotification(

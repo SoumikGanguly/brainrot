@@ -101,6 +101,7 @@ export class InsightMemoryService {
   private static toEntry(insight: InsightCard): RecentInsightMemoryEntry {
     return {
       id: insight.id,
+      insightType: insight.insightType,
       category: insight.category,
       subjectAppPackage: insight.subjectAppPackage,
       subjectMoment: insight.subjectMoment,

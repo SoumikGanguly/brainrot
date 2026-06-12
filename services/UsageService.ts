@@ -236,9 +236,10 @@ export class UsageService {
         return false;
       }
 
+      const syncedScore = summary.focusScore ?? summary.brainScore;
       await UsageStatsModule.syncDailySummary(
         summary.date,
-        summary.brainScore,
+        syncedScore,
         summary.brainHealthStatus || 'Focused',
         summary.totalScreenTime,
         summary.summarySource || 'missing'

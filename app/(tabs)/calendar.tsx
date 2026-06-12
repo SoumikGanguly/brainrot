@@ -1,5 +1,5 @@
 import { Ionicons } from "@expo/vector-icons";
-import { useRouter } from "expo-router";
+import { useLocalSearchParams, useRouter } from "expo-router";
 import * as FileSystem from "expo-file-system/legacy";
 import * as Sharing from "expo-sharing";
 import React, { useEffect, useRef, useState } from "react";
@@ -17,10 +17,13 @@ import {
 	Text,
 	TouchableOpacity,
 	View,
+	findNodeHandle,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
+import { captureRef } from "react-native-view-shot";
 import Svg, { Rect, Text as SvgText } from "react-native-svg";
 
+import InsightFeedbackRow from "@/components/InsightFeedbackRow";
 import SkeletonBlock from "@/components/SkeletonBlock";
 import { CalendarPeriodInsightService } from "@/services/CalendarPeriodInsightService";
 import { Card } from "../../components/Card";
@@ -41,7 +44,9 @@ import type {
 	DailyInsightSignals,
 } from "@/services/InsightTypes";
 import {
+	buildCalendarInsightFeedbackTelemetry,
 	buildCalendarInsightTelemetry,
+	type InsightFeedbackVote,
 	withDefinedProperties,
 } from "@/services/TelemetryEvents";
 import { TelemetryService } from "@/services/TelemetryService";
@@ -489,6 +494,10 @@ function buildDayDetailPlaceholder(
 
 export default function Calendar() {
 	const router = useRouter();
+	const params = useLocalSearchParams<{
+		openInsight?: string;
+		insightPeriod?: string;
+	}>();
 	const [historicalData, setHistoricalData] = useState<DailyData[]>([]);
 	const [selectedDay, setSelectedDay] = useState<DayDetailData | null>(null);
 	const [periodInsightDeck, setPeriodInsightDeck] = useState<CalendarPeriodInsight[]>(
@@ -512,9 +521,11 @@ export default function Calendar() {
 	const [manufacturerInfo, setManufacturerInfo] =
 		useState<ManufacturerPermissionInfo | null>(null);
 	const [isRefreshingHistory, setIsRefreshingHistory] = useState(false);
-	const [insightFeedback, setInsightFeedback] = useState<"up" | "down" | null>(
-		null,
-	);
+	const [insightFeedbackById, setInsightFeedbackById] = useState<
+		Record<string, InsightFeedbackVote>
+	>({});
+	const [isSharingInsight, setIsSharingInsight] = useState(false);
+	const handledInsightRouteRef = useRef<string | null>(null);
 	const pendingPermissionCheck = useRef(false);
 	const appStateRef = useRef<AppStateStatus>(AppState.currentState);
 	const selectedDayRequestRef = useRef(0);
@@ -826,7 +837,11 @@ export default function Calendar() {
 		};
 	};
 
-	const openPeriodInsight = (periodType: "week" | "month") => {
+	const openPeriodInsight = (
+		periodType: "week" | "month",
+		options: { silent?: boolean; skipTelemetry?: boolean } = {},
+	) => {
+		const { silent = false, skipTelemetry = false } = options;
 		const { currentEntries } = getPeriodEntries(periodType);
 		const insight = CalendarPeriodInsightService.build({
 			periodType,
@@ -835,21 +850,24 @@ export default function Calendar() {
 		});
 
 		if (!insight) {
-			Alert.alert(
-				"No insight yet",
-				"Not enough distraction data has been recorded for this period yet.",
-			);
+			if (!silent) {
+				Alert.alert(
+					"No insight yet",
+					"Not enough distraction data has been recorded for this period yet.",
+				);
+			}
 			return;
 		}
 
 		trackedInsightViewRef.current = null;
-		setInsightFeedback(null);
 		setPeriodInsightDeck([insight]);
 		setPeriodInsightIndex(0);
-		TelemetryService.track(
-			"insight_generated",
-			withDefinedProperties(buildCalendarInsightTelemetry(insight)),
-		);
+		if (!skipTelemetry) {
+			TelemetryService.track(
+				"insight_generated",
+				withDefinedProperties(buildCalendarInsightTelemetry(insight)),
+			);
+		}
 	};
 
 	const openAllPeriodInsightsPreview = () => {
@@ -869,7 +887,6 @@ export default function Calendar() {
 		}
 
 		trackedInsightViewRef.current = null;
-		setInsightFeedback(null);
 		setPeriodInsightDeck(insights);
 		setPeriodInsightIndex(0);
 		for (const insight of insights) {
@@ -890,7 +907,6 @@ export default function Calendar() {
 		trackedInsightViewRef.current = null;
 		setPeriodInsightDeck([]);
 		setPeriodInsightIndex(0);
-		setInsightFeedback(null);
 	};
 
 	const handlePeriodInsightAction = async () => {
@@ -911,6 +927,103 @@ export default function Calendar() {
 		closePeriodInsight();
 	};
 
+	const handlePeriodInsightFeedback = (vote: InsightFeedbackVote) => {
+		if (!selectedPeriodInsight) {
+			return;
+		}
+
+		setInsightFeedbackById((current) => {
+			if (current[selectedPeriodInsight.id] === vote) {
+				return current;
+			}
+
+			TelemetryService.track(
+				"insight_feedback_submitted",
+				withDefinedProperties(
+					buildCalendarInsightFeedbackTelemetry(
+						selectedPeriodInsight,
+						"progress",
+						vote,
+					),
+				),
+			);
+			return {
+				...current,
+				[selectedPeriodInsight.id]: vote,
+			};
+		});
+	};
+
+	const handleSharePeriodInsight = async (captureTarget: number | null) => {
+		console.log("Calendar insight share pressed", {
+			hasInsight: Boolean(selectedPeriodInsight),
+			hasCaptureTarget: Boolean(captureTarget),
+			isSharingInsight,
+		});
+
+		if (!selectedPeriodInsight) {
+			Alert.alert("Share unavailable", "This insight is no longer available.");
+			return;
+		}
+
+		if (isSharingInsight) {
+			console.log("Calendar insight share ignored because a share is already in progress.");
+			return;
+		}
+
+		if (!captureTarget) {
+			Alert.alert("Share unavailable", "The share preview is still loading. Please try again.");
+			return;
+		}
+
+		try {
+			setIsSharingInsight(true);
+			await new Promise((resolve) => requestAnimationFrame(() => resolve(null)));
+			const uri = await captureRef(captureTarget, {
+				format: "png",
+				quality: 1,
+				result: "tmpfile",
+			});
+			if (!uri) {
+				throw new Error("Insight share capture returned no file.");
+			}
+
+			const directoryUri =
+				FileSystem.cacheDirectory ?? FileSystem.documentDirectory;
+			if (!directoryUri) {
+				throw new Error("No writable directory available for insight export");
+			}
+
+			const shareUri = `${directoryUri}brainrot-insight-${selectedPeriodInsight.id}-${Date.now()}.png`;
+			await FileSystem.copyAsync({
+				from: uri,
+				to: shareUri,
+			});
+
+			if (await Sharing.isAvailableAsync()) {
+				await Sharing.shareAsync(shareUri, {
+					mimeType: "image/png",
+					dialogTitle: "Share insight",
+				});
+			} else {
+				await Share.share({
+					title: "Share insight",
+					message: "My Brainrot insight",
+					url: shareUri,
+				});
+			}
+		} catch (error) {
+			console.error("Failed to share insight:", error);
+			const message =
+				error instanceof Error
+					? error.message
+					: "We couldn't create that insight image yet.";
+			Alert.alert("Share unavailable", message);
+		} finally {
+			setIsSharingInsight(false);
+		}
+	};
+
 	useEffect(() => {
 		if (!selectedPeriodInsight) {
 			return;
@@ -926,6 +1039,31 @@ export default function Calendar() {
 			withDefinedProperties(buildCalendarInsightTelemetry(selectedPeriodInsight)),
 		);
 	}, [selectedPeriodInsight]);
+
+	useEffect(() => {
+		if (loading || params.openInsight !== "true") {
+			return;
+		}
+
+		const requestedPeriod =
+			params.insightPeriod === "month" ? "month" : params.insightPeriod === "week" ? "week" : null;
+		if (!requestedPeriod) {
+			return;
+		}
+
+		const routeKey = `${params.openInsight}:${requestedPeriod}`;
+		if (handledInsightRouteRef.current === routeKey) {
+			return;
+		}
+
+		handledInsightRouteRef.current = routeKey;
+		InteractionManager.runAfterInteractions(() => {
+			openPeriodInsight(requestedPeriod, {
+				silent: true,
+				skipTelemetry: false,
+			});
+		});
+	}, [loading, params.insightPeriod, params.openInsight]);
 
 	const generateHeatmapData = (): HeatmapDay[][] => {
 		const weeks = [];
@@ -1308,12 +1446,12 @@ export default function Calendar() {
 							{
 								key: "week",
 								summary: weekSummary,
-								hint: "Swipe left for monthly view",
+								swipeHint: "Swipe left for monthly view",
 							},
 							{
 								key: "month",
 								summary: monthSummary,
-								hint: "Swipe right for weekly view",
+								swipeHint: "Swipe right for weekly view",
 							},
 						] as const).map((item) => (
 							<TouchableOpacity
@@ -1365,9 +1503,28 @@ export default function Calendar() {
 										</Text>
 									</View>
 								</View>
-								<Text className="mt-md text-center font-body text-secondary text-muted">
-									{item.hint}
-								</Text>
+								<View className="mt-md flex-row items-center justify-between rounded-2xl bg-[#F8F5FF] px-4 py-3">
+									<View className="flex-row items-center">
+										<Ionicons
+											name="chevron-forward"
+											size={16}
+											color="#5B4CF0"
+										/>
+										<Text className="ml-1 font-body-semibold text-secondary text-accent">
+											Tap for insight
+										</Text>
+									</View>
+									<View className="flex-row items-center">
+										<Ionicons
+											name="swap-horizontal"
+											size={15}
+											color="#64748B"
+										/>
+										<Text className="ml-1 font-body text-secondary text-muted">
+											{item.swipeHint}
+										</Text>
+									</View>
+								</View>
 							</TouchableOpacity>
 						))}
 					</ScrollView>
@@ -1596,19 +1753,18 @@ export default function Calendar() {
 				{renderHeatmapView()}
 			</ScrollView>
 
-			<Modal
-				visible={!!selectedPeriodInsight}
-				animationType="slide"
-				presentationStyle="pageSheet"
-				onRequestClose={closePeriodInsight}
-			>
-				{selectedPeriodInsight ? (
+			{selectedPeriodInsight ? (
+				<View className="absolute inset-0 z-50 bg-white">
 					<CalendarPeriodInsightScreen
 						insight={selectedPeriodInsight}
 						onClose={closePeriodInsight}
 						onAction={() => void handlePeriodInsightAction()}
-						feedback={insightFeedback}
-						onFeedbackChange={setInsightFeedback}
+						onShare={(captureTarget) =>
+							void handleSharePeriodInsight(captureTarget)
+						}
+						isSharing={isSharingInsight}
+						feedback={insightFeedbackById[selectedPeriodInsight.id] ?? null}
+						onFeedbackChange={handlePeriodInsightFeedback}
 						currentIndex={periodInsightIndex}
 						totalInsights={periodInsightDeck.length}
 						onPrevious={
@@ -1628,8 +1784,8 @@ export default function Calendar() {
 								: undefined
 						}
 					/>
-				) : null}
-			</Modal>
+				</View>
+			) : null}
 
 			<Modal
 				visible={showAppsSheet}
@@ -2062,6 +2218,8 @@ function CalendarPeriodInsightScreen({
 	insight,
 	onClose,
 	onAction,
+	onShare,
+	isSharing,
 	feedback,
 	onFeedbackChange,
 	currentIndex,
@@ -2072,8 +2230,10 @@ function CalendarPeriodInsightScreen({
 	insight: CalendarPeriodInsight;
 	onClose: () => void;
 	onAction: () => void;
-	feedback: "up" | "down" | null;
-	onFeedbackChange: (value: "up" | "down") => void;
+	onShare: (captureTarget: number | null) => void;
+	isSharing: boolean;
+	feedback: InsightFeedbackVote | null;
+	onFeedbackChange: (value: InsightFeedbackVote) => void;
 	currentIndex: number;
 	totalInsights: number;
 	onPrevious?: () => void;
@@ -2098,106 +2258,168 @@ function CalendarPeriodInsightScreen({
 			))}
 		</Text>
 	);
-
+	const shareCaptureRef = useRef<View | null>(null);
+	const handleSharePress = () => {
+		onShare(findNodeHandle(shareCaptureRef.current));
+	};
 	return (
 		<SafeAreaView className="flex-1 bg-white">
-			<ScrollView className="flex-1 px-md" showsVerticalScrollIndicator={false}>
-				{heroImage ? (
-					<ImageBackground
-						source={heroImage}
-						resizeMode="cover"
-						className="mt-sm overflow-hidden rounded-[32px] bg-slate-900"
-						style={{ minHeight: 320 }}
-					>
-						<View className="absolute inset-0 bg-slate-900/35" />
-						<View className="flex-row items-start justify-between px-md py-md">
-							<View className="flex-1 pr-md">
-								<Text className="font-body-semibold text-secondary text-white/80">
-									{periodLabel}
-								</Text>
-								{totalInsights > 1 ? (
-									<Text className="mt-1 font-body text-secondary text-white/70">
-										Preview {currentIndex + 1} of {totalInsights}
+			<ScrollView
+				className="flex-1 px-md"
+				showsVerticalScrollIndicator={false}
+				contentContainerStyle={{ backgroundColor: "#FFFFFF", paddingBottom: 24 }}
+			>
+				<View
+					ref={shareCaptureRef}
+					collapsable={false}
+					style={{ backgroundColor: "#FFFFFF" }}
+				>
+					{heroImage ? (
+						<ImageBackground
+							source={heroImage}
+							resizeMode="cover"
+							className="mt-sm overflow-hidden rounded-[32px] bg-slate-900"
+							style={{ minHeight: 320 }}
+						>
+							<View className="absolute inset-0 bg-slate-900/35" />
+							<View className="flex-row items-start justify-between px-lg py-lg">
+								<View className="flex-1 pr-lg">
+									<Text className="font-body-semibold text-secondary text-white/80">
+										{periodLabel}
 									</Text>
-								) : null}
-							</View>
-							<TouchableOpacity
-								onPress={onClose}
-								className="rounded-full bg-white/20 p-sm"
-							>
-								<Ionicons name="close" size={22} color="#FFFFFF" />
-							</TouchableOpacity>
-						</View>
-						<View className="flex-1 justify-end px-md pb-xl pt-lg">
-							{headline}
-							<Text className="mt-4 max-w-[92%] font-body text-body leading-7 text-white/90">
-								{insight.summaryText}
-							</Text>
-						</View>
-					</ImageBackground>
-				) : (
-					<View
-						className="mt-sm overflow-hidden rounded-[32px] bg-[#F5F0FF]"
-						style={{ minHeight: 320 }}
-					>
-						<View className="flex-row items-start justify-between px-md py-md">
-							<View className="flex-1 pr-md">
-								<Text className="font-body-semibold text-secondary text-accent">
-									{periodLabel}
-								</Text>
-								{totalInsights > 1 ? (
-									<Text className="mt-1 font-body text-secondary text-slate-500">
-										Preview {currentIndex + 1} of {totalInsights}
-									</Text>
-								) : null}
-							</View>
-							<TouchableOpacity
-								onPress={onClose}
-								className="rounded-full bg-white/90 p-sm"
-							>
-								<Ionicons name="close" size={22} color="#64748B" />
-							</TouchableOpacity>
-						</View>
-						<View className="flex-1 justify-between px-md pb-xl pt-md">
-							<View>
-								<Text className="font-heading-bold text-3xl leading-[38px] text-slate-900">
-									{insight.headlineSegments.map((segment, index) => (
-										<Text
-											key={`${segment.text}-${index}`}
-											style={
-												segment.color ? { color: segment.color } : undefined
-											}
-										>
-											{segment.text}
+									{totalInsights > 1 ? (
+										<Text className="mt-1 font-body text-secondary text-white/70">
+											Preview {currentIndex + 1} of {totalInsights}
 										</Text>
-									))}
-								</Text>
-								<Text className="mt-4 max-w-[92%] font-body text-body leading-7 text-slate-600">
+									) : null}
+								</View>
+								<View className="flex-row">
+									<TouchableOpacity
+										onPress={handleSharePress}
+										disabled={isSharing}
+										hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}
+										className="mr-2 rounded-full bg-white/20 p-sm"
+									>
+										<Ionicons
+											name={isSharing ? "hourglass-outline" : "share-social-outline"}
+											size={20}
+											color="#FFFFFF"
+										/>
+									</TouchableOpacity>
+									<TouchableOpacity
+										onPress={onClose}
+										className="rounded-full bg-white/20 p-sm"
+									>
+										<Ionicons name="close" size={22} color="#FFFFFF" />
+									</TouchableOpacity>
+								</View>
+							</View>
+							<View className="flex-1 justify-end px-lg pb-[34px] pt-xl">
+								{headline}
+								<Text className="mt-4 max-w-[92%] font-body text-body leading-7 text-white/90">
 									{insight.summaryText}
 								</Text>
 							</View>
-							<View className="mt-lg flex-row items-end justify-between">
-								<View className="rounded-[28px] bg-white px-6 py-6 shadow-sm">
-									<AppBadge
-										appName={insight.relatedAppName || "App"}
-										packageName={insight.relatedAppPackage || "app"}
-										size={88}
-									/>
+						</ImageBackground>
+					) : (
+						<View
+							className="mt-sm overflow-hidden rounded-[32px] bg-[#F5F0FF]"
+							style={{ minHeight: 320 }}
+						>
+							<View className="flex-row items-start justify-between px-lg py-lg">
+								<View className="flex-1 pr-lg">
+									<Text className="font-body-semibold text-secondary text-accent">
+										{periodLabel}
+									</Text>
+									{totalInsights > 1 ? (
+										<Text className="mt-1 font-body text-secondary text-slate-500">
+											Preview {currentIndex + 1} of {totalInsights}
+										</Text>
+									) : null}
 								</View>
-								{insight.metricValue ? (
-									<View className="rounded-full border border-[#E7DFFD] bg-white px-4 py-3 shadow-sm">
-										<Text className="font-heading-bold text-card-title text-slate-900">
-											{insight.metricValue}
-										</Text>
-										<Text className="font-body text-xs text-slate-500">
-											{insight.metricLabel || "opens"}
-										</Text>
+								<View className="flex-row">
+									<TouchableOpacity
+										onPress={handleSharePress}
+										disabled={isSharing}
+										hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}
+										className="mr-2 rounded-full bg-white/90 p-sm"
+									>
+										<Ionicons
+											name={isSharing ? "hourglass-outline" : "share-social-outline"}
+											size={20}
+											color="#64748B"
+										/>
+									</TouchableOpacity>
+									<TouchableOpacity
+										onPress={onClose}
+										className="rounded-full bg-white/90 p-sm"
+									>
+										<Ionicons name="close" size={22} color="#64748B" />
+									</TouchableOpacity>
+								</View>
+							</View>
+							<View className="flex-1 justify-between px-lg pb-[34px] pt-lg">
+								<View>
+									<Text className="font-heading-bold text-3xl leading-[38px] text-slate-900">
+										{insight.headlineSegments.map((segment, index) => (
+											<Text
+												key={`${segment.text}-${index}`}
+												style={
+													segment.color ? { color: segment.color } : undefined
+												}
+											>
+												{segment.text}
+											</Text>
+										))}
+									</Text>
+									<Text className="mt-4 max-w-[92%] font-body text-body leading-7 text-slate-600">
+										{insight.summaryText}
+									</Text>
+								</View>
+								<View className="mt-lg items-center">
+									<View className="items-center">
+										<View className="rounded-[28px] bg-white px-6 py-6 shadow-sm">
+											<AppBadge
+												appName={insight.relatedAppName || "App"}
+												packageName={insight.relatedAppPackage || "app"}
+												size={88}
+											/>
+										</View>
+										{insight.metricValue ? (
+											<View className="-mt-4 rounded-full border border-[#E7DFFD] bg-white px-5 py-3 shadow-sm">
+												<Text className="font-heading-bold text-card-title text-slate-900">
+													{insight.metricValue}
+												</Text>
+												<Text className="text-center font-body text-xs text-slate-500">
+													{insight.metricLabel || "opens"}
+												</Text>
+											</View>
+										) : null}
 									</View>
-								) : null}
+								</View>
 							</View>
 						</View>
+					)}
+
+					<View className="mt-lg rounded-[26px] border border-slate-200 bg-white px-5 py-5">
+						<Text className="font-heading-semibold text-card-title text-slate-900">
+							{insight.whyTitle}
+						</Text>
+						<Text className="mt-3 font-body text-body leading-7 text-slate-600">
+							{insight.whyBody}
+						</Text>
 					</View>
-				)}
+
+					<View className="mt-md rounded-[26px] border border-slate-200 bg-white px-5 py-5">
+						<Text className="font-heading-semibold text-card-title text-slate-900">
+							{insight.evidence.title}
+						</Text>
+						<Text className="mt-3 font-body text-body leading-7 text-slate-600">
+							{insight.evidence.body}
+						</Text>
+						<CalendarInsightEvidenceView insight={insight} />
+					</View>
+				</View>
 
 				{totalInsights > 1 ? (
 					<View className="mt-md flex-row items-center justify-center">
@@ -2226,25 +2448,6 @@ function CalendarPeriodInsightScreen({
 					</View>
 				) : null}
 
-				<View className="mt-lg rounded-[26px] border border-slate-200 bg-white px-5 py-5">
-					<Text className="font-heading-semibold text-card-title text-slate-900">
-						{insight.whyTitle}
-					</Text>
-					<Text className="mt-3 font-body text-body leading-7 text-slate-600">
-						{insight.whyBody}
-					</Text>
-				</View>
-
-				<View className="mt-md rounded-[26px] border border-slate-200 bg-white px-5 py-5">
-					<Text className="font-heading-semibold text-card-title text-slate-900">
-						{insight.evidence.title}
-					</Text>
-					<Text className="mt-3 font-body text-body leading-7 text-slate-600">
-						{insight.evidence.body}
-					</Text>
-					<CalendarInsightEvidenceView insight={insight} />
-				</View>
-
 				<View className="mt-md rounded-[26px] border border-slate-200 bg-white px-5 py-5">
 					<Text className="font-heading-semibold text-card-title text-slate-900">
 						{insight.recommendationTitle}
@@ -2271,30 +2474,10 @@ function CalendarPeriodInsightScreen({
 				</TouchableOpacity>
 
 				<View className="items-center py-lg">
-					<Text className="font-body text-secondary text-muted">
-						Was this insight helpful?
-					</Text>
-					<View className="mt-3 flex-row">
-						{([
-							{ key: "up", icon: "thumbs-up-outline" },
-							{ key: "down", icon: "thumbs-down-outline" },
-						] as const).map((item) => {
-							const selected = feedback === item.key;
-							return (
-								<TouchableOpacity
-									key={item.key}
-									onPress={() => onFeedbackChange(item.key)}
-									className={`mx-2 rounded-full border px-4 py-3 ${selected ? "border-accent bg-violet-50" : "border-slate-200 bg-white"}`}
-								>
-									<Ionicons
-										name={item.icon}
-										size={18}
-										color={selected ? "#5D3DF0" : "#64748B"}
-									/>
-								</TouchableOpacity>
-							);
-						})}
-					</View>
+					<InsightFeedbackRow
+						vote={feedback}
+						onVoteChange={onFeedbackChange}
+					/>
 				</View>
 			</ScrollView>
 		</SafeAreaView>

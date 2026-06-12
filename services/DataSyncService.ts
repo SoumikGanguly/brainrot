@@ -32,6 +32,8 @@ export class DataSyncService {
       const rawUsage = await UsageService.getTodayUsage();
       const sessions = await UsageService.getTodaySessions();
       const pendingBlockEvents = await UsageService.getPendingBlockEvents();
+      const monitoredPackages = await database.getMonitoredPackages();
+      const monitoredSet = new Set(monitoredPackages);
       const deduped = this.deduplicateUsage(rawUsage);
       const today = new Date().toISOString().split('T')[0];
       const dbFormatted: DatabaseUsageData[] = deduped.map(app => ({
@@ -48,7 +50,8 @@ export class DataSyncService {
         endedAt: session.endedAt,
         durationMs: Math.round(session.durationMs),
         source: session.source || 'usage_events',
-        wasMonitored: Boolean(session.wasMonitored),
+        wasMonitored:
+          Boolean(session.wasMonitored) || monitoredSet.has(session.packageName),
       }));
       const blockEventRows: BlockEvent[] = pendingBlockEvents.map((event) => ({
         date: event.date || today,

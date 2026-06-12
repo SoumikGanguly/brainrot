@@ -11,6 +11,7 @@ import android.os.Build
 import android.net.Uri
 import android.os.Handler
 import android.os.Looper
+import android.os.PowerManager
 import android.os.Process
 import android.provider.Settings
 import android.util.Log
@@ -180,8 +181,6 @@ class UsageStatsModule(reactContext: ReactApplicationContext) : ReactContextBase
         Log.d(TAG, "startBackgroundMonitoring() called with interval: $intervalMinutes")
         try {
             BackgroundUsageWorker.startPeriodicWork(reactApplicationContext, intervalMinutes.toLong())
-            ForegroundMonitoringService.start(reactApplicationContext)
-            startRealtimeMonitoring()
         } catch (e: Exception) {
             Log.e(TAG, "Error starting background monitoring", e)
         }
@@ -192,8 +191,6 @@ class UsageStatsModule(reactContext: ReactApplicationContext) : ReactContextBase
         Log.d(TAG, "stopBackgroundMonitoring() called")
         try {
             BackgroundUsageWorker.stopPeriodicWork(reactApplicationContext)
-            ForegroundMonitoringService.stop(reactApplicationContext)
-            stopRealtimeMonitoring()
         } catch (e: Exception) {
             Log.e(TAG, "Error stopping background monitoring", e)
         }
@@ -285,40 +282,28 @@ class UsageStatsModule(reactContext: ReactApplicationContext) : ReactContextBase
                 promise.resolve(null)
                 return
             }
-            
+
             incrementDailyCounter("foreground_query_count")
-            val usageStatsManager = reactApplicationContext.getSystemService(Context.USAGE_STATS_SERVICE) as UsageStatsManager
-            val currentTime = System.currentTimeMillis()
-            
-            // Query events from last 3 seconds
-            val events = usageStatsManager.queryEvents(currentTime - 3000, currentTime)
-            
-            var lastEventTime = 0L
-            var foregroundApp: String? = null
-            val event = UsageEvents.Event()
-            
-            // Find the most recent MOVE_TO_FOREGROUND event
-            while (events.hasNextEvent()) {
-                events.getNextEvent(event)
-                if (event.eventType == UsageEvents.Event.MOVE_TO_FOREGROUND && 
-                    event.timeStamp > lastEventTime) {
-                    lastEventTime = event.timeStamp
-                    foregroundApp = event.packageName
-                }
-            }
-            
-            if (foregroundApp != null) {
+            val usageStatsManager =
+                reactApplicationContext.getSystemService(Context.USAGE_STATS_SERVICE) as UsageStatsManager
+            val snapshot = ForegroundAppResolver.getCurrentForeground(
+                context = reactApplicationContext,
+                usageStatsManager = usageStatsManager,
+                ignoredPackages = setOf(reactApplicationContext.packageName, "com.android.systemui")
+            )
+
+            if (snapshot.packageName != null) {
                 val pm = reactApplicationContext.packageManager
                 try {
-                    val ai = pm.getApplicationInfo(foregroundApp, 0)
+                    val ai = pm.getApplicationInfo(snapshot.packageName, 0)
                     val appName = pm.getApplicationLabel(ai).toString()
-                    
+
                     val result = WritableNativeMap()
-                    result.putString("packageName", foregroundApp)
+                    result.putString("packageName", snapshot.packageName)
                     result.putString("appName", appName)
-                    result.putDouble("timestamp", lastEventTime.toDouble())
-                    
-                    Log.d(TAG, "Current foreground app: $appName ($foregroundApp)")
+                    result.putDouble("timestamp", snapshot.foregroundedAt.toDouble())
+
+                    Log.d(TAG, "Current foreground app: $appName (${snapshot.packageName})")
                     promise.resolve(result)
                 } catch (e: PackageManager.NameNotFoundException) {
                     promise.resolve(null)
@@ -535,6 +520,23 @@ class UsageStatsModule(reactContext: ReactApplicationContext) : ReactContextBase
     }
 
     @ReactMethod
+    fun syncSubscriptionStatus(subscriptionStatus: String, expiredNotificationTitle: String, expiredNotificationBody: String, promise: Promise) {
+        try {
+            val prefs = reactApplicationContext.getSharedPreferences("brainrot_prefs", Context.MODE_PRIVATE)
+            prefs.edit()
+                .putString("subscription_status", subscriptionStatus)
+                .putString("expired_notification_title", expiredNotificationTitle)
+                .putString("expired_notification_body", expiredNotificationBody)
+                .apply()
+            ForegroundMonitoringService.refreshNotification(reactApplicationContext)
+            promise.resolve(true)
+        } catch (e: Exception) {
+            Log.e(TAG, "Error syncing subscription status", e)
+            promise.reject("SYNC_SUBSCRIPTION_STATUS_ERROR", e.message)
+        }
+    }
+
+    @ReactMethod
     fun syncDailySummary(
         date: String,
         brainScore: Int,
@@ -554,6 +556,7 @@ class UsageStatsModule(reactContext: ReactApplicationContext) : ReactContextBase
                 .putLong("daily_summary_updated_at", System.currentTimeMillis())
                 .apply()
             BrainScoreWidgetUpdater.updateAll(reactApplicationContext)
+            ForegroundMonitoringService.refreshNotification(reactApplicationContext)
             promise.resolve(true)
         } catch (e: Exception) {
             Log.e(TAG, "Error syncing daily summary", e)
@@ -619,6 +622,12 @@ class UsageStatsModule(reactContext: ReactApplicationContext) : ReactContextBase
             result.putInt("foregroundQueryCount", prefs.getInt("foreground_query_count_$today", 0))
             result.putDouble("batteryPercent", battery.first.toDouble())
             result.putBoolean("batteryCharging", battery.second)
+            result.putBoolean("batteryOptimizationIgnored", isIgnoringBatteryOptimizations())
+            result.putString("lastRealtimeEventPackage", prefs.getString("last_realtime_event_package", "") ?: "")
+            result.putString("lastRealtimeEventType", prefs.getString("last_realtime_event_type", "") ?: "")
+            result.putDouble("lastRealtimeEventAt", prefs.getLong("last_realtime_event_at", 0L).toDouble())
+            result.putInt("sessionRepairCount", prefs.getInt("session_repair_count_$today", 0))
+            result.putBoolean("lockScreenNotificationGuidanceNeeded", permissionHelper.needsLockScreenNotificationGuidance())
             promise.resolve(result)
         } catch (e: Exception) {
             Log.e(TAG, "Error getting monitoring diagnostics", e)
@@ -689,29 +698,29 @@ class UsageStatsModule(reactContext: ReactApplicationContext) : ReactContextBase
     private fun checkCurrentForegroundApp() {
         try {
             incrementDailyCounter("foreground_query_count")
-            val usageStatsManager = reactApplicationContext.getSystemService(Context.USAGE_STATS_SERVICE) as UsageStatsManager
-            val currentTime = System.currentTimeMillis()
-            val events = usageStatsManager.queryEvents(currentTime - 10000, currentTime)
+            val usageStatsManager =
+                reactApplicationContext.getSystemService(Context.USAGE_STATS_SERVICE) as UsageStatsManager
+            val snapshot = ForegroundAppResolver.getCurrentForeground(
+                context = reactApplicationContext,
+                usageStatsManager = usageStatsManager,
+                ignoredPackages = setOf(reactApplicationContext.packageName)
+            )
 
-            var lastEventTime = 0L
-            var foregroundApp: String? = null
-            val event = UsageEvents.Event()
-
-            while (events.hasNextEvent()) {
-                events.getNextEvent(event)
-                if (event.eventType == UsageEvents.Event.MOVE_TO_FOREGROUND && event.timeStamp > lastEventTime) {
-                    lastEventTime = event.timeStamp
-                    foregroundApp = event.packageName
-                }
+            if (snapshot.lastEventPackage != null && snapshot.lastEventType != null) {
+                persistRealtimeEvent(snapshot.lastEventPackage, snapshot.lastEventType, snapshot.lastEventAt)
             }
 
-            if (foregroundApp != null && 
-                foregroundApp != lastForegroundApp && 
-                foregroundApp != reactApplicationContext.packageName) {
-                
-                Log.d(TAG, "Detected app change: $foregroundApp")
-                lastForegroundApp = foregroundApp
-                usageChecker.checkRealtimeAppUsage(foregroundApp)
+            if (snapshot.packageName != null &&
+                snapshot.packageName != lastForegroundApp &&
+                snapshot.packageName != reactApplicationContext.packageName) {
+
+                Log.d(TAG, "Detected app change: ${snapshot.packageName}")
+                lastForegroundApp = snapshot.packageName
+                usageChecker.checkRealtimeAppUsage(snapshot.packageName)
+            } else if (snapshot.packageName == null && lastForegroundApp != null) {
+                Log.d(TAG, "Detected app close: $lastForegroundApp")
+                lastForegroundApp = null
+                usageChecker.getCurrentBrainState(forceRefresh = true)
             }
         } catch (e: Exception) {
             Log.e(TAG, "Error checking foreground app", e)
@@ -789,6 +798,7 @@ class UsageStatsModule(reactContext: ReactApplicationContext) : ReactContextBase
         val event = UsageEvents.Event()
         val sessionStartTimes = HashMap<String, Long>()
         val result = WritableNativeArray()
+        var repairCount = 0
 
         while (events.hasNextEvent()) {
             events.getNextEvent(event)
@@ -813,10 +823,24 @@ class UsageStatsModule(reactContext: ReactApplicationContext) : ReactContextBase
             }
         }
 
+        val currentForegroundPackage = ForegroundAppResolver.getCurrentForeground(
+            context = reactApplicationContext,
+            usageStatsManager = usageStatsManager,
+            ignoredPackages = setOf(reactApplicationContext.packageName)
+        ).packageName
+
         sessionStartTimes.forEach { (pkg, startTs) ->
-            if (endTime > startTs) {
+            if (endTime > startTs && pkg == currentForegroundPackage) {
                 result.pushMap(buildSessionMap(pkg, startTs, endTime))
+            } else {
+                repairCount += 1
             }
+        }
+
+        if (repairCount > 0) {
+            val prefs = reactApplicationContext.getSharedPreferences("brainrot_prefs", Context.MODE_PRIVATE)
+            val today = getLocalDateString(System.currentTimeMillis())
+            prefs.edit().putInt("session_repair_count_$today", repairCount).apply()
         }
 
         return result
@@ -913,6 +937,20 @@ class UsageStatsModule(reactContext: ReactApplicationContext) : ReactContextBase
         prefs.edit().putInt(key, prefs.getInt(key, 0) + 1).apply()
     }
 
+    private fun persistRealtimeEvent(packageName: String, eventType: Int, timestamp: Long) {
+        val prefs = reactApplicationContext.getSharedPreferences("brainrot_prefs", Context.MODE_PRIVATE)
+        val eventLabel = if (eventType == UsageEvents.Event.MOVE_TO_FOREGROUND) {
+            "foreground"
+        } else {
+            "background"
+        }
+        prefs.edit()
+            .putString("last_realtime_event_package", packageName)
+            .putString("last_realtime_event_type", eventLabel)
+            .putLong("last_realtime_event_at", timestamp)
+            .apply()
+    }
+
     private fun getBatteryDiagnostics(): Pair<Int, Boolean> {
         return try {
             val batteryManager = reactApplicationContext.getSystemService(Context.BATTERY_SERVICE) as BatteryManager
@@ -923,6 +961,20 @@ class UsageStatsModule(reactContext: ReactApplicationContext) : ReactContextBase
             Pair(percent, charging)
         } catch (_: Exception) {
             Pair(-1, false)
+        }
+    }
+
+    private fun isIgnoringBatteryOptimizations(): Boolean {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) {
+            return true
+        }
+
+        return try {
+            val powerManager = reactApplicationContext.getSystemService(Context.POWER_SERVICE) as PowerManager
+            powerManager.isIgnoringBatteryOptimizations(reactApplicationContext.packageName)
+        } catch (e: Exception) {
+            Log.e(TAG, "Error checking battery optimization state", e)
+            false
         }
     }
 

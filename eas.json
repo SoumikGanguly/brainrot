@@ -9,7 +9,6 @@
 			"distribution": "internal",
 			"env": {
 				"EXPO_USE_COMMUNITY_AUTOLINKING": "1",
-				"NODE_ENV": "production",
 				"SENTRY_DISABLE_AUTO_UPLOAD": "true"
 			}
 		},

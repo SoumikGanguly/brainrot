@@ -664,15 +664,17 @@ export default function SettingsScreen() {
 
 		if (topic === "lockscreen") {
 			setSettingsHelperSheet({
-				title: "Show the fixed notification on the lock screen",
-				body: "Some phones hide Brainrot notifications on the lock screen until you allow them manually.",
+				title: "Show Brainrot on the lock screen",
+				body: "Some phones hide the fixed Brainrot notification on the lock screen until you allow lock-screen notifications manually.",
 				helperText:
-					"Open your phone's app settings for Brainrot and allow lock-screen notifications if the fixed status notification is missing there.",
-				primaryLabel: manufacturerInfo?.canOpenDirectly ? "Open app settings" : "Review steps",
+					"Open your phone's notification settings for Brainrot and turn on lock-screen notifications if the status notification is missing there.",
+				primaryLabel: manufacturerInfo?.canOpenDirectly ? "Open app settings" : "Got it",
 				secondaryLabel: "Later",
 				onPrimary: () => {
 					setSettingsHelperSheet(null);
-					void CapabilitiesService.openBackgroundReliabilitySettings("settings");
+					if (manufacturerInfo?.canOpenDirectly) {
+						void CapabilitiesService.openBackgroundReliabilitySettings("settings");
+					}
 				},
 				onSecondary: () => setSettingsHelperSheet(null),
 			});
@@ -680,12 +682,12 @@ export default function SettingsScreen() {
 		}
 
 		setSettingsHelperSheet({
-			title: manufacturerInfo?.title || "Keep Brainrot running reliably",
-			body: "Some phones need extra background or autostart settings even after the main permissions are granted.",
+			title: manufacturerInfo?.title || "Keep Brainrot running in the background",
+			body: "Some phones still need autostart, pop-up, or background activity enabled after the main permissions are granted.",
 			helperText:
 				manufacturerInfo?.instructions ||
-				"Review your phone-specific settings so Brainrot can keep tracking and blocking reliably.",
-			primaryLabel: manufacturerInfo?.canOpenDirectly ? "Open OEM settings" : "Got it",
+				"Open your phone's app settings for Brainrot and turn on any extra background allowances it needs.",
+			primaryLabel: manufacturerInfo?.canOpenDirectly ? "Open phone settings" : "Got it",
 			secondaryLabel: manufacturerInfo?.canOpenDirectly ? "Later" : undefined,
 			onPrimary: () => {
 				setSettingsHelperSheet(null);
@@ -997,9 +999,7 @@ export default function SettingsScreen() {
 							})
 						}
 					/>
-					{(monitoringDiagnostics?.batteryOptimizationIgnored === false ||
-						manufacturerInfo?.needsSpecialPermission ||
-						monitoringDiagnostics?.lockScreenNotificationGuidanceNeeded) && (
+					{monitoringDiagnostics?.batteryOptimizationIgnored === false && (
 						<View className="mt-sm rounded-2xl border border-[#E7DFFD] bg-[#FAF7FF] px-4 py-4">
 							<Text className="font-heading-semibold text-card-title text-text">
 								Phone-specific help
@@ -1013,22 +1013,6 @@ export default function SettingsScreen() {
 									description="Stops your phone from pausing Brainrot in the background."
 									actionLabel="Review"
 									onPress={() => openReliabilityHelper("battery")}
-								/>
-							) : null}
-							{manufacturerInfo?.needsSpecialPermission ? (
-								<PermissionAdviceRow
-									label="Review phone-specific background steps"
-									description="Some OEMs still need autostart, pop-up, or background allowances after the main permissions are granted."
-									actionLabel={manufacturerInfo.canOpenDirectly ? "Open" : "Review"}
-									onPress={() => openReliabilityHelper("oem")}
-								/>
-							) : null}
-							{monitoringDiagnostics?.lockScreenNotificationGuidanceNeeded ? (
-								<PermissionAdviceRow
-									label="Allow lock-screen notifications"
-									description="Useful if the fixed Brainrot notification disappears on your lock screen."
-									actionLabel="Review"
-									onPress={() => openReliabilityHelper("lockscreen")}
 								/>
 							) : null}
 						</View>

@@ -1,7 +1,7 @@
 {
   "expo": {
     "name": "Brainrot",
-    "slug": "brainrot",
+    "slug": "bainrot",
     "version": "1.0.0",
     "orientation": "portrait",
     "icon": "./assets/images/icon.png",
@@ -77,8 +77,9 @@
     "extra": {
       "router": {},
       "eas": {
-        "projectId": "81350bd8-7550-4574-8e64-2f8be1a04338"
+        "projectId": "b11c4442-8fb9-4764-b19f-3dd4ababcd2e"
       }
-    }
+    },
+    "owner": "kathakar-2"
   }
 }

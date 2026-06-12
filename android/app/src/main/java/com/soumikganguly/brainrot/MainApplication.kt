@@ -50,8 +50,8 @@ class MainApplication : Application(), ReactApplication, WorkConfiguration.Provi
     )
 
   // WorkManager configuration
-  override fun getWorkManagerConfiguration(): WorkConfiguration {
-    return if (BuildConfig.DEBUG) {
+  override val workManagerConfiguration: WorkConfiguration
+    get() = if (BuildConfig.DEBUG) {
       WorkConfiguration.Builder()
         .setMinimumLoggingLevel(Log.DEBUG)
         .build()
@@ -60,7 +60,6 @@ class MainApplication : Application(), ReactApplication, WorkConfiguration.Provi
         .setMinimumLoggingLevel(Log.ERROR)
         .build()
     }
-  }
 
   override fun onCreate() {
     super.onCreate()
